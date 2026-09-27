@@ -260,6 +260,17 @@ if ! $DRY_RUN; then
 fi
 
 # ----------------------------------------------------------------------------
+# 6b. Harness egress NetworkPolicy (DNS, Redis, relay, HTTPS — harness-egress-policy.yaml)
+# ----------------------------------------------------------------------------
+# Unconditional and BEFORE the Knative Service below: on any egress-enforcing CNI (OVN-K on
+# OCP, modern kindnet), a harness pod with no policy has unrestricted egress, and one that
+# picks up some OTHER egress policy first (e.g. control-plane.yaml's additive one) without
+# this base policy has DNS silently broken — every /turn credential exchange then fails with
+# "the harness is unavailable" because SH_CONTROL_PLANE_URL's hostname can't resolve.
+log_info "Deploying harness egress NetworkPolicy"
+apply_base "$SCRIPT_DIR/harness-egress-policy.yaml"
+
+# ----------------------------------------------------------------------------
 # 7. Harness Knative Service (+ SA/RBAC in service.yaml)
 # ----------------------------------------------------------------------------
 log_info "Deploying harness Knative Service"
