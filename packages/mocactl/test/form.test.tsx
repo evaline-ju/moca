@@ -1,7 +1,7 @@
 import { render } from 'ink-testing-library';
 import { describe, expect, it, vi } from 'vitest';
 import { Form, type FormField } from '../src/views/Form.js';
-import { KEY, tick, withTheme } from './helpers/ink.js';
+import { KEY, inputReady, tick, waitFor, withTheme } from './helpers/ink.js';
 
 const fields: FormField[] = [
   { key: 'name', label: 'Name' },
@@ -24,6 +24,26 @@ describe('Form', () => {
     );
     await type(stdin, 'anthropic', KEY.enter, KEY.enter, 'sk-test', KEY.enter);
     expect(onSubmit).toHaveBeenCalledWith({ name: 'anthropic', kind: 'bearer', token: 'sk-test' }); // notsecret
+  });
+
+  it('submits the full value when Enter arrives glued to the text in one stdin chunk', async () => {
+    // ink's own useInput doc: "if the user pastes text and it's more than one character, the
+    // callback will be called only once, and the whole string will be passed as input" -- with
+    // every key.* flag false, since the combined chunk doesn't match any single named key. Fast
+    // typing (or a paste, or tty/multiplexer buffering) can deliver a final character glued to the
+    // following Enter the exact same way. Before the fix, that Enter is silently swallowed as part
+    // of a literal `\r` appended to the field's text: the field never advances (no visible sign
+    // anything went wrong -- \r renders as nothing), and a confused Backspace removes the invisible
+    // \r first, then the intended last character -- which is how "litellm<Enter>" typed fast can
+    // end up stored as "litell".
+    const onSubmit = vi.fn();
+    const { stdin } = render(
+      withTheme(<Form title="Add" fields={[fields[0]]} onSubmit={onSubmit} onCancel={vi.fn()} />),
+    );
+    await waitFor(() => inputReady(stdin));
+    stdin.write('litellm\r');
+    await tick();
+    expect(onSubmit).toHaveBeenCalledWith({ name: 'litellm' });
   });
 
   it('masks secret input', async () => {

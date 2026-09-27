@@ -1,6 +1,54 @@
-import { Box, Text, useInput } from 'ink';
+import { Box, Text, useInput, type Key } from 'ink';
 import { useRef, useState } from 'react';
 import { useTheme } from '../theme/context.js';
+
+// ink's useInput doc: "if the user pastes text and it's more than one character, the callback
+// will be called only once, and the whole string will be passed as input" -- with every key.*
+// flag false, since the combined chunk doesn't match any single named key. Fast typing (not just
+// an explicit paste) can trigger the exact same delivery whenever the OS/tty/multiplexer buffers a
+// character together with the very next one, most dangerously the following Enter: a `\r` glued
+// onto the end of an otherwise-normal `input` string renders as nothing, so the field APPEARS
+// unchanged and the caller sees no submit — indistinguishable from nothing having happened. A
+// confused Backspace then removes that invisible `\r` first (still no visible change), and only
+// the SECOND Backspace removes the character the user actually meant to delete, so a fast
+// "litellm<Enter>" can end up stored as "litell". NO_KEY / CONTROL_KEYS below let the callback
+// detect this shape and replay it byte-by-byte through the same per-key logic, so each control
+// byte does what it would have done had it arrived alone. Deliberately narrow: only the
+// single-byte controls this form's own handler reacts to (Return, Tab, Backspace/Delete, a bare
+// Escape) are decoded -- multi-byte sequences (arrow keys) landing mid-burst are a much rarer
+// shape for typing text into a field, and correctly splitting arbitrary ANSI escapes out of a raw
+// byte run is a full terminal-input parser, not a targeted fix for the failure seen in practice.
+const NO_KEY: Key = {
+  upArrow: false,
+  downArrow: false,
+  leftArrow: false,
+  rightArrow: false,
+  pageDown: false,
+  pageUp: false,
+  home: false,
+  end: false,
+  return: false,
+  escape: false,
+  ctrl: false,
+  shift: false,
+  tab: false,
+  backspace: false,
+  delete: false,
+  meta: false,
+  super: false,
+  hyper: false,
+  capsLock: false,
+  numLock: false,
+};
+const CONTROL_KEYS: Record<string, Partial<Key>> = {
+  '\r': { return: true },
+  '\n': { return: true },
+  '\t': { tab: true },
+  '\x7f': { backspace: true },
+  '\x08': { backspace: true },
+  '\x1b': { escape: true },
+};
+const hasAnyFlag = (key: Key): boolean => Object.values(key).some((v) => v === true);
 
 export interface FormField {
   key: string;
@@ -73,7 +121,7 @@ export function Form({ title, fields, onSubmit, onCancel, validate, error }: Pro
   const shown = shownOf(values);
   const at = Math.min(focus, shown.length - 1);
 
-  useInput((input, key) => {
+  const handleKey = (input: string, key: Key) => {
     const valuesNow = valuesRef.current;
     const shownNow = shownOf(valuesNow);
     const atNow = Math.min(focusRef.current, shownNow.length - 1);
@@ -102,6 +150,17 @@ export function Form({ title, fields, onSubmit, onCancel, validate, error }: Pro
     }
     if (input && !key.ctrl && !key.meta)
       setFieldValue(fieldNow.key, (valuesNow[fieldNow.key] ?? '') + input);
+  };
+
+  useInput((input, key) => {
+    if (!hasAnyFlag(key) && input.length > 1 && /[\r\n\t\x7f\x08\x1b]/.test(input)) {
+      for (const ch of input) {
+        const mapped = CONTROL_KEYS[ch];
+        handleKey(mapped ? '' : ch, mapped ? { ...NO_KEY, ...mapped } : NO_KEY);
+      }
+      return;
+    }
+    handleKey(input, key);
   });
 
   return (
