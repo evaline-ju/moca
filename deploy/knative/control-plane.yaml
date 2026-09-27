@@ -171,6 +171,8 @@ spec:
       serviceAccountName: sh-control-plane
       securityContext:
         runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: sh-control-plane
