@@ -1,4 +1,8 @@
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { unlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 /**
  * The Kubernetes API, reached by spawning `kubectl` -- which the runtime image already installs
@@ -7,18 +11,16 @@ import { spawn } from 'node:child_process';
  * one injectable runner, so every Kubernetes interaction is unit-testable without a cluster.
  *
  * Two properties the builders exist to make assertable:
- *   1. A patch body rides on STDIN (`--patch-file=/dev/stdin`), never in argv -- argv is readable
+ *   1. A patch body rides on a temp file (`--patch-file=<path>`), never in argv -- argv is readable
  *      through /proc/<pid>/cmdline by anything sharing the pod.
  *   2. No Secret operation is ever a LIST. Spec §6.5's Role deliberately omits the `list` verb, so
  *      any code path needing it would 403 in production; naming every object keeps that RBAC usable.
  */
 export type RunKubectl = (args: string[], stdin?: string) => Promise<string>;
 
-export const defaultRunKubectl: RunKubectl = (args, stdin) =>
-  new Promise((resolve, reject) => {
-    const child = spawn('kubectl', args, {
-      stdio: [stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
-    });
+function spawnKubectl(args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('kubectl', args, { stdio: ['ignore', 'pipe', 'pipe'] });
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     child.stdout?.on('data', (d: Buffer) => out.push(d));
@@ -37,10 +39,30 @@ export const defaultRunKubectl: RunKubectl = (args, stdin) =>
         ),
       );
     });
-    if (stdin !== undefined) {
-      child.stdin?.end(stdin);
-    }
   });
+}
+
+export const defaultRunKubectl: RunKubectl = async (args, stdin) => {
+  if (stdin === undefined) return spawnKubectl(args);
+
+  /*
+   * `--patch-file=/dev/stdin` can't be fed through a Node child's stdin pipe: libuv backs
+   * `stdio: 'pipe'` with a UNIX-domain socket rather than a plain pipe(2) (confirmed with
+   * `stat -L /proc/self/fd/0` on the deployed image: `socket:[...]`), and kubectl reads
+   * `--patch-file` by re-opening the given path -- which the kernel refuses for a socket reached
+   * through /proc/<pid>/fd (ENXIO, "no such device or address"). A real temp file sidesteps the
+   * whole class: it's an ordinary path any program can open, and its CONTENT still never touches
+   * argv -- only its randomly-named, briefly-lived path does, which is what this module exists to
+   * keep out of /proc/<pid>/cmdline.
+   */
+  const path = join(tmpdir(), `sh-cp-patch-${randomBytes(16).toString('hex')}.json`);
+  await writeFile(path, stdin, { mode: 0o600 });
+  try {
+    return await spawnKubectl(args.map((a) => a.replaceAll('/dev/stdin', path)));
+  } finally {
+    await unlink(path).catch(() => {});
+  }
+};
 
 export function buildCreateSecretArgs(name: string, namespace: string): string[] {
   return ['create', 'secret', 'generic', name, '-n', namespace];

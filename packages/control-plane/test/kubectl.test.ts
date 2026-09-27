@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   buildCreateSecretArgs,
   buildDeleteSecretArgs,
@@ -6,6 +9,7 @@ import {
   buildGetPodPhaseArgs,
   buildGetSecretArgs,
   buildPatchSecretArgs,
+  defaultRunKubectl,
   isAlreadyExists,
 } from '../src/kubectl.js';
 
@@ -116,5 +120,73 @@ describe('isAlreadyExists', () => {
     );
     expect(isAlreadyExists('not an error')).toBe(false);
     expect(isAlreadyExists(undefined)).toBe(false);
+  });
+});
+
+describe('defaultRunKubectl', () => {
+  // A stand-in `kubectl` on PATH that does what the real binary does with `--patch-file=<path>`:
+  // opens that path BY NAME and prints its content. This is the exact operation that fails when
+  // fed `/dev/stdin` as spawned from a Node child: libuv backs `stdio: 'pipe'` with a UNIX-domain
+  // socket (verified with `stat -L /proc/self/fd/0` inside the deployed container: `socket:[...]`),
+  // and the kernel refuses to re-open a socket by its /proc/<pid>/fd path (ENXIO) -- so a program
+  // that reads fd 0 directly (`cat`, no args) never notices, but one that reopens it by NAME does.
+  let binDir: string;
+  let originalPath: string | undefined;
+
+  beforeEach(() => {
+    binDir = mkdtempSync(join(tmpdir(), 'fake-kubectl-'));
+    const script = [
+      '#!/usr/bin/env node',
+      "const fs = require('node:fs');",
+      "const patchArg = process.argv.slice(2).find((a) => a.startsWith('--patch-file='));",
+      "if (!patchArg) { console.error('no --patch-file'); process.exit(1); }",
+      'try {',
+      "  process.stdout.write(fs.readFileSync(patchArg.slice('--patch-file='.length), 'utf8'));",
+      '} catch (err) {',
+      "  console.error('OPEN_FAILED: ' + err.message);",
+      '  process.exit(1);',
+      '}',
+      '',
+    ].join('\n');
+    const kubectlPath = join(binDir, 'kubectl');
+    writeFileSync(kubectlPath, script);
+    chmodSync(kubectlPath, 0o755);
+    originalPath = process.env.PATH;
+    process.env.PATH = `${binDir}:${originalPath ?? ''}`;
+  });
+
+  afterEach(() => {
+    process.env.PATH = originalPath;
+    rmSync(binDir, { recursive: true, force: true });
+  });
+
+  it('delivers patch content to a child that reopens --patch-file by path', async () => {
+    const out = await defaultRunKubectl(
+      buildPatchSecretArgs('sh-cred-abc', 'sh-credentials'),
+      '{"hello":"world"}',
+    );
+    expect(out).toBe('{"hello":"world"}');
+  });
+
+  it('never hands the child the literal /dev/stdin path', async () => {
+    // Regression guard independent of the kernel quirk above: whatever path reaches the child
+    // must be a real, openable file -- not the magic symlink that triggered it. Overwrites the
+    // fake `kubectl` from beforeEach with one that reports its own argv instead of reading a file.
+    writeFileSync(
+      join(binDir, 'kubectl'),
+      [
+        '#!/usr/bin/env node',
+        'process.stdout.write(JSON.stringify(process.argv.slice(2)));',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(join(binDir, 'kubectl'), 0o755);
+
+    const out = await defaultRunKubectl(
+      buildPatchSecretArgs('sh-cred-abc', 'sh-credentials'),
+      '{}',
+    );
+    const receivedArgs: string[] = JSON.parse(out);
+    expect(receivedArgs.join(' ')).not.toContain('/dev/stdin');
   });
 });
