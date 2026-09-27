@@ -98,9 +98,10 @@ export function buildHandler(deps: CpDeps): (req: IncomingMessage, res: ServerRe
           } catch {
             throw new CpError('invalid_json', 'body is not valid JSON');
           }
-        } else if (matched.route.operationId !== 'startDeviceAuth') {
-          // startDeviceAuth legitimately takes no body; every other POST/PUT needs one, and an empty
-          // body must be a 400 rather than an `undefined` a handler then misreads as `{}`.
+        } else if (matched.route.bodyRequired !== false) {
+          // A route whose handler never reads ctx.body (startDeviceAuth, mintSessionToken) sets
+          // bodyRequired: false; every other POST/PUT needs one, and an empty body must be a 400
+          // rather than an `undefined` a handler then misreads as `{}`.
           throw new CpError('invalid_json', 'body is required');
         }
       }

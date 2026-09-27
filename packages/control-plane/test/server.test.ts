@@ -84,6 +84,24 @@ describe('routing', () => {
     expect((res.json() as { error: string }).error).toBe('invalid_json');
   });
 
+  it('mints a session token from an empty request body — mocactl sends no body at all', async () => {
+    // mintSessionToken's handler never reads ctx.body (it takes everything from the path param and
+    // the caller's own principal), so a client that sends no body -- exactly what
+    // ControlPlaneApi.mintSessionToken does -- must not be rejected by the router's generic
+    // "POST/PUT needs a body" guard the way startDeviceAuth is deliberately exempted from it.
+    const token = await apiToken();
+    const created = await request('POST', '/v1/sessions', {
+      body: {},
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const sessionId = (created.json() as { sessionId: string }).sessionId;
+    const res = await request('POST', `/v1/sessions/${sessionId}/token`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(200);
+    expect(res.json()).toMatchObject({ token: expect.any(String) });
+  });
+
   it('sends a JSON content type on a JSON body and none on 204', async () => {
     const token = await apiToken();
     const created = await request('POST', '/v1/sessions', {

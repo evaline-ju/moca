@@ -19,6 +19,13 @@ export interface RouteSpec {
   sessionScoped: boolean;
   /** A query parameter that requires `roles` to include `admin` (spec §4.1). */
   adminOnlyQuery?: string;
+  /**
+   * Whether a POST/PUT route needs a request body. Defaults to true (most do); a route whose
+   * handler takes everything from the path param and the caller's own principal -- startDeviceAuth,
+   * mintSessionToken -- sets this false so the router's generic empty-body guard doesn't 400 a
+   * client that correctly sends nothing. Ignored for GET/DELETE, which never read a body.
+   */
+  bodyRequired?: boolean;
   /** Stable key the router and the OpenAPI drift test both use to name the operation. */
   operationId: string;
 }
@@ -39,6 +46,7 @@ export const ROUTES: readonly RouteSpec[] = [
     path: '/v1/auth/device',
     auth: 'none',
     sessionScoped: false,
+    bodyRequired: false,
     operationId: 'startDeviceAuth',
   },
   {
@@ -90,6 +98,7 @@ export const ROUTES: readonly RouteSpec[] = [
     path: '/v1/sessions/{id}/token',
     auth: 'api',
     sessionScoped: true,
+    bodyRequired: false,
     operationId: 'mintSessionToken',
   },
   {
