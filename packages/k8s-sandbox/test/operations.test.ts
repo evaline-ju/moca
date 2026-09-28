@@ -153,35 +153,35 @@ describe('bash ops', () => {
     expect(r).toEqual({ exitCode: 0 });
   });
 
-  it('injects env as a non-leaking, per-invocation prefix when env is provided', async () => {
+  it('injects only allowlisted env, as a per-invocation prefix', async () => {
     const { fn, calls } = fakeExec({ exitCode: 0 });
     const ops = createPodBashOps(fn, cfg);
-    await ops.exec('echo $FOO', '/head', { onData: vi.fn(), env: { FOO: 'bar baz' } });
-    expect(calls[0].command).toBe("cd '/workspace' && env FOO='bar baz' bash -c 'echo $FOO'");
+    await ops.exec('echo $LANG', '/head', { onData: vi.fn(), env: { LANG: 'C.UTF-8' } });
+    expect(calls[0].command).toBe("cd '/workspace' && env LANG='C.UTF-8' bash -c 'echo $LANG'");
   });
 
-  it('skips env keys whose value is undefined', async () => {
-    const { fn, calls } = fakeExec({ exitCode: 0 });
-    const ops = createPodBashOps(fn, cfg);
-    await ops.exec('true', '/head', { onData: vi.fn(), env: { A: '1', B: undefined } });
-    expect(calls[0].command).toBe("cd '/workspace' && env A='1' bash -c 'true'");
-  });
-
-  it('emits the M2 form (no prefix) when env is absent or empty', async () => {
-    const { fn, calls } = fakeExec({ exitCode: 0 });
-    const ops = createPodBashOps(fn, cfg);
-    await ops.exec('echo hi', '/head', { onData: vi.fn(), env: {} });
-    expect(calls[0].command).toBe("cd '/workspace' && echo hi");
-  });
-
-  it('drops env keys that are not valid POSIX names (no injection)', async () => {
+  it('never forwards a non-allowlisted variable, however it is named', async () => {
     const { fn, calls } = fakeExec({ exitCode: 0 });
     const ops = createPodBashOps(fn, cfg);
     await ops.exec('true', '/head', {
       onData: vi.fn(),
-      env: { GOOD: '1', 'BAD KEY': 'x', 'PATH=/evil; rm -rf /': 'y' },
+      env: {
+        TZ: 'UTC',
+        ANTHROPIC_API_KEY: 'sk-ant-planted', // notsecret
+        SANDBOX_TOKEN: 'planted', // notsecret
+        FOO: 'bar',
+        'PATH=/evil; rm -rf /': 'y',
+      },
     });
-    expect(calls[0].command).toBe("cd '/workspace' && env GOOD='1' bash -c 'true'");
+    expect(calls[0].command).toBe("cd '/workspace' && env TZ='UTC' bash -c 'true'");
+    expect(calls[0].command).not.toContain('planted');
+  });
+
+  it('emits the M2 form (no prefix) when nothing allowlisted is present', async () => {
+    const { fn, calls } = fakeExec({ exitCode: 0 });
+    const ops = createPodBashOps(fn, cfg);
+    await ops.exec('echo hi', '/head', { onData: vi.fn(), env: { HOME: '/root', USER: 'x' } });
+    expect(calls[0].command).toBe("cd '/workspace' && echo hi");
   });
 
   it('reports a cap-truncated command as exit 137 rather than success', async () => {

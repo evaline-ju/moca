@@ -35,3 +35,4 @@ export {
   type SandboxWorkerServer,
   type SandboxExecServer,
 } from './gen/sandbox/v1/sandbox.js';
+export { SANDBOX_ENV_ALLOW, sandboxEnv } from './sandbox-env.js';
