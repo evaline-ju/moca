@@ -4,6 +4,7 @@
   "version": "0.0.0",
   "exports": {
     ".": "./src/index.ts",
+    "./ambient-sentinel": "./src/ambient-sentinel.ts",
     "./run-turn": "./src/run-turn.ts",
     "./turn-stream": "./src/turn-stream.ts",
     "./run-leaf": "./src/run-leaf.ts",

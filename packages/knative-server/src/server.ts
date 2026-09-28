@@ -27,13 +27,13 @@ import {
 } from './context-service.js';
 import { CpError, statusFor } from '@sh/control-plane';
 import {
-  assertKeysetUsable,
   resolveTurnAuth,
   runtimeFieldsForTurn,
   turnAuthDepsFromEnv,
   type TurnAuth,
   type TurnAuthDeps,
 } from './turn-auth.js';
+import { prepareServerProcess } from './server-process.js';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
@@ -692,10 +692,9 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
 }
 
 export function startServer(port = PORT): ReturnType<typeof createServer> {
-  // Before anything binds: a malformed SH_SESSION_TOKEN_PUBLIC_KEYS must be a boot failure naming the
-  // bad entry, not a Ready pod that 503s every turn. /healthz and /readyz do not touch the keyset, so
-  // this is the only boot-time signal there is.
-  assertKeysetUsable(process.env);
+  // Before anything binds: the shared boot function refuses a malformed keyset and an inconsistent
+  // tenancy configuration, and scrubs ambient credentials under multi tenancy (MI1 §5 R2).
+  prepareServerProcess(process.env);
 
   const server = createServer(handler);
 

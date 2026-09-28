@@ -28,6 +28,7 @@ import {
 } from './select-sandbox.js';
 import { checkpointExtension } from './checkpoint-extension.js';
 import { budgetVoterExtension, branchSpend } from './budget-voter.js';
+import { AMBIENT_KEY_SENTINEL } from './ambient-sentinel.js';
 import { toolChoiceExtension } from './tool-choice-extension.js';
 // Type-only import (erased at compile time) so it is safe against the run-leaf↔run-turn value
 // cycle: run-leaf.ts imports values from run-turn.js, but a `import type` adds no runtime edge.
@@ -478,7 +479,7 @@ export interface TurnResult {
  *
  * When a gateway base URL or auth token is in play (config or env), rewrite the model to
  * call the gateway with Bearer auth and strip `x-api-key` (the gateway authenticates via
- * Authorization). Also seeds `ANTHROPIC_API_KEY` from the auth token when unset, since some
+ * Authorization). Also seeds `ANTHROPIC_API_KEY` with a constant sentinel when unset, since some
  * pi-ai code paths still read the env var. Returns the base model unchanged when neither a
  * gateway base nor a token is configured (direct-key mode).
  *
@@ -500,11 +501,12 @@ export function applyModelGateway<M extends { headers?: Record<string, unknown> 
     config?.upstreamCredential?.value ||
     config?.anthropicAuthToken ||
     process.env.ANTHROPIC_AUTH_TOKEN;
-  // Intentional process.env mutation: some pi-ai code paths read ANTHROPIC_API_KEY at
-  // invocation time, so seed it from the auth token. This now runs from two call sites
-  // (runTurn and runLeaf via applyModelGateway) — do NOT "clean it up" into a local.
+  // Pi resolves the request key BY PROVIDER NAME, so ANTHROPIC_API_KEY must exist whenever a Bearer
+  // token is in play. It is seeded with a constant that names no one — never with the caller's
+  // token, which would make the first caller's credential process-wide (MI1 §5 R2). The Bearer
+  // header below carries the real token and `x-api-key: null` strips the sentinel.
   if (authToken && !process.env.ANTHROPIC_API_KEY) {
-    process.env.ANTHROPIC_API_KEY = authToken;
+    process.env.ANTHROPIC_API_KEY = AMBIENT_KEY_SENTINEL;
   }
   const gatewayBase = config?.anthropicBaseUrl || process.env.ANTHROPIC_BASE_URL;
   if (!gatewayBase && !authToken) return baseModel;
