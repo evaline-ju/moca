@@ -7,11 +7,13 @@ import "strings"
 // worker, not the workload. Everything else in the container's environment — the image's ENV, which
 // toolchains depend on — still reaches commands.
 var workerSettings = map[string]bool{
-	"SANDBOX_TOKEN": true,
-	"RELAY_ADDR":    true,
-	"SANDBOX_ID":    true,
-	"SANDBOX_IMAGE": true,
-	"SANDBOX_TRUST": true,
+	"SANDBOX_TOKEN":         true,
+	"RELAY_ADDR":            true,
+	"RELAY_TLS":             true,
+	"SANDBOX_ID":            true,
+	"SANDBOX_IMAGE":         true,
+	"SANDBOX_TRUST":         true,
+	"WORKER_MAX_CONCURRENT": true,
 }
 
 // workerSettingPrefixes cover per-sandbox token overrides and harness/MOCA settings, none of which a

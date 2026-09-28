@@ -522,11 +522,13 @@ func lineCount(t *testing.T, path string) int {
 }
 
 // A command — and anything it starts — must not see the worker's own settings (MI1 §5 R6). The
-// probe runs in a GRANDCHILD (bash -> sh -> printenv) because inheritance is transitive.
+// probe runs in a GRANDCHILD (bash -> sh -> env) because inheritance is transitive.
 func TestCommandsDoNotInheritWorkerSettings(t *testing.T) {
 	t.Setenv("SANDBOX_TOKEN", "planted-token") // notsecret
 	t.Setenv("RELAY_ADDR", "planted-relay:9443")
+	t.Setenv("RELAY_TLS", "planted-tls")
 	t.Setenv("SANDBOX_ID", "planted-id")
+	t.Setenv("WORKER_MAX_CONCURRENT", "planted-max")
 	t.Setenv("SANDBOX_TOKEN_sbx1", "planted-per-sandbox") // notsecret
 	t.Setenv("MOCA_RELAY_EXEC_TOKEN", "planted-exec")     // notsecret
 	t.Setenv("SH_SOMETHING", "planted-sh")
