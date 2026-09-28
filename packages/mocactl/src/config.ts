@@ -116,8 +116,10 @@ export function loadConfig(paths: Paths): { config: TuiConfig; exists: boolean; 
   }
 }
 
-// Write-then-rename so a crash never leaves a half-written file; chmod because the create mode is
-// masked by the umask.
+// Write-then-rename so a crash never leaves a half-written file. The chmods are not about the umask
+// (it can only clear bits, so a create mode is already an upper bound): `mkdir -p` leaves an
+// existing directory's mode alone, and the predictable `<path>.<pid>.tmp` can be a leftover from a
+// crashed run, which writeFileSync opens without applying `mode`.
 function writePrivate(path: string, dir: string, data: string): void {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);

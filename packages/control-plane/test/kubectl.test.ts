@@ -1,7 +1,14 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import * as crypto from 'node:crypto';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// Partial mock: randomBytes stays real unless a test pins the temp file's name to force a collision.
+vi.mock('node:crypto', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:crypto')>();
+  return { ...actual, randomBytes: vi.fn(actual.randomBytes) };
+});
 import {
   buildCreateSecretArgs,
   buildDeleteSecretArgs,
@@ -188,5 +195,43 @@ describe('defaultRunKubectl', () => {
     );
     const receivedArgs: string[] = JSON.parse(out);
     expect(receivedArgs.join(' ')).not.toContain('/dev/stdin');
+  });
+
+  it('writes the plaintext patch file 0600 even under a wide-open umask', async () => {
+    // The review's scenario: a permissive umask. It can only clear bits, so 0600 stays 0600.
+    writeFileSync(
+      join(binDir, 'kubectl'),
+      [
+        '#!/usr/bin/env node',
+        "const fs = require('node:fs');",
+        "const p = process.argv.slice(2).find((a) => a.startsWith('--patch-file=')).slice(13);",
+        'process.stdout.write((fs.statSync(p).mode & 0o777).toString(8));',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(join(binDir, 'kubectl'), 0o755);
+    const previous = process.umask(0o000);
+    try {
+      const mode = await defaultRunKubectl(buildPatchSecretArgs('s', 'n'), '{"stringData":{}}');
+      expect(mode).toBe('600');
+    } finally {
+      process.umask(previous);
+    }
+  });
+
+  it('refuses a file already at the temp path instead of writing through it', async () => {
+    // Pin the "random" name so the collision is certain, and plant a file there first.
+    vi.mocked(crypto.randomBytes).mockReturnValueOnce(Buffer.alloc(16) as never);
+    const planted = join(tmpdir(), `sh-cp-patch-${'00'.repeat(16)}.json`);
+    writeFileSync(planted, 'planted', { mode: 0o644 });
+    try {
+      await expect(
+        defaultRunKubectl(buildPatchSecretArgs('s', 'n'), '{"stringData":{"k":"secret"}}'),
+      ).rejects.toThrow(/EEXIST/);
+      expect(readFileSync(planted, 'utf8')).toBe('planted');
+    } finally {
+      rmSync(planted, { force: true });
+    }
+    expect(existsSync(planted)).toBe(false);
   });
 });

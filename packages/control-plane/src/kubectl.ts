@@ -56,7 +56,12 @@ export const defaultRunKubectl: RunKubectl = async (args, stdin) => {
    * keep out of /proc/<pid>/cmdline.
    */
   const path = join(tmpdir(), `sh-cp-patch-${randomBytes(16).toString('hex')}.json`);
-  await writeFile(path, stdin, { mode: 0o600 });
+  // The body carries a credential in plaintext (stringData), so the file must be ours and private.
+  // `wx` (O_CREAT|O_EXCL) creates it or fails: it never opens a file or symlink already at the
+  // path, whose existing mode the `mode` option would not change. On a file this call creates,
+  // 0o600 is an upper bound -- a umask can only clear bits -- so no umask makes it readable by
+  // anyone else, and no chmod is needed.
+  await writeFile(path, stdin, { mode: 0o600, flag: 'wx' });
   try {
     return await spawnKubectl(args.map((a) => a.replaceAll('/dev/stdin', path)));
   } finally {
