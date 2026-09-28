@@ -61,10 +61,13 @@ Across those two runs, the script does the following, in this order:
 3. Installs `systemd/sh-supervisor.service` and `systemd/sh-relay.service` into
    `/etc/systemd/system`, reloads the daemon, and enables `podman-restart.service` so the
    containers below come back after a reboot (see "Reboots" below).
-4. Starts a Redis container and `SH_SANDBOX_COUNT` (default 2) sandbox containers via podman,
-   each wired to reach the relay and to authenticate to it (see "Sandbox container networking
-   and the relay token" below).
-5. Enables **and starts** `sh-relay.service`, but only **enables** `sh-supervisor.service` — it
+4. Creates a dedicated `moca-sandbox` podman network (fixed subnet `10.89.40.0/24`, gateway
+   `10.89.40.1`) and installs an nftables table that confines it — see "Sandbox container
+   networking and the relay token" below.
+5. Starts a Redis container and `SH_SANDBOX_COUNT` (default 2) sandbox containers via podman,
+   each on that network, wired to reach the relay and to authenticate to it (see "Sandbox
+   container networking and the relay token" below).
+6. Enables **and starts** `sh-relay.service`, but only **enables** `sh-supervisor.service` — it
    is deliberately not started yet (see below).
 
 `SH_TURNS_PER_WORKER` ships empty on purpose (see below), and `readConfig` throws on blank, so
@@ -133,23 +136,43 @@ Whichever way you set it, the value must match each sandbox worker's `SANDBOX_TO
 starts, so editing this one file is enough.
 
 **Reaching the host from a container.** `host.containers.internal` is podman's documented
-analogue of Docker's `host.docker.internal` (`podman-run(1)`'s `host-gateway` special value).
-`setup-vm.sh` passes `--add-host host.containers.internal:host-gateway` explicitly on every
-`podman run` so this mapping does not depend on netavark's automatic `/etc/hosts` population,
-which differs between rootful and rootless podman and across versions. The default address is
-therefore `host.containers.internal:<port>`, where `<port>` comes from `SH_RELAY_PORT` in the
-installed `relay.env` (falling back to `8443`, the code's own default, if that line is
-missing). Override the whole address with `SH_SANDBOX_RELAY_ADDR` if this default does not
-resolve on your VM's actual network setup.
+analogue of Docker's `host.docker.internal`. Podman's own `host-gateway` special value resolves
+it to whatever the host actually listens on — every port bound to `0.0.0.0`, not just the
+relay's — so `setup-vm.sh` instead runs sandboxes on their own dedicated podman network,
+`moca-sandbox` (fixed subnet `MOCA_SANDBOX_SUBNET`, default `10.89.40.0/24`), and pins
+`host.containers.internal` to that network's gateway (`MOCA_SANDBOX_GATEWAY`, default
+`10.89.40.1`) with an explicit `--add-host` on every `podman run`, rather than depending on
+netavark's automatic `/etc/hosts` population (which differs between rootful and rootless podman
+and across versions). The default address is therefore `host.containers.internal:<port>`, where
+`<port>` comes from `SH_RELAY_PORT` in the installed `relay.env` (falling back to `8443`, the
+code's own default, if that line is missing). Override the whole address with
+`SH_SANDBOX_RELAY_ADDR` if this default does not resolve on your VM's actual network setup.
+
+**Confining the sandbox network to the relay's attach port (MI1 R8).** A dedicated network only
+changes what address a sandbox dials — by itself it does not stop a sandbox from reaching
+anything else the host listens on, since podman still routes the whole subnet to the host
+through that gateway. `setup-vm.sh` also renders an nftables table
+(`$SH_ENV_DIR/moca-sandbox.nft`, table `inet moca_sandbox`) that drops all traffic from the
+`moca-sandbox` subnet to the host **except** the relay's attach port (`SH_RELAY_PORT`) and DNS
+(port 53, answered by podman's own resolver on the gateway), and loads it immediately with
+`nft -f`. `deploy/vm/systemd/moca-sandbox-firewall.service`, a oneshot unit ordered `Before=`
+`sh-relay.service` and `podman-restart.service`, re-loads that same table on every boot, so the
+restriction survives a reboot and is in place before the relay — and so before any sandbox
+container — starts. The table only filters the `input` hook (traffic addressed to the host
+itself); forwarded traffic (outbound internet access from a sandbox) is untouched in this
+round — that is MI1 S5's `moca-egress` work, not this one.
 
 **This is the item in this deployment layer least verified on real hardware.** Nobody has run
-this script against an actual podman installation; `host.containers.internal` plus an explicit
-`--add-host` is the documented, version-independent mechanism, but rootful vs. rootless podman,
-firewall rules, and SELinux/AppArmor policy can all still block the container from reaching the
-host's bound port in ways a unit test cannot see. If a sandbox container cannot attach on a
-real VM, `SH_SANDBOX_RELAY_ADDR` (or, if podman itself cannot resolve
+this script against an actual podman installation; `host.containers.internal` pinned to the
+`moca-sandbox` gateway, plus an explicit `--add-host`, is the documented, version-independent
+mechanism, but rootful vs. rootless podman, firewall rules, and SELinux/AppArmor policy can all
+still block the container from reaching the host's bound port in ways a unit test cannot see.
+The nftables rule above and the gateway alias fall in the same gap: the shell tests mock
+`podman` and `nft`, so nothing here has confirmed against a real kernel that the attach port is
+actually reachable and everything else is actually dropped. If a sandbox container cannot
+attach on a real VM, `SH_SANDBOX_RELAY_ADDR` (or, if podman itself cannot resolve
 `host.containers.internal`, the VM's actual gateway or bridge IP) is the override to reach for
-first.
+first; `sudo nft list table inet moca_sandbox` shows the loaded rules.
 
 ## Reboots
 

@@ -20,6 +20,11 @@
 #                          the host from inside a container is the part of this script least
 #                          verified on real hardware -- override this if the default does not
 #                          resolve on your VM (see deploy/vm/README.md).
+#   MOCA_SANDBOX_SUBNET    Dedicated podman network subnet for sandbox containers (default
+#                          10.89.40.0/24). MI1 R8: sandboxes no longer share the default podman
+#                          network, so the firewall below can name this subnet precisely.
+#   MOCA_SANDBOX_GATEWAY   Gateway address on that subnet (default 10.89.40.1); also what
+#                          host.containers.internal resolves to inside a sandbox container.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,6 +33,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${SH_INSTALL_DIR:=/opt/serverless-harness}"
 : "${SH_SANDBOX_COUNT:=2}"
 : "${SANDBOX_IMAGE:=ghcr.io/rossoctl/serverless-harness-sandbox:latest}"
+MOCA_SANDBOX_SUBNET="${MOCA_SANDBOX_SUBNET:-10.89.40.0/24}"
+MOCA_SANDBOX_GATEWAY="${MOCA_SANDBOX_GATEWAY:-10.89.40.1}"
 
 log() { printf '==> %s\n' "$*"; }
 
@@ -271,14 +278,48 @@ ensure_exec_token() {
   fi
 }
 
+# Sandboxes run on their OWN podman network (MI1 §5 R8), with a fixed subnet so the firewall below
+# can name it. --ignore: a re-run finds it already there. If an operator pre-created moca-sandbox
+# with another subnet, set MOCA_SANDBOX_SUBNET/MOCA_SANDBOX_GATEWAY to match it.
+ensure_sandbox_network() {
+  podman network create --ignore --subnet "$MOCA_SANDBOX_SUBNET" --gateway "$MOCA_SANDBOX_GATEWAY" moca-sandbox
+}
+
+# Traffic from the sandbox subnet TO THIS HOST is dropped except the relay's attach port and DNS
+# (podman's resolver answers on the gateway). Forwarded (internet) traffic is untouched in S1; MI1
+# S5 routes it through moca-egress. The declare/delete/redeclare idiom makes `nft -f` replace the
+# table atomically, so a re-run never stacks duplicate rules.
+install_sandbox_firewall() {
+  local attach nft="$SH_ENV_DIR/moca-sandbox.nft"
+  attach="$(relay_port)"
+  cat >"$nft" <<NFT
+table inet moca_sandbox
+delete table inet moca_sandbox
+table inet moca_sandbox {
+  chain input {
+    type filter hook input priority filter; policy accept;
+    ip saddr $MOCA_SANDBOX_SUBNET ct state established,related accept
+    ip saddr $MOCA_SANDBOX_SUBNET tcp dport $attach accept
+    ip saddr $MOCA_SANDBOX_SUBNET meta l4proto { tcp, udp } th dport 53 accept
+    ip saddr $MOCA_SANDBOX_SUBNET counter drop
+  }
+}
+NFT
+  nft -f "$nft"
+  install -m 0644 "$SCRIPT_DIR/systemd/moca-sandbox-firewall.service" "$SH_UNIT_DIR/"
+  systemctl daemon-reload
+  systemctl enable moca-sandbox-firewall.service
+}
+
 # Reaching the host's relay port from inside a container is the one piece of this deployment
 # most likely to need a real VM run to confirm -- see the report's "Still unverified" section.
 # host.containers.internal is podman's documented analogue of Docker's host.docker.internal
-# (podman-run(1): the host-gateway special string). Passing --add-host explicitly on every
-# `podman run` below makes that mapping deterministic rather than depending on netavark's
-# automatic /etc/hosts population, which differs between rootful and rootless podman and
-# across versions. SH_SANDBOX_RELAY_ADDR overrides the whole address if this default does not
-# reach the relay on your VM's actual network setup.
+# (podman-run(1): the host-gateway special string), but the alias is now pinned to the
+# moca-sandbox gateway rather than podman's host-gateway value: host-gateway resolves to whatever
+# the host actually listens on, which is every port bound to 0.0.0.0, not just the relay's attach
+# port (MI1 R8). install_sandbox_firewall is what actually restricts that reachability;
+# --add-host here only controls what address a sandbox dials. SH_SANDBOX_RELAY_ADDR overrides the
+# whole address if this default does not reach the relay on your VM's actual network setup.
 sandbox_relay_addr() {
   echo "${SH_SANDBOX_RELAY_ADDR:-host.containers.internal:$(relay_port)}"
 }
@@ -297,7 +338,8 @@ start_sandboxes() {
     # secret. The token is the whole of the relay's authentication (makeDefaultValidateToken is
     # fail-closed), so holding it means being able to attach as a sandbox, i.e. to become an executor.
     SANDBOX_TOKEN="$token" podman run -d --name "sh-sandbox-$i" --replace --restart=always \
-      --add-host host.containers.internal:host-gateway \
+      --network moca-sandbox \
+      --add-host "host.containers.internal:$MOCA_SANDBOX_GATEWAY" \
       -e "SANDBOX_ID=sh-sandbox-$i" \
       -e "RELAY_ADDR=$addr" \
       -e SANDBOX_TOKEN \
@@ -319,7 +361,7 @@ start_services() {
 }
 
 main() {
-  require_cmds podman systemctl install node getent pnpm
+  require_cmds podman systemctl install node getent pnpm nft
   require_root
   require_build
   require_user harness
@@ -330,6 +372,8 @@ main() {
   # Before the containers, so a `podman run` that lands between the two is already covered.
   enable_container_restart
   start_redis
+  ensure_sandbox_network
+  install_sandbox_firewall
   start_sandboxes
   start_services
   log "done — relay is running. Before starting the supervisor, set SH_TURNS_PER_WORKER in" \

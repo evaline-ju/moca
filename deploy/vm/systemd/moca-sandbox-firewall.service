@@ -1,0 +1,12 @@
+[Unit]
+Description=MOCA sandbox network firewall: sandboxes reach only the relay's attach port (MI1 R8)
+Before=sh-relay.service podman-restart.service
+After=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/serverless-harness/moca-sandbox.nft
+
+[Install]
+WantedBy=multi-user.target

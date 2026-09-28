@@ -14,7 +14,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 export MOCK_LOG="$TMP/mock.log"
 mkdir -p "$TMP/bin"
-for cmd in podman systemctl getent pnpm; do
+for cmd in podman systemctl getent pnpm nft; do
   cat >"$TMP/bin/$cmd" <<'MOCK'
 #!/usr/bin/env bash
 printf '%s %s\n' "$(basename "$0")" "$*" >>"$MOCK_LOG"
@@ -302,10 +302,41 @@ grep -q -- 'SANDBOX_TOKEN=s3cr3t' "$MOCK_LOG" &&
 grep -q -- 'podman-env SANDBOX_TOKEN=s3cr3t' "$MOCK_ENV_LOG" ||
   fail "the container does not actually receive SANDBOX_TOKEN: passing by name only works if the" \
     "value is in podman's own environment: $(cat "$MOCK_ENV_LOG")"
-grep -q -- '--add-host host.containers.internal:host-gateway' "$MOCK_LOG" ||
-  fail "start_sandboxes must map host.containers.internal explicitly (podman-run(1)" \
-    "host-gateway), not rely on implicit netavark DNS: $(cat "$MOCK_LOG")"
-pass "start_sandboxes: per-container SANDBOX_ID, host-reaching RELAY_ADDR, matching SANDBOX_TOKEN"
+grep -q -- '--network moca-sandbox' "$MOCK_LOG" ||
+  fail "sandboxes must run on the dedicated moca-sandbox network: $(cat "$MOCK_LOG")"
+grep -q -- '--add-host host.containers.internal:10.89.40.1' "$MOCK_LOG" ||
+  fail "host.containers.internal must point at the moca-sandbox gateway: $(cat "$MOCK_LOG")"
+grep -q -- 'host-gateway' "$MOCK_LOG" &&
+  fail "host-gateway exposes every host port to sandboxes (MI1 R8): $(cat "$MOCK_LOG")"
+pass "start_sandboxes: dedicated network, gateway-pinned host alias, no host-gateway"
+
+# --- MI1 R8: the sandbox network and the firewall that confines it --------------------------------
+: >"$MOCK_LOG"
+ensure_sandbox_network
+grep -q -- 'podman network create --ignore --subnet 10.89.40.0/24 --gateway 10.89.40.1 moca-sandbox' "$MOCK_LOG" ||
+  fail "ensure_sandbox_network must create moca-sandbox idempotently with the fixed subnet: $(cat "$MOCK_LOG")"
+
+cp "$TOKENED_RELAY_ENV" "$SH_ENV_DIR/relay.env"
+: >"$MOCK_LOG"
+install_sandbox_firewall
+NFT="$SH_ENV_DIR/moca-sandbox.nft"
+[[ -f "$NFT" ]] || fail "install_sandbox_firewall must render $NFT"
+grep -q 'ip saddr 10.89.40.0/24 tcp dport 9443 accept' "$NFT" || fail "the attach port must be allowed: $(cat "$NFT")"
+grep -q 'ip saddr 10.89.40.0/24 meta l4proto { tcp, udp } th dport 53 accept' "$NFT" ||
+  fail "DNS to podman's resolver must be allowed: $(cat "$NFT")"
+grep -q 'ip saddr 10.89.40.0/24 counter drop' "$NFT" || fail "everything else from the sandbox subnet must drop: $(cat "$NFT")"
+grep -q 'hook input' "$NFT" || fail "the table must filter traffic TO the host (input), not forwarding"
+grep -q 'hook forward' "$NFT" && fail "S1 must not filter forwarded (internet) traffic; that is S5's"
+grep -q 'nft -f' "$MOCK_LOG" || fail "install_sandbox_firewall must load the table now: $(cat "$MOCK_LOG")"
+grep -q 'systemctl enable moca-sandbox-firewall.service' "$MOCK_LOG" ||
+  fail "the firewall unit must be enabled so the table survives a reboot: $(cat "$MOCK_LOG")"
+pass "moca-sandbox: fixed subnet; host reachable only on the attach port and DNS; persistent"
+
+grep -q '^ExecStart=/usr/sbin/nft -f ' "$VM_DIR/systemd/moca-sandbox-firewall.service" ||
+  fail "the firewall unit must load the rendered table with nft -f"
+grep -q '^Before=.*sh-relay.service' "$VM_DIR/systemd/moca-sandbox-firewall.service" ||
+  fail "the firewall must be in place before the relay (and so before any sandbox) starts"
+pass "moca-sandbox-firewall.service loads the table before the relay starts"
 
 # --- missing commands fail loudly -----------------------------------------------------------
 if PATH="/nonexistent" require_cmds podman 2>/dev/null; then
