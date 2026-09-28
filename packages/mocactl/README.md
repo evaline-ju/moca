@@ -7,6 +7,9 @@ so it works the same whatever runs behind those URLs. Design:
 
 ## Run it
 
+**New here?** [QUICKSTART.md](QUICKSTART.md) goes from a fresh checkout to a streamed reply on a
+local kind cluster, with one script doing the cluster wiring.
+
 ```bash
 pnpm install
 node packages/mocactl/bin/mocactl.mjs            # interactive; the first run walks you through setup
