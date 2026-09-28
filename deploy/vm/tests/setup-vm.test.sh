@@ -27,10 +27,18 @@ done
 # local user) while the container still receives it. Logging only argv could not tell "passed safely"
 # apart from "not passed at all".
 export MOCK_ENV_LOG="$TMP/mock-env.log"
+# `podman network inspect` also needs real stdout: ensure_sandbox_network parses it back to detect
+# a subnet/gateway mismatch on a pre-existing network (Fix Round 1, #2). MOCK_PODMAN_INSPECT lets a
+# test simulate a live network that disagrees with what's configured; its default matches
+# MOCA_SANDBOX_SUBNET/MOCA_SANDBOX_GATEWAY's own defaults so every call site that doesn't set it
+# (i.e. every ensure_sandbox_network call in this file except the mismatch case below) keeps passing.
 cat >"$TMP/bin/podman" <<'MOCK'
 #!/usr/bin/env bash
 printf '%s %s\n' "$(basename "$0")" "$*" >>"$MOCK_LOG"
 printf 'podman-env SANDBOX_TOKEN=%s\n' "${SANDBOX_TOKEN-<unset>}" >>"$MOCK_ENV_LOG"
+if [[ "$1" == "network" && "$2" == "inspect" ]]; then
+  printf '%s\n' "${MOCK_PODMAN_INSPECT:-10.89.40.0/24 10.89.40.1}"
+fi
 MOCK
 chmod +x "$TMP/bin/podman"
 
@@ -312,9 +320,31 @@ pass "start_sandboxes: dedicated network, gateway-pinned host alias, no host-gat
 
 # --- MI1 R8: the sandbox network and the firewall that confines it --------------------------------
 : >"$MOCK_LOG"
-ensure_sandbox_network
+ensure_sandbox_network ||
+  fail "ensure_sandbox_network must pass when the live network matches the configured subnet/gateway"
 grep -q -- 'podman network create --ignore --subnet 10.89.40.0/24 --gateway 10.89.40.1 moca-sandbox' "$MOCK_LOG" ||
   fail "ensure_sandbox_network must create moca-sandbox idempotently with the fixed subnet: $(cat "$MOCK_LOG")"
+pass "ensure_sandbox_network creates the fixed-subnet network and passes when it already matches"
+
+# --- ensure_sandbox_network fails closed on a subnet/gateway mismatch (Fix Round 1, #2) --------
+# podman network create --ignore keeps a pre-existing moca-sandbox network regardless of its
+# actual subnet/gateway, and the firewall's rules are written against
+# MOCA_SANDBOX_SUBNET/MOCA_SANDBOX_GATEWAY specifically -- a live network on different values
+# would leave real sandbox traffic unmatched by any of those rules. MOCK_PODMAN_INSPECT controls
+# what `podman network inspect` reports for this test; its default (unset, in effect for the
+# passing case just above and every other ensure_sandbox_network call in this file) matches the
+# configured subnet/gateway.
+export MOCK_PODMAN_INSPECT="10.89.41.0/24 10.89.41.1"
+if mismatch_err=$(ensure_sandbox_network 2>&1); then
+  fail "ensure_sandbox_network must fail when the live network's subnet/gateway differ from" \
+    "MOCA_SANDBOX_SUBNET/MOCA_SANDBOX_GATEWAY"
+fi
+echo "$mismatch_err" | grep -qF "10.89.40.0/24 10.89.40.1" ||
+  fail "the mismatch message must name the expected subnet/gateway: $mismatch_err"
+echo "$mismatch_err" | grep -qF "10.89.41.0/24 10.89.41.1" ||
+  fail "the mismatch message must name the actual subnet/gateway: $mismatch_err"
+unset MOCK_PODMAN_INSPECT
+pass "ensure_sandbox_network fails closed and names both values on a subnet/gateway mismatch"
 
 cp "$TOKENED_RELAY_ENV" "$SH_ENV_DIR/relay.env"
 : >"$MOCK_LOG"
@@ -332,11 +362,41 @@ grep -q 'systemctl enable moca-sandbox-firewall.service' "$MOCK_LOG" ||
   fail "the firewall unit must be enabled so the table survives a reboot: $(cat "$MOCK_LOG")"
 pass "moca-sandbox: fixed subnet; host reachable only on the attach port and DNS; persistent"
 
-grep -q '^ExecStart=/usr/sbin/nft -f ' "$VM_DIR/systemd/moca-sandbox-firewall.service" ||
-  fail "the firewall unit must load the rendered table with nft -f"
+# --- install_sandbox_firewall follows sandbox_relay_addr()'s port, not relay_port()'s
+# unconditionally (Fix Round 1, #4) ------------------------------------------------------------
+# SH_SANDBOX_RELAY_ADDR can point sandboxes at a different port than relay_port() returns; the
+# firewall must open the port sandboxes actually dial.
+: >"$MOCK_LOG"
+SH_SANDBOX_RELAY_ADDR="host.containers.internal:7443" install_sandbox_firewall
+grep -q 'tcp dport 7443' "$NFT" ||
+  fail "install_sandbox_firewall must open the port from sandbox_relay_addr(), not relay_port(): $(cat "$NFT")"
+grep -q '9443' "$NFT" &&
+  fail "install_sandbox_firewall must not also open relay_port()'s value once" \
+    "SH_SANDBOX_RELAY_ADDR overrides the port: $(cat "$NFT")"
+pass "install_sandbox_firewall follows SH_SANDBOX_RELAY_ADDR's port when it overrides relay_port()"
+
+grep -q '^ExecStart=/usr/sbin/nft -f @SH_ENV_DIR@/moca-sandbox\.nft$' "$VM_DIR/systemd/moca-sandbox-firewall.service" ||
+  fail "the checked-in unit must use the @SH_ENV_DIR@ placeholder (a literal path breaks when" \
+    "SH_ENV_DIR is customized): $(grep '^ExecStart=' "$VM_DIR/systemd/moca-sandbox-firewall.service")"
 grep -q '^Before=.*sh-relay.service' "$VM_DIR/systemd/moca-sandbox-firewall.service" ||
   fail "the firewall must be in place before the relay (and so before any sandbox) starts"
-pass "moca-sandbox-firewall.service loads the table before the relay starts"
+grep -q '^RequiredBy=.*sh-relay.service' "$VM_DIR/systemd/moca-sandbox-firewall.service" ||
+  fail "RequiredBy=sh-relay.service must be set: Before= alone does not stop the relay from" \
+    "starting if this oneshot's load fails at boot"
+grep -q '^RequiredBy=.*podman-restart.service' "$VM_DIR/systemd/moca-sandbox-firewall.service" ||
+  fail "RequiredBy=podman-restart.service must be set: Before= alone does not stop it from" \
+    "starting if this oneshot's load fails at boot"
+pass "moca-sandbox-firewall.service is ordered before, and required by, the relay and podman-restart"
+
+INSTALLED_FIREWALL_UNIT="$SH_UNIT_DIR/moca-sandbox-firewall.service"
+[[ -f "$INSTALLED_FIREWALL_UNIT" ]] ||
+  fail "install_sandbox_firewall must install the firewall unit into $SH_UNIT_DIR"
+grep -qF "ExecStart=/usr/sbin/nft -f $SH_ENV_DIR/moca-sandbox.nft" "$INSTALLED_FIREWALL_UNIT" ||
+  fail "the installed unit must have @SH_ENV_DIR@ substituted with the real SH_ENV_DIR" \
+    "($SH_ENV_DIR): $(cat "$INSTALLED_FIREWALL_UNIT")"
+grep -q '@SH_ENV_DIR@' "$INSTALLED_FIREWALL_UNIT" &&
+  fail "the installed unit must not still contain the @SH_ENV_DIR@ placeholder: $(cat "$INSTALLED_FIREWALL_UNIT")"
+pass "install_sandbox_firewall renders @SH_ENV_DIR@ into the real SH_ENV_DIR when installing the unit"
 
 # --- missing commands fail loudly -----------------------------------------------------------
 if PATH="/nonexistent" require_cmds podman 2>/dev/null; then

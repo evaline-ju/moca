@@ -6,7 +6,8 @@ After=network-pre.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/sbin/nft -f /etc/serverless-harness/moca-sandbox.nft
+ExecStart=/usr/sbin/nft -f @SH_ENV_DIR@/moca-sandbox.nft
 
 [Install]
 WantedBy=multi-user.target
+RequiredBy=sh-relay.service podman-restart.service

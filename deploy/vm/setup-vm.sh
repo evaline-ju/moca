@@ -19,7 +19,9 @@
 #                          host.containers.internal:<SH_RELAY_PORT from relay.env>). Reaching
 #                          the host from inside a container is the part of this script least
 #                          verified on real hardware -- override this if the default does not
-#                          resolve on your VM (see deploy/vm/README.md).
+#                          resolve on your VM (see deploy/vm/README.md). install_sandbox_firewall
+#                          opens the port from THIS address, not SH_RELAY_PORT unconditionally,
+#                          so overriding it also changes which port the firewall opens.
 #   MOCA_SANDBOX_SUBNET    Dedicated podman network subnet for sandbox containers (default
 #                          10.89.40.0/24). MI1 R8: sandboxes no longer share the default podman
 #                          network, so the firewall below can name this subnet precisely.
@@ -280,18 +282,35 @@ ensure_exec_token() {
 
 # Sandboxes run on their OWN podman network (MI1 §5 R8), with a fixed subnet so the firewall below
 # can name it. --ignore: a re-run finds it already there. If an operator pre-created moca-sandbox
-# with another subnet, set MOCA_SANDBOX_SUBNET/MOCA_SANDBOX_GATEWAY to match it.
+# with another subnet, set MOCA_SANDBOX_SUBNET/MOCA_SANDBOX_GATEWAY to match it. --ignore accepts a
+# pre-existing network unconditionally, though, so this also reads back the live subnet/gateway and
+# fails closed on a mismatch, rather than letting the firewall below install rules for values the
+# network does not actually have.
 ensure_sandbox_network() {
   podman network create --ignore --subnet "$MOCA_SANDBOX_SUBNET" --gateway "$MOCA_SANDBOX_GATEWAY" moca-sandbox
+  local expected="$MOCA_SANDBOX_SUBNET $MOCA_SANDBOX_GATEWAY" actual
+  actual="$(podman network inspect moca-sandbox --format '{{range .Subnets}}{{.Subnet}} {{.Gateway}}{{end}}')"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "moca-sandbox network exists with subnet/gateway '$actual', but" \
+      "MOCA_SANDBOX_SUBNET/MOCA_SANDBOX_GATEWAY expect '$expected'." \
+      "install_sandbox_firewall writes its rules against the expected values, so recreate the" \
+      "network to match, or set MOCA_SANDBOX_SUBNET/MOCA_SANDBOX_GATEWAY to the network's actual" \
+      "values, then re-run." >&2
+    return 1
+  fi
 }
 
-# Traffic from the sandbox subnet TO THIS HOST is dropped except the relay's attach port and DNS
-# (podman's resolver answers on the gateway). Forwarded (internet) traffic is untouched in S1; MI1
-# S5 routes it through moca-egress. The declare/delete/redeclare idiom makes `nft -f` replace the
-# table atomically, so a re-run never stacks duplicate rules.
+# Traffic from the sandbox subnet TO THIS HOST is dropped except the address sandboxes actually
+# dial (sandbox_relay_addr(), which SH_SANDBOX_RELAY_ADDR may point at a different port than
+# relay_port()) and DNS (podman's resolver answers on the gateway). Forwarded (internet) traffic is
+# untouched in S1; MI1 S5 routes it through moca-egress. The declare/delete/redeclare idiom makes
+# `nft -f` replace the table atomically, so a re-run never stacks duplicate rules. The checked-in
+# unit carries an @SH_ENV_DIR@ placeholder rather than a literal path -- SH_ENV_DIR is itself
+# overridable, so this renders the placeholder into the real value before installing the unit.
 install_sandbox_firewall() {
-  local attach nft="$SH_ENV_DIR/moca-sandbox.nft"
-  attach="$(relay_port)"
+  local attach nft="$SH_ENV_DIR/moca-sandbox.nft" tmp_unit
+  attach="$(sandbox_relay_addr)"
+  attach="${attach##*:}"
   cat >"$nft" <<NFT
 table inet moca_sandbox
 delete table inet moca_sandbox
@@ -306,7 +325,10 @@ table inet moca_sandbox {
 }
 NFT
   nft -f "$nft"
-  install -m 0644 "$SCRIPT_DIR/systemd/moca-sandbox-firewall.service" "$SH_UNIT_DIR/"
+  tmp_unit="$(mktemp)"
+  sed "s|@SH_ENV_DIR@|$SH_ENV_DIR|g" "$SCRIPT_DIR/systemd/moca-sandbox-firewall.service" >"$tmp_unit"
+  install -m 0644 "$tmp_unit" "$SH_UNIT_DIR/moca-sandbox-firewall.service"
+  rm -f "$tmp_unit"
   systemctl daemon-reload
   systemctl enable moca-sandbox-firewall.service
 }
