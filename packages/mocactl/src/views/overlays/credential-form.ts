@@ -40,7 +40,7 @@ export function credentialFields(): FormField[] {
       key: 'endpoint',
       label: 'Gateway endpoint',
       optional: true,
-      hint: 'full origin, e.g. https://litellm.internal/v1; empty uses the deployment default',
+      hint: 'the model gateway base URL, as for ANTHROPIC_BASE_URL — no /v1, e.g. https://litellm.internal; empty uses the deployment default',
       visible: (v) => v.consumer === 'inference',
     },
     ...secretFields.map((key) => ({

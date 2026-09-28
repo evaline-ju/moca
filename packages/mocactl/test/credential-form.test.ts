@@ -41,6 +41,14 @@ describe('credentialFields', () => {
       expect(f.masked, f.key).toBe(true);
     }
   });
+
+  it('never suggests a /v1 suffix on the gateway endpoint', () => {
+    // The endpoint becomes the turn's ANTHROPIC_BASE_URL and the model client appends the API
+    // path itself, so copying a `…/v1` example would double the version segment.
+    const hint = credentialFields().find((f) => f.key === 'endpoint')!.hint!;
+    expect(hint).toContain('ANTHROPIC_BASE_URL');
+    expect(hint).not.toMatch(/https?:\/\/\S*\/v1\b/);
+  });
 });
 
 describe('validateCredential', () => {
