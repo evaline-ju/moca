@@ -12,7 +12,8 @@ cluster wiring behind it.
 - Node 22 and pnpm 9.
 - A GitHub account, and a model you can reach: an API key plus the base URL of an
   Anthropic-compatible gateway (e.g. LiteLLM). The cluster's pods reach it through your machine,
-  so a gateway on a private network needs your VPN up.
+  so a gateway on a private network needs your VPN up. It must be HTTPS on port 443: the harness's
+  egress policy (`deploy/knative/harness-egress-policy.yaml`) allows no other outbound port.
 
 ## 1. Build and deploy the harness
 
@@ -127,13 +128,13 @@ common first-run failures:
 
 And outside doctor:
 
-| Symptom                                         | Cause and fix                                                                      |
-| ----------------------------------------------- | ---------------------------------------------------------------------------------- |
-| login fails with `device_flow_disabled`         | tick **Enable Device Flow** on the OAuth app (step 2)                              |
-| login fails with `incorrect_client_credentials` | `SH_GITHUB_CLIENT_ID` is mistyped                                                  |
-| a turn fails with `endpoint_unresolved`         | the credential has no **Gateway endpoint**: edit it with `ctrl+x k`                |
-| a turn fails on the model call                  | check the credential's key, host and endpoint; a private gateway needs your VPN    |
-| the script asks "is port … free?"               | stop whatever holds 18080/18081, or set `MOCACTL_CP_PORT` / `MOCACTL_HARNESS_PORT` |
+| Symptom                                         | Cause and fix                                                                                                 |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| login fails with `device_flow_disabled`         | tick **Enable Device Flow** on the OAuth app (step 2)                                                         |
+| login fails with `incorrect_client_credentials` | `SH_GITHUB_CLIENT_ID` is mistyped                                                                             |
+| a turn fails with `endpoint_unresolved`         | the credential has no **Gateway endpoint**: edit it with `ctrl+x k`                                           |
+| a turn fails on the model call                  | check the credential's key, host and endpoint; a private gateway needs your VPN; only port 443 is allowed out |
+| the script asks "is port … free?"               | stop whatever holds 18080/18081, or set `MOCACTL_CP_PORT` / `MOCACTL_HARNESS_PORT`                            |
 
 ## 6. Clean up
 
