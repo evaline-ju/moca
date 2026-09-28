@@ -149,7 +149,10 @@ E2/E5 measured, not as a standalone-runnable package — same caveat the E1/E3/E
 drivers already carry for needing a live cluster.
 
 ```bash
-# In-process (no LLM key): E2 + E5 structural -- needs this repo's workspace (see caveat above)
+# In-process (no LLM key): E2 + E5 structural -- requires a PRE-SPLIT checkout of this
+# repo (at or before 3057c5f); experiments/ moved to moca-experiments and is not
+# standalone-runnable there. See the caveat above.
+git checkout 3057c5f   # or skip this block on a current checkout
 docker run -d --rm --name sh-redis -p 6379:6379 redis:7-alpine
 pnpm -C experiments test           # E2, E5 structural, fixtures
 
