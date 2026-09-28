@@ -249,6 +249,66 @@ describe('selectPoolSandbox remote dispatch', () => {
   });
 });
 
+describe('selectPoolSandbox: the real defaultExecClient (MI1 R5)', () => {
+  // Deliberately omits deps.makeExecClient in both tests below, so selection reaches the
+  // module's real, un-exported defaultExecClient -- the half of R5 every OTHER grpc-branch
+  // test in this file bypasses via `makeExecClient: () => fakeExecClient`.
+  const env = (extra: Record<string, string> = {}) =>
+    ({ KAGENTI_SANDBOX_POOL_SELECTOR: 'app=sbx', ...extra }) as NodeJS.ProcessEnv;
+  const opts = { cap: 4, ttlMs: 60000, remoteSandbox: true };
+
+  it('throws naming MOCA_RELAY_EXEC_TOKEN when the token is unset, before a transport is built', async () => {
+    const lease = fakeLease({ 'sbx-remote-1': 0 }, opts.cap);
+    let transportBuilt = false;
+    const err = await selectPoolSandbox(env(), '/head', 'run-1', opts, {
+      listPods: async () => [],
+      lease,
+      records: fakeRecords([grpcRec]),
+      // makeTransport would prove the throw happens before a transport is built -- it is
+      // asserted below never to be called at all.
+      makeTransport: () => {
+        transportBuilt = true;
+        return {
+          exec: async () => ({ stdout: Buffer.alloc(0), exitCode: 0, truncated: false }),
+          close: async () => {},
+        };
+      },
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/MOCA_RELAY_EXEC_TOKEN/);
+    expect(transportBuilt).toBe(false);
+  });
+
+  it('builds a real relay exec client once MOCA_RELAY_EXEC_TOKEN is set, without dialing a relay', async () => {
+    const lease = fakeLease({ 'sbx-remote-1': 0 }, opts.cap);
+    let capturedClient: ExecClientLike | undefined;
+    const sel = await selectPoolSandbox(
+      env({ MOCA_RELAY_EXEC_TOKEN: 'worker-tok' /* notsecret */ }),
+      '/head',
+      'run-1',
+      opts,
+      {
+        listPods: async () => [],
+        lease,
+        records: fakeRecords([grpcRec]),
+        // makeTransport is injected only to capture the client that defaultExecClient built --
+        // a grpc-js client does not dial out until a call is made, so constructing it here never
+        // touches a live relay. That is the only assertion available without one (per review).
+        makeTransport: (_id, client) => {
+          capturedClient = client;
+          return {
+            exec: async () => ({ stdout: Buffer.alloc(0), exitCode: 0, truncated: false }),
+            close: async () => {},
+          };
+        },
+      },
+    );
+    expect(sel?.transport).toBeDefined();
+    expect(capturedClient).toBeDefined();
+    expect(typeof (capturedClient as unknown as { exec?: unknown })?.exec).toBe('function');
+  });
+});
+
 describe('selectPoolSandbox remote dispatch: ad-hoc RedisRecordStore lifecycle', () => {
   const env = (extra: Record<string, string> = {}) =>
     ({ KAGENTI_SANDBOX_POOL_SELECTOR: 'app=sbx', ...extra }) as NodeJS.ProcessEnv;
