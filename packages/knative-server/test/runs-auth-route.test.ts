@@ -139,6 +139,18 @@ describe('POST /runs under SH_REQUIRE_AUTH=true (MI1 R7)', () => {
     expect(r.status).toBe(501);
     expect(r.json.error).toBe('async_runs_unavailable');
   });
+
+  it('refuses a caller-supplied tenant on an authenticated run (fix round 1, Important 1)', async () => {
+    const r = await call(
+      'POST',
+      '/runs',
+      envelope('sid-1', { tenant: 'other' }),
+      tokenFor('sid-1'),
+    );
+    expect(r.status).toBe(400);
+    expect(r.json.error).toBe('tenant_not_allowed');
+    expect(runLeaf).not.toHaveBeenCalled();
+  });
 });
 
 describe('GET /runs/status under SH_REQUIRE_AUTH=true (MI1 R7)', () => {
@@ -160,6 +172,17 @@ describe('GET /runs/status under SH_REQUIRE_AUTH=true (MI1 R7)', () => {
     const r = await call('GET', '/runs/status?sessionId=sid-1', undefined, tokenFor('sid-1'));
     expect(r.status).toBe(200);
   });
+
+  it('refuses a caller-supplied tenant on an authenticated status read (fix round 1, Important 1)', async () => {
+    const r = await call(
+      'GET',
+      '/runs/status?sessionId=sid-1&tenant=other',
+      undefined,
+      tokenFor('sid-1'),
+    );
+    expect(r.status).toBe(400);
+    expect(r.json.error).toBe('tenant_not_allowed');
+  });
 });
 
 describe('without SH_REQUIRE_AUTH, /runs behaves as today', () => {
@@ -173,5 +196,11 @@ describe('without SH_REQUIRE_AUTH, /runs behaves as today', () => {
     const r = await call('POST', '/runs', envelope('sid-9'), 'not-a-token');
     expect(r.status).toBeGreaterThanOrEqual(400);
     expect(runLeaf).not.toHaveBeenCalled();
+  });
+
+  it('still allows a caller-supplied tenant on an unauthenticated run (fix round 1, Important 1)', async () => {
+    const r = await call('POST', '/runs', envelope('sid-9', { tenant: 'acme' }));
+    expect(r.status).toBeLessThan(300);
+    expect(runLeaf).toHaveBeenCalledTimes(1);
   });
 });

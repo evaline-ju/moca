@@ -239,16 +239,21 @@ export async function resolveTurnAuth(
  * Authorization for READING a run (MI1 §5 R7): the same token rules as a turn — required under
  * SH_REQUIRE_AUTH, and a present-but-bad token refused in either mode — but no credential exchange,
  * since a status read spends nothing upstream. A valid token for another session is refused.
+ *
+ * Returns whether the caller authenticated: `true` when a token was presented and verified, `false`
+ * when none was presented and none was required. The caller uses this to decide whether a
+ * caller-supplied `tenant` must be refused (fix round 1, Important 1) — that decision does not belong
+ * here, because this function's job is `sessionId` authorization, not key-derivation shape.
  */
 export function authorizeRunRead(
   headers: Record<string, string | string[] | undefined>,
   sessionId: string,
   deps: TurnAuthDeps,
-): void {
+): boolean {
   const presented = bearer(headers);
   if (!presented) {
     if (deps.requireAuth) throw new CpError('token_required', 'this deployment requires a token');
-    return;
+    return false;
   }
   const claims = verifyToken(presented, deps.keys, {
     now: Math.floor((deps.now?.() ?? Date.now()) / 1000),
@@ -257,6 +262,7 @@ export function authorizeRunRead(
   if (claims.sid !== sessionId) {
     throw new CpError('session_mismatch', 'token does not name this session', sessionId);
   }
+  return true;
 }
 
 /**
