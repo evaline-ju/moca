@@ -220,18 +220,26 @@ describe('defaultRunKubectl', () => {
   });
 
   it('refuses a file already at the temp path instead of writing through it', async () => {
-    // Pin the "random" name so the collision is certain, and plant a file there first.
+    // Pin the "random" name so the collision is certain, and plant a file there first. The plant
+    // goes in a private mkdtemp dir that os.tmpdir() is pointed at (it reads TMPDIR per call), so
+    // the test never creates a predictable name in the shared temp dir itself.
     vi.mocked(crypto.randomBytes).mockReturnValueOnce(Buffer.alloc(16) as never);
-    const planted = join(tmpdir(), `sh-cp-patch-${'00'.repeat(16)}.json`);
+    const privateTmp = mkdtempSync(join(tmpdir(), 'kubectl-collide-'));
+    const planted = join(privateTmp, `sh-cp-patch-${'00'.repeat(16)}.json`);
     writeFileSync(planted, 'planted', { mode: 0o644 });
+    const previousTmp = process.env.TMPDIR;
+    process.env.TMPDIR = privateTmp;
     try {
+      expect(tmpdir()).toBe(privateTmp); // guards the guard: the collision really is at `planted`
       await expect(
         defaultRunKubectl(buildPatchSecretArgs('s', 'n'), '{"stringData":{"k":"secret"}}'),
       ).rejects.toThrow(/EEXIST/);
       expect(readFileSync(planted, 'utf8')).toBe('planted');
     } finally {
-      rmSync(planted, { force: true });
+      if (previousTmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTmp;
+      rmSync(privateTmp, { recursive: true, force: true });
     }
-    expect(existsSync(planted)).toBe(false);
+    expect(existsSync(privateTmp)).toBe(false);
   });
 });
