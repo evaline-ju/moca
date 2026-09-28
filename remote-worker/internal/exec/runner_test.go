@@ -520,3 +520,35 @@ func lineCount(t *testing.T, path string) int {
 	}
 	return bytes.Count(b, []byte("\n"))
 }
+
+// A command — and anything it starts — must not see the worker's own settings (MI1 §5 R6). The
+// probe runs in a GRANDCHILD (bash -> sh -> printenv) because inheritance is transitive.
+func TestCommandsDoNotInheritWorkerSettings(t *testing.T) {
+	t.Setenv("SANDBOX_TOKEN", "planted-token") // notsecret
+	t.Setenv("RELAY_ADDR", "planted-relay:9443")
+	t.Setenv("SANDBOX_ID", "planted-id")
+	t.Setenv("SANDBOX_TOKEN_sbx1", "planted-per-sandbox") // notsecret
+	t.Setenv("MOCA_RELAY_EXEC_TOKEN", "planted-exec")     // notsecret
+	t.Setenv("SH_SOMETHING", "planted-sh")
+	t.Setenv("MI1_IMAGE_TOOLCHAIN", "kept")
+
+	var r recorder
+	code, err := wexec.BashRunner{}.Run(context.Background(), wexec.Spec{
+		ReqID:     90,
+		Command:   `sh -c 'env'`,
+		Streaming: true,
+	}, &r)
+	if err != nil || code != 0 {
+		t.Fatalf("Run: code=%d err=%v", code, err)
+	}
+	out := string(r.stdout)
+	if strings.Contains(out, "planted") {
+		t.Errorf("a command inherited a worker setting:\n%s", out)
+	}
+	if !strings.Contains(out, "MI1_IMAGE_TOOLCHAIN=kept") {
+		t.Errorf("the container's own environment must still reach commands; got:\n%s", out)
+	}
+	if !strings.Contains(out, "PATH=") {
+		t.Errorf("PATH must still reach commands; got:\n%s", out)
+	}
+}
