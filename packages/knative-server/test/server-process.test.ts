@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { existsSync, readdirSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { AMBIENT_KEY_SENTINEL } from '@sh/harness/ambient-sentinel';
 import { readTenancy } from '../src/tenancy.js';
 import { prepareServerProcess, scrubAmbientCredentials } from '../src/server-process.js';
@@ -114,5 +116,25 @@ describe('buildConfig marks every server turn (MI1 R3)', () => {
       if (saved === undefined) delete process.env.SH_LOCAL_TOOLS;
       else process.env.SH_LOCAL_TOOLS = saved;
     }
+  });
+});
+
+describe('prepareServerProcess gives the process a private agent directory (MI1 R4)', () => {
+  it('points PI_CODING_AGENT_DIR at an empty 0700 directory outside $HOME', () => {
+    const env: NodeJS.ProcessEnv = {};
+    const { agentDir } = prepareServerProcess(env);
+    expect(env.PI_CODING_AGENT_DIR).toBe(agentDir);
+    expect(existsSync(agentDir)).toBe(true);
+    expect(readdirSync(agentDir)).toEqual([]);
+    expect(statSync(agentDir).mode & 0o777).toBe(0o700);
+    expect(agentDir.startsWith(`${homedir()}/.pi`)).toBe(false);
+  });
+
+  it('overrides an inherited PI_CODING_AGENT_DIR, and is stable within one process', () => {
+    const env: NodeJS.ProcessEnv = { PI_CODING_AGENT_DIR: `${homedir()}/.pi/agent` };
+    const first = prepareServerProcess(env).agentDir;
+    const second = prepareServerProcess({}).agentDir;
+    expect(env.PI_CODING_AGENT_DIR).toBe(first);
+    expect(second).toBe(first);
   });
 });

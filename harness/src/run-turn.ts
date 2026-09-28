@@ -596,6 +596,39 @@ export function resourceLoaderOptionsFor(
   return { ...base, ...promotedLoaderOptions(promoted) };
 }
 
+/**
+ * Everything the Pi resource loader is built from, in one place so the server-mode lockdown is
+ * assertable (MI1 §5 R4). Outside server mode the result is exactly today's: `SettingsManager.create`
+ * with default options and `resourceLoaderOptionsFor`'s keys.
+ *
+ * In server mode: discovered extension FILES are off (the harness's own extensions arrive as
+ * extensionFactories, which noExtensions does not affect); the project is untrusted, so no project
+ * settings and no <cwd>/.pi/SYSTEM.md or APPEND_SYSTEM.md are read; and no ancestor AGENTS.md/CLAUDE.md
+ * walk happens — a promoted bundle still supplies its context through agentsFilesOverride.
+ */
+export function turnLoaderInputs(opts: {
+  config?: TurnConfig;
+  cwd: string;
+  extensionFactories: unknown[];
+  promotedConfig?: PromotedConfig;
+}): { agentDir: string; settingsManager: SettingsManager; loaderOptions: Record<string, unknown> } {
+  const locked = opts.config?.serverMode === true;
+  const agentDir = getAgentDir();
+  const settingsManager = SettingsManager.create(
+    opts.cwd,
+    agentDir,
+    locked ? { projectTrusted: false } : {},
+  );
+  const loaderOptions = {
+    ...resourceLoaderOptionsFor(
+      { cwd: opts.cwd, agentDir, settingsManager, extensionFactories: opts.extensionFactories },
+      opts.promotedConfig,
+    ),
+    ...(locked ? { noExtensions: true, noContextFiles: true } : {}),
+  };
+  return { agentDir, settingsManager, loaderOptions };
+}
+
 export interface ExecuteTurnInput {
   prompt: string;
   sessionId?: string;
@@ -726,9 +759,6 @@ async function executeTurnCore(
   // Opened by executeTurn ahead of the pool acquire, so a missing session 404s before any lease work.
   const { store, backend, sessionManager } = opened;
 
-  const agentDir = getAgentDir();
-  const settingsManager = SettingsManager.create(cwd, agentDir);
-
   const budgetLimit = Number(process.env.SH_BUDGET_TOKENS);
   const budgetMargin = Number(process.env.SH_BUDGET_MARGIN);
   // acquireTurnSandbox (called by executeTurn, which owns the lease lifecycle) hands back exactly
@@ -769,12 +799,13 @@ async function executeTurnCore(
     extensionFactories.push(sseExtension(input.onEvent));
   }
 
-  const resourceLoader = new DefaultResourceLoader(
-    resourceLoaderOptionsFor(
-      { cwd, agentDir, settingsManager, extensionFactories },
-      input.promotedConfig,
-    ) as never,
-  );
+  const { settingsManager, loaderOptions } = turnLoaderInputs({
+    config,
+    cwd,
+    extensionFactories,
+    promotedConfig: input.promotedConfig,
+  });
+  const resourceLoader = new DefaultResourceLoader(loaderOptions as never);
   await resourceLoader.reload();
 
   const { provider, modelId } = input.selection ?? resolveModelSelection(config);

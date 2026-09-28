@@ -1,9 +1,7 @@
 import {
   createAgentSession,
   DefaultResourceLoader,
-  getAgentDir,
   SessionManager,
-  SettingsManager,
   type FileEntry,
 } from '@earendil-works/pi-coding-agent';
 import { RedisSessionBackend } from '@sh/session-backend';
@@ -29,6 +27,7 @@ import {
   requireModel,
   applyModelGateway,
   sumBranchUsage,
+  turnLoaderInputs,
   type TurnConfig,
   type TurnResult,
 } from './run-turn.js';
@@ -634,18 +633,16 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture) => {
       void selected.heartbeat().catch(() => {});
     }, solveTimings.heartbeatMs);
 
-    const agentDir = getAgentDir();
-    const settingsManager = SettingsManager.create(cwd, agentDir);
-    const resourceLoader = new DefaultResourceLoader({
+    const { settingsManager, loaderOptions } = turnLoaderInputs({
+      config,
       cwd,
-      agentDir,
-      settingsManager,
       extensionFactories: [
         k8sSandboxExtension({ config: agentConfig }),
         flushExtension(backend),
         checkpointExtension(store, sessionManager),
       ],
     });
+    const resourceLoader = new DefaultResourceLoader(loaderOptions as never);
     await resourceLoader.reload();
 
     const { session } = await createAgentSession({
@@ -810,12 +807,9 @@ export const realProduceVerdict: ProduceVerdict = async (item, env, config, capt
     const allowVerdict =
       !item.require_approval || gateState.gateDecisions.length > 0 || seed.record != null;
 
-    const agentDir = getAgentDir();
-    const settingsManager = SettingsManager.create(cwd, agentDir);
-    const resourceLoader = new DefaultResourceLoader({
+    const { settingsManager, loaderOptions } = turnLoaderInputs({
+      config,
       cwd,
-      agentDir,
-      settingsManager,
       extensionFactories: [
         ...(allowVerdict ? [submitVerdictExtension(capture, sessionManager)] : []),
         requestApprovalExtension(capture, sessionManager, gateState.nextGateId),
@@ -825,6 +819,7 @@ export const realProduceVerdict: ProduceVerdict = async (item, env, config, capt
         verdictTerminationExtension(capture, { maxTurns: env.maxTurns }),
       ],
     });
+    const resourceLoader = new DefaultResourceLoader(loaderOptions as never);
     await resourceLoader.reload();
 
     const { session } = await createAgentSession({

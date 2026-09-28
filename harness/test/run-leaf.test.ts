@@ -68,7 +68,12 @@ vi.mock('@sh/session-backend', () => ({
   RedisSessionBackend: FakeRedisSessionBackend,
 }));
 
-const { FakeSessionManager, FakeResourceLoader, createAgentSessionMock } = vi.hoisted(() => {
+const {
+  FakeSessionManager,
+  FakeResourceLoader,
+  createAgentSessionMock,
+  settingsManagerCreateMock,
+} = vi.hoisted(() => {
   class FakeSessionManager {
     constructor(private sid: string) {}
     getSessionId() {
@@ -88,6 +93,9 @@ const { FakeSessionManager, FakeResourceLoader, createAgentSessionMock } = vi.ho
     createAgentSessionMock: vi.fn(async (..._args: unknown[]) => ({
       session: { prompt: async () => {} },
     })),
+    // A spy (not just a stub) so MI1 R4 tests can assert the third argument
+    // (`{ projectTrusted: false }` in server mode, `{}` otherwise) that turnLoaderInputs passes.
+    settingsManagerCreateMock: vi.fn((..._args: unknown[]) => ({})),
   };
 });
 vi.mock('@earendil-works/pi-coding-agent', () => ({
@@ -99,7 +107,7 @@ vi.mock('@earendil-works/pi-coding-agent', () => ({
       new FakeSessionManager(opts.id),
     openFromCheckpoint: async (sid: string) => new FakeSessionManager(sid),
   },
-  SettingsManager: { create: () => ({}) },
+  SettingsManager: { create: (...args: unknown[]) => settingsManagerCreateMock(...args) },
 }));
 
 import {
@@ -466,6 +474,101 @@ describe('realProduceSolve / realProduceVerdict: server-mode sandbox gate (MI1 R
     expect(lease.release).toHaveBeenCalled();
     expect(createAgentSessionMock).not.toHaveBeenCalled();
     expect(k8sSandboxExtensionMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('realProduceSolve / realProduceVerdict: resource-loader lockdown (MI1 R4)', () => {
+  // A real (non-null) lease, so both leaves run past the R3 sandbox gate into the resource-loader
+  // construction this test targets.
+  const LEASE_CONFIG = {
+    pod: 'sandbox-0',
+    namespace: 'default',
+    context: undefined,
+    podCwd: '/workspace',
+    headCwd: '/head',
+  };
+  const lease = () => ({
+    config: LEASE_CONFIG,
+    heartbeat: vi.fn(async () => {}),
+    release: vi.fn(async () => {}),
+  });
+
+  // The resourceLoader instance is passed to createAgentSession untransformed (see run-leaf.ts), so
+  // its constructor options — the FakeResourceLoader records them as `.opts` — are recovered from
+  // the last createAgentSession call rather than from a separate spy on DefaultResourceLoader.
+  function lastLoaderOptions(): Record<string, unknown> {
+    const call = createAgentSessionMock.mock.calls.at(-1)!;
+    const { resourceLoader } = call[0] as { resourceLoader: { opts: Record<string, unknown> } };
+    return resourceLoader.opts;
+  }
+  function lastSettingsManagerThirdArg(): unknown {
+    return settingsManagerCreateMock.mock.calls.at(-1)![2];
+  }
+
+  it('realProduceSolve in server mode: noExtensions, noContextFiles, and an untrusted project', async () => {
+    selectPoolSandboxMock.mockReset().mockResolvedValue(lease());
+    createAgentSessionMock.mockClear();
+    settingsManagerCreateMock.mockClear();
+
+    const env: LeafEnvelope = {
+      sessionId: 'run/solve-lockdown-on',
+      item: { item_id: 'i1', file: 'f', pattern: 'p' },
+      problemStatement: 'do the thing',
+      repoUrl: 'https://git.example/r.git',
+      ref: 'abc123',
+    };
+    await realProduceSolve(env, { serverMode: true }, {});
+
+    expect(lastLoaderOptions()).toMatchObject({ noExtensions: true, noContextFiles: true });
+    expect(lastSettingsManagerThirdArg()).toEqual({ projectTrusted: false });
+  });
+
+  it('realProduceSolve outside server mode: no lockdown options are set', async () => {
+    selectPoolSandboxMock.mockReset().mockResolvedValue(lease());
+    createAgentSessionMock.mockClear();
+    settingsManagerCreateMock.mockClear();
+
+    const env: LeafEnvelope = {
+      sessionId: 'run/solve-lockdown-off',
+      item: { item_id: 'i1', file: 'f', pattern: 'p' },
+      problemStatement: 'do the thing',
+      repoUrl: 'https://git.example/r.git',
+      ref: 'abc123',
+    };
+    await realProduceSolve(env, {}, {});
+
+    const opts = lastLoaderOptions();
+    expect(opts).not.toHaveProperty('noExtensions');
+    expect(opts).not.toHaveProperty('noContextFiles');
+    expect(lastSettingsManagerThirdArg()).toEqual({});
+  });
+
+  it('realProduceVerdict in server mode: noExtensions, noContextFiles, and an untrusted project', async () => {
+    selectPoolSandboxMock.mockReset().mockResolvedValue(lease());
+    createAgentSessionMock.mockClear();
+    settingsManagerCreateMock.mockClear();
+
+    const item = { item_id: 'i1', file: 'f', pattern: 'p' };
+    const env: LeafEnvelope = { sessionId: 'run/verdict-lockdown-on', item };
+    await realProduceVerdict(item, env, { serverMode: true }, {});
+
+    expect(lastLoaderOptions()).toMatchObject({ noExtensions: true, noContextFiles: true });
+    expect(lastSettingsManagerThirdArg()).toEqual({ projectTrusted: false });
+  });
+
+  it('realProduceVerdict outside server mode: no lockdown options are set', async () => {
+    selectPoolSandboxMock.mockReset().mockResolvedValue(lease());
+    createAgentSessionMock.mockClear();
+    settingsManagerCreateMock.mockClear();
+
+    const item = { item_id: 'i1', file: 'f', pattern: 'p' };
+    const env: LeafEnvelope = { sessionId: 'run/verdict-lockdown-off', item };
+    await realProduceVerdict(item, env, {}, {});
+
+    const opts = lastLoaderOptions();
+    expect(opts).not.toHaveProperty('noExtensions');
+    expect(opts).not.toHaveProperty('noContextFiles');
+    expect(lastSettingsManagerThirdArg()).toEqual({});
   });
 });
 

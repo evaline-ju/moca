@@ -1,6 +1,17 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { AMBIENT_KEY_SENTINEL } from '@sh/harness/ambient-sentinel';
 import { assertKeysetUsable } from './turn-auth.js';
 import { readTenancy, type Tenancy } from './tenancy.js';
+
+// Created once per process: every turn in this process shares it, no other process does.
+let privateAgentDir: string | undefined;
+
+function ensurePrivateAgentDir(): string {
+  if (!privateAgentDir) privateAgentDir = mkdtempSync(join(tmpdir(), 'sh-agent-')); // mode 0700
+  return privateAgentDir;
+}
 
 /**
  * P5 §3.2 step 3, applied only under multi tenancy (MI1 §5 R2): the process holds no provider
@@ -20,7 +31,10 @@ export function scrubAmbientCredentials(env: NodeJS.ProcessEnv): void {
  * neither can run unprepared (MI1 §5 R2, P6 §3.6). Throws on an inconsistent configuration; callers
  * turn that into a boot failure.
  */
-export function prepareServerProcess(env: NodeJS.ProcessEnv = process.env): { tenancy: Tenancy } {
+export function prepareServerProcess(env: NodeJS.ProcessEnv = process.env): {
+  tenancy: Tenancy;
+  agentDir: string;
+} {
   assertKeysetUsable(env);
   const tenancy = readTenancy(env);
   if (tenancy === 'multi') {
@@ -32,5 +46,8 @@ export function prepareServerProcess(env: NodeJS.ProcessEnv = process.env): { te
     }
     scrubAmbientCredentials(env);
   }
-  return { tenancy };
+  // Pi reads SYSTEM.md, extensions/, skills/, auth.json and models.json from the agent directory. A
+  // server never uses a shared one — not $HOME/.pi/agent, not an inherited value (MI1 §5 R4).
+  env.PI_CODING_AGENT_DIR = ensurePrivateAgentDir();
+  return { tenancy, agentDir: env.PI_CODING_AGENT_DIR };
 }
