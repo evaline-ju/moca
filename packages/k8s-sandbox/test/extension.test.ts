@@ -53,7 +53,7 @@ describe('k8sSandboxExtension', () => {
     expect(tools).toHaveLength(0);
   });
 
-  it("never sends the harness process environment to the sandbox through the bash tool", async () => {
+  it('never sends the harness process environment to the sandbox through the bash tool', async () => {
     const commands: string[] = [];
     const recording: SandboxTransport = {
       exec: async (command) => {
@@ -67,9 +67,9 @@ describe('k8sSandboxExtension', () => {
     try {
       const { pi, tools } = fakePi();
       k8sSandboxExtension({ config: cfg, transport: recording })(pi);
-      const bash = (tools as Array<{ name: string; execute: (...a: unknown[]) => Promise<unknown> }>).find(
-        (t) => t.name === 'bash',
-      )!;
+      const bash = (
+        tools as Array<{ name: string; execute: (...a: unknown[]) => Promise<unknown> }>
+      ).find((t) => t.name === 'bash')!;
       await bash.execute('call-1', { command: 'echo hi' });
       expect(commands).toHaveLength(1);
       expect(commands[0]).not.toContain('planted-value-must-not-cross');
