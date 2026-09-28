@@ -1,5 +1,6 @@
 .PHONY: lint fmt test test-deploy typecheck demo-remote-sandbox demo-remote-sandbox-teardown \
-	demo-promoted-workflow demo-promoted-workflow-teardown demo-multiuser demo-multiuser-teardown
+	demo-promoted-workflow demo-promoted-workflow-teardown demo-multiuser demo-multiuser-teardown \
+	mocactl-quickstart mocactl-quickstart-teardown
 
 lint:
 	pre-commit run --all-files
@@ -63,3 +64,11 @@ demo-multiuser:
 
 demo-multiuser-teardown:
 	bash deploy/knative/demo-multiuser.sh --teardown
+
+# Wire a warm kind cluster for mocactl and hold the port-forwards open, so `mocactl` needs one URL
+# (packages/mocactl/QUICKSTART.md). Needs SH_GITHUB_CLIENT_ID: a GitHub OAuth app with device flow on.
+mocactl-quickstart:
+	bash deploy/knative/mocactl-quickstart.sh $(DEMO_ARGS)
+
+mocactl-quickstart-teardown:
+	bash deploy/knative/mocactl-quickstart.sh --teardown

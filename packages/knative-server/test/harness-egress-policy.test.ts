@@ -238,3 +238,21 @@ describe('kustomizations wire in the egress policy', () => {
     });
   }
 });
+
+describe('the kind/k8s setup scripts actually apply the egress policy', () => {
+  // Being listed in kustomization.yaml's resources is not enough on its own: setup-kind.sh and
+  // setup-k8s.sh each apply individual files rather than running `kubectl apply -k`, so a
+  // manifest can be correctly wired into the kustomization and STILL never reach a cluster those
+  // scripts provision. That gap left every Kind/vanilla-k8s harness pod with no egress policy at
+  // all -- until control-plane.yaml's additive, TCP:8080-only policy got applied on top, at which
+  // point the harness pod became egress-restricted with no DNS allowance and every /turn credential
+  // exchange failed ("the harness is unavailable"). setup-ocp.sh is exempt: it renders its overlay
+  // via `kubectl kustomize`, which already resolves harness-egress-policy.yaml through the
+  // kustomization checked above.
+  for (const rel of ['setup-kind.sh', 'setup-k8s.sh']) {
+    it(`${rel} applies harness-egress-policy.yaml`, () => {
+      const src = readFileSync(resolve(DEPLOY, rel), 'utf8');
+      expect(src).toMatch(/harness-egress-policy\.yaml/);
+    });
+  }
+});

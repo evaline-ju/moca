@@ -178,6 +178,18 @@ kubectl -n default wait --for=condition=Ready pod -l "$POOL_SELECTOR" --timeout=
 #    local build with --build, or reuse a preloaded image with --skip-build).
 ensure_harness_image
 
+# 7b. Deploy the harness's default-deny egress NetworkPolicy (DNS, Redis, relay, HTTPS —
+# see harness-egress-policy.yaml). Unconditional and BEFORE service.yaml: modern kindnet
+# enforces egress, so a harness pod scheduled before this exists would have unrestricted
+# egress for a window, and a pod scheduled after some OTHER egress policy (e.g.
+# control-plane.yaml's additive one) but before this one would have DNS silently broken
+# (issue: every /turn credential exchange fails with "the harness is unavailable" because
+# SH_CONTROL_PLANE_URL's hostname can't resolve). Step 8b below (SH_AUTHBRIDGE=1) applies
+# harness-egress-ab1.yaml on top, which shares this policy's name and REPLACES it rather
+# than stacking with it -- that swap only does the intended thing if this apply ran first.
+echo "--- Deploying harness egress NetworkPolicy ---"
+kubectl apply -f "$SCRIPT_DIR/harness-egress-policy.yaml"
+
 # 8. Create LLM credentials secret (supports direct API key or gateway bridge)
 if [ "${SH_AUTHBRIDGE:-0}" = "1" ]; then
   # RC1-1 Hop 1: the harness never holds the real key. AB1 (the reverse-proxy gateway,

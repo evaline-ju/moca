@@ -1,4 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import * as crypto from 'node:crypto';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// Partial mock: randomBytes stays real unless a test pins the temp file's name to force a collision.
+vi.mock('node:crypto', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:crypto')>();
+  return { ...actual, randomBytes: vi.fn(actual.randomBytes) };
+});
 import {
   buildCreateSecretArgs,
   buildDeleteSecretArgs,
@@ -6,6 +16,7 @@ import {
   buildGetPodPhaseArgs,
   buildGetSecretArgs,
   buildPatchSecretArgs,
+  defaultRunKubectl,
   isAlreadyExists,
 } from '../src/kubectl.js';
 
@@ -116,5 +127,119 @@ describe('isAlreadyExists', () => {
     );
     expect(isAlreadyExists('not an error')).toBe(false);
     expect(isAlreadyExists(undefined)).toBe(false);
+  });
+});
+
+describe('defaultRunKubectl', () => {
+  // A stand-in `kubectl` on PATH that does what the real binary does with `--patch-file=<path>`:
+  // opens that path BY NAME and prints its content. This is the exact operation that fails when
+  // fed `/dev/stdin` as spawned from a Node child: libuv backs `stdio: 'pipe'` with a UNIX-domain
+  // socket (verified with `stat -L /proc/self/fd/0` inside the deployed container: `socket:[...]`),
+  // and the kernel refuses to re-open a socket by its /proc/<pid>/fd path (ENXIO) -- so a program
+  // that reads fd 0 directly (`cat`, no args) never notices, but one that reopens it by NAME does.
+  let binDir: string;
+  let originalPath: string | undefined;
+
+  beforeEach(() => {
+    binDir = mkdtempSync(join(tmpdir(), 'fake-kubectl-'));
+    const script = [
+      '#!/usr/bin/env node',
+      "const fs = require('node:fs');",
+      "const patchArg = process.argv.slice(2).find((a) => a.startsWith('--patch-file='));",
+      "if (!patchArg) { console.error('no --patch-file'); process.exit(1); }",
+      'try {',
+      "  process.stdout.write(fs.readFileSync(patchArg.slice('--patch-file='.length), 'utf8'));",
+      '} catch (err) {',
+      "  console.error('OPEN_FAILED: ' + err.message);",
+      '  process.exit(1);',
+      '}',
+      '',
+    ].join('\n');
+    const kubectlPath = join(binDir, 'kubectl');
+    writeFileSync(kubectlPath, script);
+    chmodSync(kubectlPath, 0o755);
+    originalPath = process.env.PATH;
+    process.env.PATH = `${binDir}:${originalPath ?? ''}`;
+  });
+
+  afterEach(() => {
+    process.env.PATH = originalPath;
+    rmSync(binDir, { recursive: true, force: true });
+  });
+
+  it('delivers patch content to a child that reopens --patch-file by path', async () => {
+    const out = await defaultRunKubectl(
+      buildPatchSecretArgs('sh-cred-abc', 'sh-credentials'),
+      '{"hello":"world"}',
+    );
+    expect(out).toBe('{"hello":"world"}');
+  });
+
+  it('never hands the child the literal /dev/stdin path', async () => {
+    // Regression guard independent of the kernel quirk above: whatever path reaches the child
+    // must be a real, openable file -- not the magic symlink that triggered it. Overwrites the
+    // fake `kubectl` from beforeEach with one that reports its own argv instead of reading a file.
+    writeFileSync(
+      join(binDir, 'kubectl'),
+      [
+        '#!/usr/bin/env node',
+        'process.stdout.write(JSON.stringify(process.argv.slice(2)));',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(join(binDir, 'kubectl'), 0o755);
+
+    const out = await defaultRunKubectl(
+      buildPatchSecretArgs('sh-cred-abc', 'sh-credentials'),
+      '{}',
+    );
+    const receivedArgs: string[] = JSON.parse(out);
+    expect(receivedArgs.join(' ')).not.toContain('/dev/stdin');
+  });
+
+  it('writes the plaintext patch file 0600 even under a wide-open umask', async () => {
+    // The review's scenario: a permissive umask. It can only clear bits, so 0600 stays 0600.
+    writeFileSync(
+      join(binDir, 'kubectl'),
+      [
+        '#!/usr/bin/env node',
+        "const fs = require('node:fs');",
+        "const p = process.argv.slice(2).find((a) => a.startsWith('--patch-file=')).slice(13);",
+        'process.stdout.write((fs.statSync(p).mode & 0o777).toString(8));',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(join(binDir, 'kubectl'), 0o755);
+    const previous = process.umask(0o000);
+    try {
+      const mode = await defaultRunKubectl(buildPatchSecretArgs('s', 'n'), '{"stringData":{}}');
+      expect(mode).toBe('600');
+    } finally {
+      process.umask(previous);
+    }
+  });
+
+  it('refuses a file already at the temp path instead of writing through it', async () => {
+    // Pin the "random" name so the collision is certain, and plant a file there first. The plant
+    // goes in a private mkdtemp dir that os.tmpdir() is pointed at (it reads TMPDIR per call), so
+    // the test never creates a predictable name in the shared temp dir itself.
+    vi.mocked(crypto.randomBytes).mockReturnValueOnce(Buffer.alloc(16) as never);
+    const privateTmp = mkdtempSync(join(tmpdir(), 'kubectl-collide-'));
+    const planted = join(privateTmp, `sh-cp-patch-${'00'.repeat(16)}.json`);
+    writeFileSync(planted, 'planted', { mode: 0o644 });
+    const previousTmp = process.env.TMPDIR;
+    process.env.TMPDIR = privateTmp;
+    try {
+      expect(tmpdir()).toBe(privateTmp); // guards the guard: the collision really is at `planted`
+      await expect(
+        defaultRunKubectl(buildPatchSecretArgs('s', 'n'), '{"stringData":{"k":"secret"}}'),
+      ).rejects.toThrow(/EEXIST/);
+      expect(readFileSync(planted, 'utf8')).toBe('planted');
+    } finally {
+      if (previousTmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTmp;
+      rmSync(privateTmp, { recursive: true, force: true });
+    }
+    expect(existsSync(privateTmp)).toBe(false);
   });
 });
