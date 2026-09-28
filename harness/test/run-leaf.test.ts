@@ -17,10 +17,18 @@ const { selectPoolSandboxMock, FakeSandboxPoolSaturatedError } = vi.hoisted(() =
   }
   return { selectPoolSandboxMock: vi.fn(), FakeSandboxPoolSaturatedError };
 });
-vi.mock('../src/select-sandbox.js', () => ({
-  selectPoolSandbox: (...args: unknown[]) => selectPoolSandboxMock(...args),
-  SandboxPoolSaturatedError: FakeSandboxPoolSaturatedError,
-}));
+// Spread the real module first: run-leaf.ts also imports assertServerSandbox (and, transitively,
+// SandboxRequiredError) from this module, and a factory that returns only the two names below would
+// leave that a real function elsewhere in this file — a TypeError, not a test failure — the moment
+// any test here reaches the real realProduceSolve/realProduceVerdict.
+vi.mock('../src/select-sandbox.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/select-sandbox.js')>();
+  return {
+    ...actual,
+    selectPoolSandbox: (...args: unknown[]) => selectPoolSandboxMock(...args),
+    SandboxPoolSaturatedError: FakeSandboxPoolSaturatedError,
+  };
+});
 
 // The `(..._args: unknown[])` params are load-bearing, not decoration: the vi.mock factories
 // below forward their arguments with a spread, and a mock whose implementation declares no
@@ -100,9 +108,11 @@ import {
   buildSolvePrompt,
   leafSessionId,
   validateItem,
+  realProduceSolve,
+  realProduceVerdict,
 } from '../src/run-leaf.js';
 import type { LeafEnvelope } from '../src/run-leaf.js';
-import { SandboxPoolSaturatedError } from '../src/select-sandbox.js';
+import { SandboxPoolSaturatedError, SandboxRequiredError } from '../src/select-sandbox.js';
 
 describe('LeafEnvelope repo ref fields', () => {
   it('accepts optional repoUrl and ref', () => {
@@ -393,6 +403,69 @@ describe('realProduceVerdict transport wiring (Task 9)', () => {
     expect(transport.exec).toHaveBeenCalledTimes(2);
     expect(close).toHaveBeenCalledTimes(1);
     expect(k8sSandboxExtensionMock).toHaveBeenCalledWith({ config: FAKE_CONFIG, transport });
+  });
+});
+
+describe('realProduceSolve / realProduceVerdict: server-mode sandbox gate (MI1 R3 fix round 1)', () => {
+  // A truthy lease with a falsy `config` cannot happen via the real selectPoolSandbox
+  // (SelectedSandbox's `config` is a non-optional K8sSandboxConfig) — see select-sandbox.test.ts's
+  // assertServerSandbox unit tests for the exhaustive truth table. This mocked shape exists only to
+  // prove BOTH leaf kinds' guards actually fire here, in case that invariant is ever loosened.
+  const nullConfigLease = () => ({
+    config: null,
+    heartbeat: vi.fn(async () => {}),
+    release: vi.fn(async () => {}),
+  });
+
+  it('realProduceSolve: throws SandboxRequiredError and never builds a session or the sandbox extension', async () => {
+    const lease = nullConfigLease();
+    selectPoolSandboxMock.mockReset().mockResolvedValue(lease);
+    createAgentSessionMock.mockClear();
+    k8sSandboxExtensionMock.mockClear();
+
+    const env: LeafEnvelope = {
+      sessionId: 'run/solve-1',
+      item: { item_id: 'i1', file: 'f', pattern: 'p' },
+    };
+
+    await expect(realProduceSolve(env, { serverMode: true }, {})).rejects.toBeInstanceOf(
+      SandboxRequiredError,
+    );
+    const err = await realProduceSolve(env, { serverMode: true }, {}).catch((e: unknown) => e);
+    expect((err as Error).name).toBe('SandboxRequiredError');
+
+    // The lease taken to resolve `selected` is released on the throw path, and nothing past the
+    // guard — Redis session creation, the resource loader, the agent session — ever ran.
+    expect(lease.release).toHaveBeenCalled();
+    expect(createAgentSessionMock).not.toHaveBeenCalled();
+    expect(k8sSandboxExtensionMock).not.toHaveBeenCalled();
+  });
+
+  it('realProduceVerdict: throws SandboxRequiredError and never builds a session or the sandbox extension', async () => {
+    const lease = nullConfigLease();
+    selectPoolSandboxMock.mockReset().mockResolvedValue(lease);
+    createAgentSessionMock.mockClear();
+    k8sSandboxExtensionMock.mockClear();
+
+    const item = { item_id: 'i1', file: 'f', pattern: 'p' };
+    const env: LeafEnvelope = { sessionId: 'run/verdict-1', item };
+
+    await expect(realProduceVerdict(item, env, { serverMode: true }, {})).rejects.toBeInstanceOf(
+      SandboxRequiredError,
+    );
+    const err = await realProduceVerdict(item, env, { serverMode: true }, {}).catch(
+      (e: unknown) => e,
+    );
+    expect((err as Error).name).toBe('SandboxRequiredError');
+
+    // Session/verdict-recovery work (the resuming fast-path) runs BEFORE this guard — by design, so
+    // a recovered verdict never leases a pod at all — but that fast-path only touches the mocked
+    // Redis/session-manager stubs above, never createAgentSession or k8sSandboxExtension. Both of
+    // those still sit downstream of the guard, so asserting they never ran is exactly what proves
+    // the guard fired before either could be reached.
+    expect(lease.release).toHaveBeenCalled();
+    expect(createAgentSessionMock).not.toHaveBeenCalled();
+    expect(k8sSandboxExtensionMock).not.toHaveBeenCalled();
   });
 });
 

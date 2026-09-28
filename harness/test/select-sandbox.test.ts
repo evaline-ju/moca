@@ -3,6 +3,8 @@ import {
   orderByLoad,
   selectPoolSandbox,
   SandboxPoolSaturatedError,
+  SandboxRequiredError,
+  assertServerSandbox,
   resolveDiscoverySource,
   resetSharedStores,
 } from '../src/select-sandbox.js';
@@ -504,5 +506,39 @@ describe('selectPoolSandbox discovery source', () => {
     );
     expect(singlePod?.config.pod).toBe('sandbox-0');
     expect(singlePod?.leased).toBe(false);
+  });
+});
+
+describe('assertServerSandbox (MI1 §5 R3)', () => {
+  // The four combinations of {serverMode, sandbox present}, plus the allowLocalTools opt-out —
+  // every caller of this helper (executeTurn, realProduceSolve, realProduceVerdict) collapses onto
+  // this same truth table.
+  it('throws SandboxRequiredError when server-mode has no sandbox config', () => {
+    expect(() => assertServerSandbox({ serverMode: true }, null)).toThrow(SandboxRequiredError);
+    expect(() => assertServerSandbox({ serverMode: true }, undefined)).toThrow(
+      SandboxRequiredError,
+    );
+    try {
+      assertServerSandbox({ serverMode: true }, null);
+      expect.unreachable('assertServerSandbox should have thrown');
+    } catch (err) {
+      expect((err as Error).name).toBe('SandboxRequiredError');
+    }
+  });
+
+  it('does not throw when server-mode HAS a sandbox config', () => {
+    expect(() => assertServerSandbox({ serverMode: true }, { pod: 'sandbox-0' })).not.toThrow();
+  });
+
+  it('does not throw when serverMode is unset (the CLI), regardless of sandbox presence', () => {
+    expect(() => assertServerSandbox(undefined, null)).not.toThrow();
+    expect(() => assertServerSandbox({}, null)).not.toThrow();
+    expect(() => assertServerSandbox({ serverMode: false }, null)).not.toThrow();
+  });
+
+  it('does not throw when allowLocalTools opts out, even with no sandbox config', () => {
+    expect(() =>
+      assertServerSandbox({ serverMode: true, allowLocalTools: true }, null),
+    ).not.toThrow();
   });
 });

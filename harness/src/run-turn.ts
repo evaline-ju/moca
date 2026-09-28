@@ -24,7 +24,7 @@ import {
   selectPoolSandbox,
   SandboxPoolSaturatedError,
   SandboxPoolEmptyError,
-  SandboxRequiredError,
+  assertServerSandbox,
   type SelectDeps,
 } from './select-sandbox.js';
 import { checkpointExtension } from './checkpoint-extension.js';
@@ -639,9 +639,11 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
 
   // A null config would leave Pi's built-in tools running LOCALLY, in this process (MI1 §5 R3). Both
   // ways a turn gets here — no pool resolved, or a leaf's injected sandbox — meet at this line.
-  if (input.config?.serverMode && !input.config.allowLocalTools && !acquired.sandbox.config) {
+  try {
+    assertServerSandbox(input.config, acquired.sandbox.config);
+  } catch (err) {
     await acquired.release();
-    throw new SandboxRequiredError();
+    throw err;
   }
 
   let leaseRenewal: ReturnType<typeof setInterval> | undefined;

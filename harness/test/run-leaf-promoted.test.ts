@@ -14,10 +14,16 @@ const { selectPoolSandboxMock, FakeSandboxPoolSaturatedError } = vi.hoisted(() =
   }
   return { selectPoolSandboxMock: vi.fn(), FakeSandboxPoolSaturatedError };
 });
-vi.mock('../src/select-sandbox.js', () => ({
-  selectPoolSandbox: (...args: unknown[]) => selectPoolSandboxMock(...args),
-  SandboxPoolSaturatedError: FakeSandboxPoolSaturatedError,
-}));
+// Spread the real module first: run-leaf.ts also imports assertServerSandbox (and, transitively,
+// SandboxRequiredError) from this module — see harness/test/run-leaf.test.ts's identical comment.
+vi.mock('../src/select-sandbox.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/select-sandbox.js')>();
+  return {
+    ...actual,
+    selectPoolSandbox: (...args: unknown[]) => selectPoolSandboxMock(...args),
+    SandboxPoolSaturatedError: FakeSandboxPoolSaturatedError,
+  };
+});
 
 // The `(..._args: unknown[])` params are load-bearing, not decoration: the vi.mock factories
 // below forward their arguments with a spread, and a mock whose implementation declares no

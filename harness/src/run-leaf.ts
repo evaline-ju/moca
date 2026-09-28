@@ -11,6 +11,7 @@ import { k8sSandboxExtension, KubectlTransport } from '@sh/k8s-sandbox';
 import {
   selectPoolSandbox,
   SandboxPoolSaturatedError,
+  assertServerSandbox,
   type SelectedSandbox,
 } from './select-sandbox.js';
 import { leaseTimings } from './lease-timings.js';
@@ -585,6 +586,17 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture) => {
   });
   if (!selected) throw new Error('solve leaf requires a configured sandbox pool');
 
+  // MI1 §5 R3: a server-mode caller must not reach k8sSandboxExtension with a null config. selected
+  // always carries a real config when truthy (see SelectedSandbox), so this is defense-in-depth today
+  // — but it keeps this leaf's guard identical to executeTurn's and realProduceVerdict's below, rather
+  // than relying solely on the `if (!selected) throw` above to hold that invariant forever.
+  try {
+    assertServerSandbox(config, selected.config);
+  } catch (err) {
+    await selected.release();
+    throw err;
+  }
+
   const store = new RedisSessionBackend<FileEntry>(config?.redisUrl ?? 'redis://localhost:6379');
   const backend = new BufferedRedisBackend(store);
   const prior = await store.read(sid);
@@ -733,6 +745,20 @@ export const realProduceVerdict: ProduceVerdict = async (item, env, config, capt
     ttlMs: verdictTimings.ttlMs,
     remoteSandbox,
   });
+
+  // MI1 §5 R3: a server-mode caller with no sandbox must fail HERE, before the workspace converge,
+  // the gate front-end, and the resource loader below ever run k8sSandboxExtension with a null
+  // config. selected's own session/verdict-recovery work above cannot move after this check (the
+  // fast-path must skip leasing a pod entirely), so — unlike realProduceSolve — this can't sit before
+  // any session is created; it sits as early as the sandbox itself is known.
+  try {
+    assertServerSandbox(config, selected?.config ?? null);
+  } catch (err) {
+    if (selected) await selected.release();
+    if (selected?.transport) await selected.transport.close();
+    throw err;
+  }
+
   const converging = selected != null && !!env.repoUrl && !!env.ref;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
 
