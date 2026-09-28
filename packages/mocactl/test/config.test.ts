@@ -1,4 +1,13 @@
-import { mkdtempSync, readFileSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
+import {
+  closeSync,
+  fstatSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -128,9 +137,16 @@ describe('auth cache', () => {
   it('writes auth.json with mode 0600 in a 0700 directory', () => {
     const paths = resolvePaths({}, tmpHome());
     saveAuth(paths, auth);
-    expect(statSync(paths.authFile).mode & 0o777).toBe(0o600);
+    // One descriptor for the mode check and the read, so both are about the same file
+    // (CodeQL js/file-system-race on a stat-then-read of a path).
+    const fd = openSync(paths.authFile, 'r');
+    try {
+      expect(fstatSync(fd).mode & 0o777).toBe(0o600);
+      expect(JSON.parse(readFileSync(fd, 'utf8')).subject).toBe('github:1');
+    } finally {
+      closeSync(fd);
+    }
     expect(statSync(paths.configDir).mode & 0o777).toBe(0o700);
-    expect(JSON.parse(readFileSync(paths.authFile, 'utf8')).subject).toBe('github:1');
   });
 
   it('returns null for a different control plane', () => {

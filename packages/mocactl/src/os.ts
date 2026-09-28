@@ -38,44 +38,72 @@ export function openCommand(
   return { cmd: 'xdg-open', args: [url] };
 }
 
-// The editor string is the user's own ($VISUAL/$EDITOR, which may carry flags such as
-// `code --wait`), so it goes through the shell. The file path is ours, but it can still contain
-// spaces (mkdtempSync(tmpdir()) is not guaranteed space-free) or shell metacharacters, and
-// JSON.stringify quoting is not shell-safe for `$`/backticks — so instead of interpolating the
-// path into the command string, it is passed as a positional argument to the shell rather than
-// being interpolated:
-//  - POSIX: `sh -c '<editor> "$1"' sh <file>` — 'sh' is the conventional $0 placeholder, <file>
-//    lands in $1, quoted, so it survives as one word regardless of spaces or its content.
-//  - win32: Node's `shell: true` picks cmd.exe; our own temp/export paths never contain a `"`,
-//    so a plain double-quoted `"${file}"` is safe there.
+/**
+ * Splits `$VISUAL`/`$EDITOR` into words the way a POSIX shell would for the common cases —
+ * whitespace separates, '…' is literal, "…" is literal except for \" and \\, and a backslash
+ * outside quotes escapes the next character — so `code --wait` and
+ * `"/Applications/Sublime Text.app/Contents/SharedSupport/bin/subl" -w` both work. No expansion
+ * of any kind happens: `$VAR`, backticks, globs and `#` are ordinary characters.
+ */
+export function editorArgv(command: string): string[] {
+  const words: string[] = [];
+  let word = '';
+  let inWord = false;
+  let quote: "'" | '"' | undefined;
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i]!;
+    if (quote === "'") {
+      if (c === "'") quote = undefined;
+      else word += c;
+    } else if (quote === '"') {
+      if (c === '"') quote = undefined;
+      else if (c === '\\' && (command[i + 1] === '"' || command[i + 1] === '\\'))
+        word += command[++i];
+      else word += c;
+    } else if (c === "'" || c === '"') {
+      quote = c;
+      inWord = true;
+    } else if (c === '\\' && i + 1 < command.length) {
+      word += command[++i];
+      inWord = true;
+    } else if (/\s/.test(c)) {
+      if (inWord) words.push(word);
+      word = '';
+      inWord = false;
+    } else {
+      word += c;
+      inWord = true;
+    }
+  }
+  if (quote) throw new Error(`could not start editor "${command}": unterminated ${quote} quote`);
+  if (inWord) words.push(word);
+  if (words.length === 0) throw new Error('could not start editor: $EDITOR is blank');
+  return words;
+}
+
+// The editor runs WITHOUT a shell: `$VISUAL`/`$EDITOR` is split into words (editorArgv) and the
+// file is appended as one more argument. So neither the editor string nor the file path — which
+// can hold spaces, `$` or backticks — is ever interpreted by a shell. The price is that an editor
+// string relying on shell expansion (`$HOME/bin/ed`) must be written out; on Windows it must name
+// an executable (a `.cmd` shim such as `code` needs its full `Code.exe` path), since Node refuses
+// to run a batch file without a shell.
 //
 // A missing or unstartable editor must not be silently swallowed: editText must not return the
 // caller's untouched initial text as though the user had saved something. spawnSync never throws
 // on its own, so its result is inspected here:
-//  - `result.error` means the process itself (the shell, or cmd.exe) could not be started at all.
+//  - `result.error` means the editor could not be started at all (e.g. ENOENT: not found).
 //  - `result.signal` means it was killed outright by a signal.
-//  - on POSIX, a plain command-not-found/not-executable is reported by the *shell* as exit status
-//    127/126 (since the editor runs as an argument to `sh -c`, not as the directly-spawned
-//    program, so `result.error` is never set for that case) — these are treated as a start
-//    failure too.
 // An ordinary non-zero exit status is NOT an error (e.g. vim can exit 1 benignly) and is left
 // alone.
-function runEditor(env: NodeJS.ProcessEnv, file: string, platform: NodeJS.Platform): void {
+function runEditor(env: NodeJS.ProcessEnv, file: string): void {
   const editor = editorCommand(env);
-  const result =
-    platform === 'win32'
-      ? spawnSync(`${editor} "${file}"`, { stdio: 'inherit', shell: true })
-      : spawnSync('/bin/sh', ['-c', `${editor} "$1"`, 'sh', file], { stdio: 'inherit' });
+  const [cmd, ...args] = editorArgv(editor);
+  const result = spawnSync(cmd!, [...args, file], { stdio: 'inherit' });
   if (result.error) {
     throw new Error(`could not start editor "${editor}": ${result.error.message}`);
   }
   if (result.signal) {
     throw new Error(`editor "${editor}" was killed by signal ${result.signal}`);
-  }
-  if (platform !== 'win32' && (result.status === 126 || result.status === 127)) {
-    throw new Error(
-      `could not start editor "${editor}": command not found (exit ${result.status})`,
-    );
   }
 }
 
@@ -101,14 +129,14 @@ export function realOs(
       const file = join(dir, 'prompt.md');
       try {
         writeFileSync(file, initial, { mode: 0o600 });
-        runEditor(env, file, platform);
+        runEditor(env, file);
         return readFileSync(file, 'utf8').replace(/\n$/, '');
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
     },
     openInEditor(file) {
-      runEditor(env, file, platform);
+      runEditor(env, file);
     },
   };
 }

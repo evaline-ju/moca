@@ -2,6 +2,7 @@ import { ApiError, TurnCancelledError } from './errors.js';
 import type { TurnFrame } from './frames.js';
 import { HarnessClient } from './harness.js';
 import type { ControlPlaneApi, HarnessApi, StreamTurnArgs } from './types.js';
+import { trimTrailingSlashes } from './url.js';
 
 /** The fix a user needs when the control plane cannot say where the harness is. */
 const OVERRIDE = 'or pass --harness-url';
@@ -45,7 +46,7 @@ export async function discoverHarnessUrl(cp: ControlPlaneApi): Promise<string> {
       `the control plane advertises a harness URL that is not an http(s) URL — its operator must fix SH_PUBLIC_HARNESS_URL, ${OVERRIDE}`,
     );
   }
-  return url.href.replace(/\/+$/, '');
+  return trimTrailingSlashes(url.href);
 }
 
 function parseHttpUrl(s: string): URL | undefined {

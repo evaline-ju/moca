@@ -2,6 +2,7 @@ import { ApiError, TurnCancelledError, errorFromResponse, networkError } from '.
 import { isTerminal, type TurnFrame } from './frames.js';
 import { readSse, toFrame } from './sse-parser.js';
 import type { HarnessApi, StreamTurnArgs } from './types.js';
+import { trimTrailingSlashes } from './url.js';
 
 export class HarnessClient implements HarnessApi {
   private readonly base: string;
@@ -10,7 +11,7 @@ export class HarnessClient implements HarnessApi {
     baseUrl: string,
     private readonly fetchImpl: typeof fetch = fetch,
   ) {
-    this.base = baseUrl.replace(/\/+$/, '');
+    this.base = trimTrailingSlashes(baseUrl);
   }
 
   async baseUrl(): Promise<string> {

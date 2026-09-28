@@ -45,7 +45,10 @@ onboarding never saves a discovered harness URL, so a harness the operator moves
 overlay (including a loading or error screen) and, on the chat view, cancels the running turn; a
 second `Esc` within a second also clears queued messages (after a cancel, the next queued message
 waits that second before it is sent). `$EDITOR` (or `$VISUAL`) runs with the
-terminal suspended — if it cannot start, a toast says so and your draft is unchanged. Override
+terminal suspended — if it cannot start, a toast says so and your draft is unchanged. It runs
+without a shell: the value is split into words (quotes work, e.g. `code --wait` or
+`"/path/with spaces/subl" -w`), but nothing is expanded, so write `$HOME/bin/ed` out in full, and
+on Windows name an `.exe`. Override
 keys in `config.json` under `keybinds`, e.g. `{ "session.new": "ctrl+x s" }`.
 
 ## Headless

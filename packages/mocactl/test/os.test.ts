@@ -1,9 +1,16 @@
-import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { resolvePaths } from '../src/config.js';
-import { editorCommand, openCommand, realOs, writeExport } from '../src/os.js';
+import { editorArgv, editorCommand, openCommand, realOs, writeExport } from '../src/os.js';
 
 describe('editorCommand', () => {
   it('prefers VISUAL, then EDITOR, then vi', () => {
@@ -68,10 +75,42 @@ describe('editText', () => {
   });
 
   it('throws when the editor process is killed by a signal', () => {
-    // `#` comments out the file argument our own runEditor appends, so this just signals the
-    // shell process spawnSync is watching directly.
-    const os = realOs({ EDITOR: 'kill -TERM $$ #' });
+    // The "editor" is sh itself (runEditor starts no shell of its own), and it signals itself.
+    const os = realOs({ EDITOR: "sh -c 'kill -TERM $$'" });
     expect(() => os.editText('draft')).toThrow(/signal/i);
+  });
+});
+
+describe('editorArgv', () => {
+  it('splits on whitespace and honours quotes and backslashes, like a shell would', () => {
+    expect(editorArgv('code --wait')).toEqual(['code', '--wait']);
+    expect(editorArgv('  vim  ')).toEqual(['vim']);
+    expect(editorArgv('"/Applications/Sublime Text.app/bin/subl" -w')).toEqual([
+      '/Applications/Sublime Text.app/bin/subl',
+      '-w',
+    ]);
+    expect(editorArgv('sh -c \'echo "$0"\'')).toEqual(['sh', '-c', 'echo "$0"']);
+    expect(editorArgv('a\\ b "c\\"d" ""')).toEqual(['a b', 'c"d', '']);
+  });
+
+  it('expands nothing: $VAR, backticks, globs and # are literal', () => {
+    expect(editorArgv('ed $HOME `id` *.md #x')).toEqual(['ed', '$HOME', '`id`', '*.md', '#x']);
+  });
+
+  it('refuses an unterminated quote or a blank command', () => {
+    expect(() => editorArgv('"vim')).toThrow(/unterminated/);
+    expect(() => editorArgv('   ')).toThrow(/blank/);
+  });
+});
+
+describe('the editor runs without a shell', () => {
+  it('never lets a shell interpret $EDITOR', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mocactl-os-'));
+    const marker = join(dir, 'pwned');
+    // Under `sh -c "<editor> …"` this would run touch; without a shell, `true` just gets the words.
+    const os = realOs({ EDITOR: `true $(touch ${marker}) ; touch ${marker}` });
+    expect(os.editText('draft')).toBe('draft');
+    expect(existsSync(marker)).toBe(false);
   });
 });
 

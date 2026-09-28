@@ -41,7 +41,10 @@ function urlEnv(env: NodeJS.ProcessEnv, name: string): string | undefined {
   }
   if (u.protocol !== 'http:' && u.protocol !== 'https:')
     throw new Error(`${name} must be an absolute http(s) URL, got "${v}"`);
-  return v.replace(/\/+$/, '');
+  let end = v.length;
+  // A loop, not /\/+$/: that regex is quadratic on a long run of slashes (CodeQL js/polynomial-redos).
+  while (end > 0 && v.charCodeAt(end - 1) === 0x2f) end--;
+  return v.slice(0, end);
 }
 
 export function portFromEnv(env: NodeJS.ProcessEnv): number {

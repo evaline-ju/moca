@@ -8,6 +8,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
+import { trimTrailingSlashes } from './api/url.js';
 
 export interface Paths {
   configDir: string;
@@ -164,7 +165,7 @@ export interface Endpoints {
 
 export function normalizeUrl(u?: string): string | undefined {
   const t = u?.trim();
-  return t ? t.replace(/\/+$/, '') : undefined;
+  return t ? trimTrailingSlashes(t) : undefined;
 }
 
 export function resolveEndpoints(

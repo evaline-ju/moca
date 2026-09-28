@@ -1,4 +1,5 @@
 import { ApiError, errorFromResponse, networkError } from './errors.js';
+import { trimTrailingSlashes } from './url.js';
 import type {
   ApiLogin,
   ControlPlaneApi,
@@ -24,7 +25,7 @@ export class ControlPlaneClient implements ControlPlaneApi {
     private readonly getToken: () => string | undefined,
     private readonly fetchImpl: typeof fetch = fetch,
   ) {
-    this.base = baseUrl.replace(/\/+$/, '');
+    this.base = trimTrailingSlashes(baseUrl);
   }
 
   private async request(

@@ -73,6 +73,15 @@ describe('configFromEnv', () => {
     ).toBe('https://harness.example.com');
   });
 
+  it('trims SH_PUBLIC_HARNESS_URL in one pass, even on a long run of slashes', () => {
+    // The shape that made the old /\/+$/ quadratic (CodeQL js/polynomial-redos).
+    const many = `https://h.example${'/'.repeat(100_000)}x`;
+    expect(configFromEnv({ ...baseEnv, SH_PUBLIC_HARNESS_URL: many }).publicHarnessUrl).toBe(many);
+    expect(
+      configFromEnv({ ...baseEnv, SH_PUBLIC_HARNESS_URL: 'https://h.example///' }).publicHarnessUrl,
+    ).toBe('https://h.example');
+  });
+
   it('refuses to start with a SH_PUBLIC_HARNESS_URL no client could use', () => {
     for (const bad of ['harness.example.com', 'ftp://harness', 'not a url']) {
       expect(() => configFromEnv({ ...baseEnv, SH_PUBLIC_HARNESS_URL: bad }), bad).toThrow(
