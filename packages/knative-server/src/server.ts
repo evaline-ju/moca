@@ -78,13 +78,18 @@ const isSaturated = (r: LeafResult): boolean => r.status === 'failed' && r.reaso
  * identity for an authenticated turn (MU1 spec §3.4). When it is absent, this is byte-for-byte
  * today's behaviour, which is what keeps the 14 unauthenticated deploy scripts working (§4.3.1).
  */
-function buildConfig(auth?: TurnAuth | null): TurnConfig {
+export function buildConfig(auth?: TurnAuth | null): TurnConfig {
+  // Every config built here is for a SERVER turn: tools must run in a sandbox and the loader is
+  // locked down (MI1 §5 R3/R4). SH_LOCAL_TOOLS=1 is a single-tenant development opt-in;
+  // prepareServerProcess refuses it under MOCA_TENANCY=multi at boot.
+  const server = { serverMode: true, allowLocalTools: process.env.SH_LOCAL_TOOLS === '1' };
   if (auth) {
     return {
       redisUrl: process.env.REDIS_URL,
       cwd: process.env.HARNESS_CWD || process.cwd(),
       anthropicBaseUrl: auth.anthropicBaseUrl,
       upstreamCredential: auth.credential,
+      ...server,
     };
   }
   return {
@@ -92,6 +97,7 @@ function buildConfig(auth?: TurnAuth | null): TurnConfig {
     cwd: process.env.HARNESS_CWD || process.cwd(),
     anthropicBaseUrl: process.env.ANTHROPIC_BASE_URL,
     anthropicAuthToken: process.env.ANTHROPIC_AUTH_TOKEN,
+    ...server,
   };
 }
 

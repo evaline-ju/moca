@@ -24,6 +24,7 @@ import {
   selectPoolSandbox,
   SandboxPoolSaturatedError,
   SandboxPoolEmptyError,
+  SandboxRequiredError,
   type SelectDeps,
 } from './select-sandbox.js';
 import { checkpointExtension } from './checkpoint-extension.js';
@@ -258,6 +259,13 @@ export interface TurnConfig {
   upstreamCredential?: UpstreamCredential;
   model?: string;
   provider?: string;
+  /**
+   * Set by the server entry points (startServer, the P6 worker). A server-mode turn must run its tools
+   * in a sandbox and uses a locked-down resource loader (MI1 §5 R3, R4). Absent for the CLI.
+   */
+  serverMode?: boolean;
+  /** Server mode only: allow local tools when no sandbox resolves. SH_LOCAL_TOOLS=1; refused under multi tenancy. */
+  allowLocalTools?: boolean;
 }
 
 export interface ModelSelection {
@@ -628,6 +636,13 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
   // and unwinds through this finally). A leaked lease would hold a pool slot for its full TTL and, at
   // E8's concurrency, starve the pool it is meant to measure.
   const acquired = await acquireTurnSandbox(input.sandbox, process.env, cwd, input.sessionId);
+
+  // A null config would leave Pi's built-in tools running LOCALLY, in this process (MI1 §5 R3). Both
+  // ways a turn gets here — no pool resolved, or a leaf's injected sandbox — meet at this line.
+  if (input.config?.serverMode && !input.config.allowLocalTools && !acquired.sandbox.config) {
+    await acquired.release();
+    throw new SandboxRequiredError();
+  }
 
   let leaseRenewal: ReturnType<typeof setInterval> | undefined;
   if (acquired.leased) {

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { AMBIENT_KEY_SENTINEL } from '@sh/harness/ambient-sentinel';
 import { readTenancy } from '../src/tenancy.js';
 import { prepareServerProcess, scrubAmbientCredentials } from '../src/server-process.js';
+import { buildConfig } from '../src/server.js';
 
 const KEYS = [
   'MOCA_TENANCY',
@@ -86,5 +87,32 @@ describe('prepareServerProcess', () => {
     scrubAmbientCredentials(env);
     scrubAmbientCredentials(env);
     expect(env.ANTHROPIC_API_KEY).toBe(AMBIENT_KEY_SENTINEL);
+  });
+});
+
+describe('buildConfig marks every server turn (MI1 R3)', () => {
+  it('sets serverMode on both the authenticated and the ambient branch', () => {
+    expect(buildConfig(null).serverMode).toBe(true);
+    expect(
+      buildConfig({
+        sessionId: 's',
+        subject: 'github:1',
+        anthropicBaseUrl: 'https://gw/v1',
+        credential: { mode: 'direct', value: 'x' }, // notsecret
+      } as never).serverMode,
+    ).toBe(true);
+  });
+
+  it('allows local tools only when SH_LOCAL_TOOLS=1', () => {
+    const saved = process.env.SH_LOCAL_TOOLS;
+    try {
+      delete process.env.SH_LOCAL_TOOLS;
+      expect(buildConfig(null).allowLocalTools).toBe(false);
+      process.env.SH_LOCAL_TOOLS = '1';
+      expect(buildConfig(null).allowLocalTools).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env.SH_LOCAL_TOOLS;
+      else process.env.SH_LOCAL_TOOLS = saved;
+    }
   });
 });

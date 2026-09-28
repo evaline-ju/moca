@@ -266,6 +266,22 @@ export class SandboxPoolEmptyError extends Error {
   }
 }
 
+/**
+ * Thrown when a server-mode turn has no sandbox to run tools in (MI1 §5 R3). Without it, a `null`
+ * sandbox config leaves Pi's built-in tools running locally in the worker process. Deliberately NOT
+ * in turnErrorStatus's NO_CAPACITY set: this is a deployment that has no sandbox configured at all,
+ * so a retry cannot succeed, and it surfaces as a 500 naming the fix.
+ */
+export class SandboxRequiredError extends Error {
+  constructor() {
+    super(
+      'no sandbox resolved for this turn; a server refuses to run tools in its own process ' +
+        '(configure a sandbox pool, or set SH_LOCAL_TOOLS=1 for single-tenant development)',
+    );
+    this.name = 'SandboxRequiredError';
+  }
+}
+
 export interface SelectedSandbox {
   config: K8sSandboxConfig;
   /** Present ONLY for a leased grpc presence record; undefined for pods. */
