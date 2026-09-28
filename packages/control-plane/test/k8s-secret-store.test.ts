@@ -53,7 +53,16 @@ function fakeCluster() {
       const s = secrets.get(name);
       if (!s) throw new Error(`Error from server (NotFound): secrets "${name}" not found`);
       const patch = JSON.parse(stdin ?? '{}');
+      // Real k8s Secrets: `data` is the persisted field; `stringData` is a write-only,
+      // admission-time convenience the apiserver base64-encodes INTO `data` for non-null string
+      // values and otherwise ignores entirely -- a null entry in `stringData` does NOT delete
+      // the corresponding `data` key (only nulling `data` itself does). Modeling that asymmetry
+      // is what makes this fake catch a delete() that nulls the wrong field and silently leaves
+      // ciphertext behind, instead of masking it by "helpfully" honouring a stringData null.
       for (const [k, v] of Object.entries(patch.stringData ?? {})) {
+        if (v !== null) s.data[k] = v as string;
+      }
+      for (const [k, v] of Object.entries(patch.data ?? {})) {
         if (v === null) delete s.data[k];
         else s.data[k] = v as string;
       }
@@ -294,6 +303,11 @@ describe('K8sSecretStore', () => {
     expect((await store.get(ALICE, 'b'))?.secret.token).toBe('ghp-fake'); // notsecret
     // The now-unused annotations go too, or list() would report a credential with no value.
     expect(Object.keys([...cluster.secrets.values()][0]!.annotations).join()).not.toContain('.a');
+    // And the encrypted value itself is actually gone from the Secret -- not just annotation-less
+    // and therefore invisible to list()/get(). Nulling the wrong field (stringData, a write-only
+    // admission-time alias for `data`) leaves the ciphertext in the object forever; only nulling
+    // `data` itself removes it.
+    expect([...cluster.secrets.values()][0]!.data.a).toBeUndefined();
   });
 
   it('deletes idempotently, including for a subject that never had a Secret', async () => {

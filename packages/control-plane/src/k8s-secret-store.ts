@@ -254,7 +254,13 @@ export class K8sSecretStore implements CredentialStore {
       metadata: {
         annotations: Object.fromEntries(FIELDS.map((f) => [annotationKey(f, name), null])),
       },
-      stringData: { [name]: null },
+      // `data`, not `stringData`: `stringData` is a write-only, admission-time convenience the
+      // apiserver base64-encodes INTO `data` for a non-null value and otherwise ignores entirely
+      // -- nulling a stringData entry does not delete the corresponding data key, so a delete
+      // that used it left the encrypted value in the Secret forever (invisible to list()/get(),
+      // which both require the annotations this patch DOES clear, but never actually erased).
+      // Only nulling `data` itself removes the persisted key.
+      data: { [name]: null },
     };
     await this.guard(() =>
       this.run(buildPatchSecretArgs(secretNameFor(subject), this.namespace), JSON.stringify(patch)),
