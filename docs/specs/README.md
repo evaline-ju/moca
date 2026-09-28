@@ -214,6 +214,28 @@ technical density work it depends on and packages for shipment.
 | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | **RA1** | **Density cutover & repository re-architecture** — repo rename to **MOCA** (Micro Orchestrator for Cloud Agents), split-out `moca-experiments` repo, P4/P6 made the primary deployment model, then K8s/Knative/KEDA **deprecated in place** (not deleted), elevated sandbox-transport adapter, design-only agent-runtime adapter | **Phase 2 (moca-experiments split) executed 2026-09-25; Phases 1/3/4 remain plan only — execution gated** (§2 of the spec: blocked on #336, #337, #338, #274) | [`2026-09-24-ra1-density-cutover-and-repo-rearchitecture-design.md`](2026-09-24-ra1-density-cutover-and-repo-rearchitecture-design.md) |
 
+## Multi-user Isolation (`MI`-prefix)
+
+Making a P6 worker safe to hold sessions of **different users at once** on the Kubernetes-free
+substrate, for the two things that are per-session: promoted config bundles (skills) and credentials.
+Its own prefix because it cuts across three tracks at once — the `P` density track (P4, P4.1, P6), the
+`MU` product track (MU1, MU2) and the `Z` credential plane (Z1, Z5) — and packages them into one
+reviewable isolation claim rather than continuing any one of them.
+
+| ID      | Title                                                                                                                                                                                                                                                                                                                                                      | Status                | Spec / decision                                                                                                        |
+| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| **MI1** | **Multi-user isolation on the density substrate** — control-plane-signed per-session grants the worker carries but cannot mint; RFC 8693-shaped token endpoint; `moca-egress` (connection-bound credential injection, microVM and container tiers); bundle ownership, session binding and in-memory loading; per-subject container sandboxes; slices S1–S5 | **design — proposed** | [`2026-09-28-moca-multi-user-isolation-design.md`](2026-09-28-moca-multi-user-isolation-design.md); ADR-0036 (with S2) |
+
+### Dependencies (MI)
+
+- **MI1 S2 needs #348's Kubernetes-free `CredentialStore`**, and #348 must land with or after MI1 S1's
+  environment allowlist (MI1 §10.3).
+- **MI1 S4 absorbs P4.1's implementation (#277)** and amends P4.1 §12.2's proxy choice.
+- **MI1 delivers part of MU2's scope** — `sandbox-egress` credential delivery and a subject-bound
+  sandbox partition for the container tier — on the Kubernetes-free path; MU2 keeps quotas, OIDC and
+  owned asynchronous runs.
+- **Cortex replaces `moca-egress` only via MI1's conformance suite** (cortex#905, rescoped).
+
 ---
 
 ## Lineage & supersessions (explicit)
