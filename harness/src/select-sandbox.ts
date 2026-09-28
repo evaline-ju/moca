@@ -1,4 +1,4 @@
-import { credentials } from '@grpc/grpc-js';
+import { credentials, InterceptingCall, type Interceptor } from '@grpc/grpc-js';
 import {
   listPoolPods,
   resolveSandboxConfig,
@@ -342,10 +342,34 @@ export interface SelectDeps {
   ) => SandboxTransport;
 }
 
+/** Adds the worker's relay credential to every SandboxExec call (MI1 §5 R5). */
+function execTokenInterceptor(token: string): Interceptor {
+  return (options, nextCall) =>
+    new InterceptingCall(nextCall(options), {
+      start(metadata, listener, next) {
+        metadata.set('authorization', `Bearer ${token}`);
+        next(metadata, listener);
+      },
+    });
+}
+
+export function makeRelayExecClient(addr: string, token: string): ExecClientLike {
+  return new SandboxExecClient(addr, credentials.createInsecure(), {
+    interceptors: [execTokenInterceptor(token)],
+  }) as unknown as ExecClientLike;
+}
+
 /** Lazily builds a real gRPC exec client — only reached on the grpc branch when the flag is on. */
 function defaultExecClient(_sandboxId: string, env: NodeJS.ProcessEnv): ExecClientLike {
   const addr = env.SH_RELAY_ADDR ?? 'sandbox-relay.default.svc.cluster.local:8443';
-  return new SandboxExecClient(addr, credentials.createInsecure()) as unknown as ExecClientLike;
+  const token = env.MOCA_RELAY_EXEC_TOKEN;
+  if (!token) {
+    // Named here rather than surfacing as the relay's UNAUTHENTICATED on the first exec.
+    throw new Error(
+      'MOCA_RELAY_EXEC_TOKEN is not set: the relay refuses unauthenticated SandboxExec',
+    );
+  }
+  return makeRelayExecClient(addr, token);
 }
 
 /**

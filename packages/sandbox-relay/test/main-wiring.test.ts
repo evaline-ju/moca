@@ -25,13 +25,21 @@ describe('relay server wiring', () => {
   // forwards a payload the worker then refuses on the Attach stream, killing every
   // concurrent exec on it. message-size-coupling.test.ts pins the equality.
   it('raises the ingress message limit to the shared MAX_EXEC_MESSAGE_BYTES', () => {
-    const { server } = buildServer({ records, validateToken: () => true });
+    const { server } = buildServer({
+      records,
+      validateToken: () => true,
+      validateExecToken: () => true,
+    });
     const options = (server as unknown as { options: Record<string, unknown> }).options;
     expect(options['grpc.max_receive_message_length']).toBe(MAX_EXEC_MESSAGE_BYTES);
   });
 
   it('registers both gRPC services', () => {
-    const { server } = buildServer({ records, validateToken: () => true });
+    const { server } = buildServer({
+      records,
+      validateToken: () => true,
+      validateExecToken: () => true,
+    });
     // grpc-js Server keeps registered handlers in a private `handlers` Map keyed
     // by full method path (e.g. "/sandbox.v1.SandboxWorker/Attach"). The brief's
     // original snippet assumed a plain Record with Object.keys(), but the
@@ -75,6 +83,7 @@ function fakeAttach() {
 function fakeExecCall(request: unknown) {
   const c = new EventEmitter() as EventEmitter & {
     request: unknown;
+    metadata: { get: () => string[] };
     write: (ev: unknown) => void;
     end: () => void;
     destroy: (err: Error) => void;
@@ -84,6 +93,10 @@ function fakeExecCall(request: unknown) {
     streamError?: Error;
   };
   c.request = request;
+  // The exec/abort handlers now authenticate off call.metadata (MI1 R5); these tests exercise
+  // routing and status wiring under `validateExecToken: () => true`, so the token itself is
+  // irrelevant here -- only its presence as a callable stand-in matters.
+  c.metadata = { get: () => [] };
   c.written = [];
   c.ended = false;
   c.write = (ev) => c.written.push(ev);
@@ -97,7 +110,11 @@ function fakeExecCall(request: unknown) {
 
 describe('relay server exec cancellation wiring (via the real registered handler)', () => {
   it('aborts the worker on client cancel and cleanly drains the generator', async () => {
-    const { server } = buildServer({ records, validateToken: () => true });
+    const { server } = buildServer({
+      records,
+      validateToken: () => true,
+      validateExecToken: () => true,
+    });
     const attach = getHandler(server, '/sandbox.v1.SandboxWorker/Attach');
     const exec = getHandler(server, '/sandbox.v1.SandboxExec/Exec');
 
@@ -159,7 +176,11 @@ describe('relay server exec cancellation wiring (via the real registered handler
   });
 
   it('fails the call with a status when routeExec throws (e.g. absent sandbox)', async () => {
-    const { server } = buildServer({ records, validateToken: () => true });
+    const { server } = buildServer({
+      records,
+      validateToken: () => true,
+      validateExecToken: () => true,
+    });
     const exec = getHandler(server, '/sandbox.v1.SandboxExec/Exec');
 
     const call = fakeExecCall({
@@ -194,7 +215,11 @@ describe('relay server exec error status wiring', () => {
   // must still reach the client, so the event is written either way -- only the terminal
   // status changes.
   it('ends the call with a non-OK status when the worker reports an in-stream exec error', async () => {
-    const { server } = buildServer({ records, validateToken: () => true });
+    const { server } = buildServer({
+      records,
+      validateToken: () => true,
+      validateExecToken: () => true,
+    });
     const attach = getHandler(server, '/sandbox.v1.SandboxWorker/Attach');
     const exec = getHandler(server, '/sandbox.v1.SandboxExec/Exec');
 

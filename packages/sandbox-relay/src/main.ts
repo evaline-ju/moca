@@ -1,7 +1,9 @@
+import { timingSafeEqual } from 'node:crypto';
 import {
   Server,
   ServerCredentials,
   status,
+  type Metadata,
   type ServerDuplexStream,
   type ServerWritableStream,
   type ServerUnaryCall,
@@ -61,16 +63,58 @@ function execStreamError(message: string): Error {
   return err;
 }
 
-export function buildServer(deps: RelayDeps): { server: Server } {
-  const relay = createRelay(deps);
+/** Relay server dependencies: the relay's own, plus the SandboxExec caller check (MI1 §5 R5). */
+export interface RelayServerDeps extends RelayDeps {
+  validateExecToken: (presented: string | undefined) => boolean;
+}
+
+/**
+ * The SandboxExec caller check. FAIL-CLOSED: with no MOCA_RELAY_EXEC_TOKEN there is no valid caller,
+ * so building the validator throws and the relay does not boot. The token is the WORKERS' credential
+ * and deliberately distinct from every sandbox's SH_RELAY_TOKEN[_<id>]: a sandbox that can attach
+ * must not thereby be able to run commands in other sandboxes. Constant-time, length-checked first.
+ */
+export function makeExecTokenValidator(
+  env: NodeJS.ProcessEnv,
+): (presented: string | undefined) => boolean {
+  const expected = env.MOCA_RELAY_EXEC_TOKEN;
+  if (!expected) {
+    throw new Error(
+      'MOCA_RELAY_EXEC_TOKEN is required: the relay refuses unauthenticated SandboxExec',
+    );
+  }
+  const want = Buffer.from(expected);
+  return (presented) => {
+    if (!presented) return false;
+    const got = Buffer.from(presented);
+    return got.length === want.length && timingSafeEqual(got, want);
+  };
+}
+
+function bearerOf(md: Metadata): string | undefined {
+  const v = md.get('authorization')[0];
+  return typeof v === 'string' && v.startsWith('Bearer ') ? v.slice('Bearer '.length) : undefined;
+}
+
+function unauthenticated(): Error & { code: number; details: string } {
+  // The message never contains the presented value.
+  const err = new Error('exec authentication failed') as Error & { code: number; details: string };
+  err.code = status.UNAUTHENTICATED;
+  err.details = err.message;
+  return err;
+}
+
+function newServer(): Server {
   // Raise the ingress limit above gRPC's 4 MiB default. This is the hop that rejects an
   // oversized write today: the harness's ExecRequest carries base64 stdin at 4/3 of the
   // file, so a file the read path can return (DEFAULT_OUTPUT_CAP, 8 MiB) needs ~10.7 MiB
   // here. MAX_EXEC_MESSAGE_BYTES is shared with the Go worker's session.MaxRecvMsgBytes
   // and pinned equal to it — a relay that accepts more than the worker would forward a
   // payload the worker refuses on its Attach stream, killing every exec on it (#173 item 2).
-  const server = new Server({ 'grpc.max_receive_message_length': MAX_EXEC_MESSAGE_BYTES });
+  return new Server({ 'grpc.max_receive_message_length': MAX_EXEC_MESSAGE_BYTES });
+}
 
+function addWorkerService(server: Server, relay: ReturnType<typeof createRelay>): void {
   const workerImpl: SandboxWorkerServer = {
     // AttachStream types metadata.get() as returning string[]; grpc-js's real
     // Metadata.get() returns MetadataValue[] (string | Buffer). The relay only
@@ -80,7 +124,13 @@ export function buildServer(deps: RelayDeps): { server: Server } {
       relay.onAttach(call as unknown as AttachStream),
   };
   server.addService(SandboxWorkerService, workerImpl);
+}
 
+function addExecService(
+  server: Server,
+  relay: ReturnType<typeof createRelay>,
+  validate: RelayServerDeps['validateExecToken'],
+): void {
   const execImpl: SandboxExecServer = {
     // Server-streaming: one ExecRequest in, a stream of ExecEvents out.
     //
@@ -94,6 +144,10 @@ export function buildServer(deps: RelayDeps): { server: Server } {
     // cleans up the sink). This makes worker-disconnect (Task 6) and
     // client-cancel (this task) both terminate the generator cleanly.
     exec: async (call: ServerWritableStream<ExecRequest, ExecEvent>) => {
+      if (!validate(bearerOf(call.metadata))) {
+        failExecStream(call, unauthenticated());
+        return;
+      }
       const req = call.request;
       const e = req.exec;
       if (!e) {
@@ -159,13 +213,45 @@ export function buildServer(deps: RelayDeps): { server: Server } {
       call: ServerUnaryCall<AbortRequest, AbortResponse>,
       cb: sendUnaryData<AbortResponse>,
     ) => {
+      if (!validate(bearerOf(call.metadata))) {
+        cb(unauthenticated(), null);
+        return;
+      }
       relay.routeAbort(call.request.sandboxId, call.request.reqId);
       cb(null, {});
     },
   };
   server.addService(SandboxExecService, execImpl);
+}
 
+/** One listener serving both services — the Kubernetes shape, where the token is the control. */
+export function buildServer(deps: RelayServerDeps): { server: Server } {
+  const relay = createRelay(deps);
+  const server = newServer();
+  addWorkerService(server, relay);
+  addExecService(server, relay, deps.validateExecToken);
   return { server };
+}
+
+/**
+ * Two listeners over ONE relay: sandboxes reach only the attach server; only workers can reach the
+ * exec server (MI1 §5 R5). Same relay instance, so an Exec routes to a worker attached on the other.
+ */
+export function buildServers(deps: RelayServerDeps): { attachServer: Server; execServer: Server } {
+  const relay = createRelay(deps);
+  const attachServer = newServer();
+  const execServer = newServer();
+  addWorkerService(attachServer, relay);
+  addExecService(execServer, relay, deps.validateExecToken);
+  return { attachServer, execServer };
+}
+
+function bind(server: Server, addr: string): Promise<number> {
+  return new Promise((resolve, reject) =>
+    server.bindAsync(addr, ServerCredentials.createInsecure(), (err, p) =>
+      err ? reject(err) : resolve(p),
+    ),
+  );
 }
 
 /**
@@ -186,23 +272,45 @@ export function makeDefaultValidateToken(
 }
 
 export async function startRelay(
-  opts: { port?: number; deps?: RelayDeps } = {},
-): Promise<{ port: number; shutdown: () => Promise<void> }> {
-  const deps = opts.deps ?? {
-    records: new RedisRecordStore(),
-    validateToken: makeDefaultValidateToken(process.env),
+  opts: { port?: number; execAddr?: string; deps?: RelayServerDeps; env?: NodeJS.ProcessEnv } = {},
+): Promise<{ port: number; execPort?: number; shutdown: () => Promise<void> }> {
+  const env = opts.env ?? process.env;
+  // The exec validator first: it throws on a missing token before anything touches Redis.
+  const deps =
+    opts.deps ??
+    (() => {
+      const validateExecToken = makeExecTokenValidator(env);
+      return {
+        records: new RedisRecordStore(),
+        validateToken: makeDefaultValidateToken(env),
+        validateExecToken,
+      };
+    })();
+  const attachAddr = `0.0.0.0:${opts.port ?? Number(env.SH_RELAY_PORT ?? 8443)}`;
+  const execAddr = opts.execAddr ?? env.MOCA_RELAY_EXEC_ADDR;
+  if (!execAddr) {
+    const { server } = buildServer(deps);
+    const port = await bind(server, attachAddr);
+    return { port, shutdown: () => new Promise((r) => server.tryShutdown(() => r())) };
+  }
+  const { attachServer, execServer } = buildServers(deps);
+  const port = await bind(attachServer, attachAddr);
+  const execPort = await bind(execServer, execAddr);
+  return {
+    port,
+    execPort,
+    shutdown: async () => {
+      await new Promise<void>((r) => attachServer.tryShutdown(() => r()));
+      await new Promise<void>((r) => execServer.tryShutdown(() => r()));
+    },
   };
-  const { server } = buildServer(deps);
-  const addr = `0.0.0.0:${opts.port ?? Number(process.env.SH_RELAY_PORT ?? 8443)}`;
-  const port = await new Promise<number>((resolve, reject) =>
-    server.bindAsync(addr, ServerCredentials.createInsecure(), (err, p) =>
-      err ? reject(err) : resolve(p),
-    ),
-  );
-  return { port, shutdown: () => new Promise((r) => server.tryShutdown(() => r())) };
 }
 
 // Bootstrap when run directly (tsx entrypoint), not when imported by tests.
 if (import.meta.url === `file://${process.argv[1]}`) {
-  startRelay().then(({ port }) => console.log(`sandbox-relay listening on :${port}`));
+  startRelay().then(({ port, execPort }) =>
+    console.log(
+      `sandbox-relay attach :${port}${execPort ? `, exec :${execPort}` : ' (exec on the same listener)'}`,
+    ),
+  );
 }
