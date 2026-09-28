@@ -422,11 +422,25 @@ gen_relay_token() {
 
 if $KUBECTL get secret sh-relay-token -n "$NAMESPACE" &>/dev/null; then
   log_success "Secret sh-relay-token already present in $NAMESPACE — keeping it (not rotating)"
+  # An upgrade from before MI1 R5: the Secret exists but predates MOCA_RELAY_EXEC_TOKEN, which
+  # the overlay's patch also now sources from it (patch-relay-token.yaml). Add the missing key
+  # without touching SH_RELAY_TOKEN -- same never-rotate rule, applied per-key instead of
+  # per-Secret so an old Secret does not need re-creating to pick up a new field.
+  if [ -z "$($KUBECTL get secret sh-relay-token -n "$NAMESPACE" -o jsonpath='{.data.MOCA_RELAY_EXEC_TOKEN}')" ]; then
+    if $DRY_RUN; then
+      log_info "[dry-run] would add MOCA_RELAY_EXEC_TOKEN to sh-relay-token (value redacted)"
+    else
+      $KUBECTL patch secret sh-relay-token -n "$NAMESPACE" --type merge \
+        -p "{\"stringData\":{\"MOCA_RELAY_EXEC_TOKEN\":\"$(gen_relay_token)\"}}" >/dev/null
+      log_success "added MOCA_RELAY_EXEC_TOKEN to sh-relay-token (the relay requires it)"
+    fi
+  fi
 elif $DRY_RUN; then
   log_info "[dry-run] would create secret sh-relay-token in $NAMESPACE (value redacted)"
 else
   $KUBECTL create secret generic sh-relay-token -n "$NAMESPACE" \
     --from-literal=SH_RELAY_TOKEN="${SH_RELAY_TOKEN:-$(gen_relay_token)}" \
+    --from-literal=MOCA_RELAY_EXEC_TOKEN="$(gen_relay_token)" \
     --dry-run=client -o yaml | $KUBECTL apply -f - >/dev/null
   log_success "Secret sh-relay-token ready in $NAMESPACE (relay auth is fail-closed)"
   log_info "Give a worker the same token: oc get secret sh-relay-token -n $NAMESPACE -o jsonpath='{.data.SH_RELAY_TOKEN}' | base64 -d"

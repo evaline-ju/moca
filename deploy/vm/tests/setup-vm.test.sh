@@ -235,6 +235,23 @@ require_relay_token "$TOKENED_RELAY_ENV" ||
   fail "require_relay_token should pass once SH_RELAY_TOKEN is set"
 pass "require_relay_token passes once SH_RELAY_TOKEN is set"
 
+# --- MI1 R5: the exec token is generated once, into BOTH env files, with one value -----------------
+EXEC_DIR="$(mktemp -d)"
+printf 'SH_RELAY_PORT=9443\nSH_RELAY_TOKEN=keep\n' >"$EXEC_DIR/relay.env"
+printf 'PORT=8080\n' >"$EXEC_DIR/supervisor.env"
+SH_ENV_DIR="$EXEC_DIR" ensure_exec_token || fail "ensure_exec_token failed"
+relay_val="$(grep -E '^MOCA_RELAY_EXEC_TOKEN=' "$EXEC_DIR/relay.env" | cut -d= -f2-)"
+sup_val="$(grep -E '^MOCA_RELAY_EXEC_TOKEN=' "$EXEC_DIR/supervisor.env" | cut -d= -f2-)"
+[[ "$relay_val" =~ ^[0-9a-f]{64}$ ]] || fail "relay.env has no generated MOCA_RELAY_EXEC_TOKEN"
+[[ "$sup_val" == "$relay_val" ]] || fail "supervisor.env's exec token differs from relay.env's"
+SH_ENV_DIR="$EXEC_DIR" ensure_exec_token || fail "second ensure_exec_token failed"
+[[ "$(grep -c '^MOCA_RELAY_EXEC_TOKEN=' "$EXEC_DIR/relay.env")" == 1 ]] || fail "re-run duplicated the token"
+[[ "$(grep -E '^MOCA_RELAY_EXEC_TOKEN=' "$EXEC_DIR/relay.env" | cut -d= -f2-)" == "$relay_val" ]] ||
+  fail "re-run replaced the token"
+grep -q '^SH_RELAY_TOKEN=keep$' "$EXEC_DIR/relay.env" || fail "ensure_exec_token touched SH_RELAY_TOKEN"
+pass "MOCA_RELAY_EXEC_TOKEN: generated once, same value in relay.env and supervisor.env"
+rm -rf "$EXEC_DIR"
+
 # --- relay_token strips one matched pair of surrounding quotes (systemd's EnvironmentFile=
 # semantics) ----------------------------------------------------------------------------------
 # An operator writing SH_RELAY_TOKEN="s3cr3t" in relay.env gets s3cr3t handed to the relay

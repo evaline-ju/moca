@@ -67,6 +67,9 @@ SANDBOX_ID="${SANDBOX_ID:-sbx-laptop-demo}"
 # port plus a well-known credential would let anyone on the network Attach as a sandbox and
 # receive the leaf's exec payloads. Set SANDBOX_TOKEN to pin a value instead.
 RELAY_TOKEN="${SANDBOX_TOKEN:-}"
+# The relay now requires this to boot at all (MI1 R5); matches relay-deployment.yaml's own
+# dev value, which this script applies bare (see step 4 below).
+MOCA_RELAY_EXEC_TOKEN="${MOCA_RELAY_EXEC_TOKEN:-dev-exec-token}"
 # The harness reaches the relay by in-cluster DNS; the worker reaches it through the
 # tunnel. That asymmetry IS the inverted-connectivity story -- neither address is inbound
 # to the laptop.
@@ -475,7 +478,7 @@ assert_no_pods_match "$REMOTE_ONLY_SELECTOR"
 note "This is the trap the issue warns about: SH_REMOTE_SANDBOX=1 alone would leave idle pods"
 note "in the candidate set, and a pod could win the lease -- proving nothing while looking green."
 flip_harness_env SH_REMOTE_SANDBOX=1 SH_RELAY_ADDR="$IN_CLUSTER_RELAY_ADDR" \
-  KAGENTI_SANDBOX_POOL_SELECTOR="$REMOTE_ONLY_SELECTOR"
+  KAGENTI_SANDBOX_POOL_SELECTOR="$REMOTE_ONLY_SELECTOR" MOCA_RELAY_EXEC_TOKEN="$MOCA_RELAY_EXEC_TOKEN"
 wait_latest_ready 150 || abort "harness did not reach a ready latest revision after the flip"
 note "harness -> relay via $IN_CLUSTER_RELAY_ADDR (in-cluster DNS);"
 note "worker -> relay via host.docker.internal:${RELAY_PORT} (outbound through the tunnel)."

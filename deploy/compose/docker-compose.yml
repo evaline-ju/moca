@@ -32,6 +32,8 @@ services:
       REDIS_URL: redis://redis:6379
       # Fail-closed at the relay (makeDefaultValidateToken): no token, no attach. Fail here first.
       SH_RELAY_TOKEN: ${SH_RELAY_TOKEN:?SH_RELAY_TOKEN is required -- set it in .env (install.sh generates one)}
+      # The workers' credential for SandboxExec (MI1 §5 R5). Never set on the sandbox service.
+      MOCA_RELAY_EXEC_TOKEN: ${MOCA_RELAY_EXEC_TOKEN:?MOCA_RELAY_EXEC_TOKEN is required -- set it in .env (install.sh generates one)}
     depends_on: [redis]
     restart: unless-stopped
 
@@ -55,6 +57,7 @@ services:
       SH_SANDBOX_DISCOVERY: records
       SH_REMOTE_SANDBOX: '1'
       SH_RELAY_ADDR: sandbox-relay:${SH_RELAY_PORT:-9443}
+      MOCA_RELAY_EXEC_TOKEN: ${MOCA_RELAY_EXEC_TOKEN:?MOCA_RELAY_EXEC_TOKEN is required -- set it in .env (install.sh generates one)}
       REDIS_URL: redis://redis:6379
       KAGENTI_SANDBOX_POOL_SELECTOR: app=sandbox
       KAGENTI_SANDBOX_CAP: '4'

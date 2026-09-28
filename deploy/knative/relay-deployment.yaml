@@ -44,6 +44,10 @@ spec:
             # (issue #173) is a prerequisite for any non-dev OCP worker use.
             - name: SH_RELAY_TOKEN
               value: dev-token
+            # The workers' credential for SandboxExec (MI1 §5 R5). A documented public DEV value,
+            # like SH_RELAY_TOKEN above; the OCP overlay replaces it from a Secret.
+            - name: MOCA_RELAY_EXEC_TOKEN
+              value: dev-exec-token
           ports:
             - containerPort: 8443
           # The entrypoint is `node --import tsx src/main.ts`, so tsx compiles the relay's

@@ -251,6 +251,26 @@ require_relay_token() {
   fi
 }
 
+# The workers' credential for the relay's SandboxExec (MI1 §5 R5). Only the relay and the
+# supervisor hold it, so it is generated here when absent -- into BOTH files, one value -- and an
+# existing value is never replaced. It is never handed to a sandbox container (start_sandboxes).
+ensure_exec_token() {
+  local relay="$SH_ENV_DIR/relay.env" sup="$SH_ENV_DIR/supervisor.env" token
+  token="$( (grep -oE '^MOCA_RELAY_EXEC_TOKEN=.+' "$relay" 2>/dev/null || true) | tail -1 | cut -d= -f2-)"
+  if [[ -z "$token" ]]; then
+    token="$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
+    [[ -n "$token" ]] || { echo "could not generate MOCA_RELAY_EXEC_TOKEN" >&2; return 1; }
+    (umask 077; printf 'MOCA_RELAY_EXEC_TOKEN=%s\n' "$token" >>"$relay")
+  fi
+  if ! grep -qE "^MOCA_RELAY_EXEC_TOKEN=${token}\$" "$sup" 2>/dev/null; then
+    local tmp
+    tmp="$(mktemp)"
+    { grep -vE '^MOCA_RELAY_EXEC_TOKEN=' "$sup" 2>/dev/null || true; printf 'MOCA_RELAY_EXEC_TOKEN=%s\n' "$token"; } >"$tmp"
+    cat "$tmp" >"$sup"
+    rm -f "$tmp"
+  fi
+}
+
 # Reaching the host's relay port from inside a container is the one piece of this deployment
 # most likely to need a real VM run to confirm -- see the report's "Still unverified" section.
 # host.containers.internal is podman's documented analogue of Docker's host.docker.internal
@@ -305,6 +325,7 @@ main() {
   require_user harness
   install_env
   require_relay_token
+  ensure_exec_token
   install_units
   # Before the containers, so a `podman run` that lands between the two is already covered.
   enable_container_restart

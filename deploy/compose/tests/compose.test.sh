@@ -42,7 +42,7 @@ render() {
   echo "$TMP/$name/out.json"
 }
 
-BASE_ENV=('SH_RELAY_TOKEN=tok-under-test' 'SH_TURNS_PER_WORKER=3')
+BASE_ENV=('SH_RELAY_TOKEN=tok-under-test' 'MOCA_RELAY_EXEC_TOKEN=exec-under-test' 'SH_TURNS_PER_WORKER=3')
 OUT="$(render base "${BASE_ENV[@]}")" || fail "compose config failed: $(cat "$TMP/base/err")"
 
 svc_env() { jq -r --arg s "$1" --arg k "$2" '.services[$s].environment[$k] // "<absent>"' "$OUT"; }
@@ -78,6 +78,8 @@ declare -A ADDRESSING=(
 declare -A FROM_DOTENV=(
   [supervisor.SH_TURNS_PER_WORKER]='3'
   [sandbox-relay.SH_RELAY_TOKEN]='tok-under-test'
+  [sandbox-relay.MOCA_RELAY_EXEC_TOKEN]='exec-under-test'
+  [supervisor.MOCA_RELAY_EXEC_TOKEN]='exec-under-test'
 )
 check_mirror() {
   local svc="$1" example="$2" key val want got
@@ -86,7 +88,7 @@ check_mirror() {
     got="$(svc_env "$svc" "$key")"
     [[ "$got" == "$want" ]] ||
       fail "$svc: $key is '$got', expected '$want' (mirroring ${example#"$REPO_ROOT/"})"
-  done < <(grep -E '^[A-Z_]+=' "$example"; grep -E '^#SH_RELAY_TOKEN=' "$example" | sed 's/^#//')
+  done < <(grep -E '^[A-Z_]+=' "$example"; grep -E '^#(SH_RELAY_TOKEN|MOCA_RELAY_EXEC_TOKEN)=' "$example" | sed 's/^#//')
 }
 check_mirror supervisor "$VM_ENV/supervisor.env.example"
 check_mirror sandbox-relay "$VM_ENV/relay.env.example"
@@ -120,11 +122,23 @@ pass "one SH_RELAY_PORT drives the relay bind, the supervisor dial and the sandb
   fail "SANDBOX_ID unset: remote-worker defaults to sbx-laptop-1 and collides with any other"
 pass "the sandbox dials the relay with the relay's token and an explicit SANDBOX_ID"
 
+# --- 4b. the exec token reaches the relay and the supervisor, and never a sandbox (MI1 R5) -------
+[[ "$(svc_env sandbox-relay MOCA_RELAY_EXEC_TOKEN)" == exec-under-test ]] ||
+  fail "the relay does not receive MOCA_RELAY_EXEC_TOKEN; it refuses to boot without it"
+[[ "$(svc_env supervisor MOCA_RELAY_EXEC_TOKEN)" == exec-under-test ]] ||
+  fail "the supervisor does not receive MOCA_RELAY_EXEC_TOKEN; every exec would be refused"
+[[ "$(svc_env sandbox MOCA_RELAY_EXEC_TOKEN)" == '<absent>' ]] ||
+  fail "a sandbox received MOCA_RELAY_EXEC_TOKEN: it could then run commands in other sandboxes"
+render no-exec 'SH_RELAY_TOKEN=tok' 'SH_TURNS_PER_WORKER=3' >/dev/null &&
+  fail "compose accepted an .env with no MOCA_RELAY_EXEC_TOKEN"
+grep -q MOCA_RELAY_EXEC_TOKEN "$TMP/no-exec/err" || fail "the refusal must name MOCA_RELAY_EXEC_TOKEN"
+pass "the exec token reaches the relay and the supervisor only, and is required"
+
 # --- 5. required inputs fail at `compose config`, before any container starts --------------------
-render no-token 'SH_TURNS_PER_WORKER=3' >/dev/null &&
+render no-token 'SH_TURNS_PER_WORKER=3' 'MOCA_RELAY_EXEC_TOKEN=x' >/dev/null &&
   fail "compose accepted an .env with no SH_RELAY_TOKEN (the relay fails closed on every attach)"
 grep -q SH_RELAY_TOKEN "$TMP/no-token/err" || fail "the refusal must name SH_RELAY_TOKEN: $(cat "$TMP/no-token/err")"
-render no-s 'SH_RELAY_TOKEN=tok' >/dev/null &&
+render no-s 'SH_RELAY_TOKEN=tok' 'MOCA_RELAY_EXEC_TOKEN=x' >/dev/null &&
   fail "compose accepted an .env with no SH_TURNS_PER_WORKER (readConfig refuses to start without it)"
 grep -q SH_TURNS_PER_WORKER "$TMP/no-s/err" || fail "the refusal must name SH_TURNS_PER_WORKER"
 pass "a missing SH_RELAY_TOKEN or SH_TURNS_PER_WORKER stops compose with the variable named"

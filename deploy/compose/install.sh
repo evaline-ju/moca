@@ -81,6 +81,8 @@ write_env_file() {
       printf '# Written by deploy/compose/install.sh. Edit freely; install.sh never overwrites it.\n'
       printf '# The relay rejects every sandbox attach unless this matches SANDBOX_TOKEN (fail-closed).\n'
       printf 'SH_RELAY_TOKEN=%s\n' "$token"
+      printf '# The workers'"'"' credential for the relay'"'"'s SandboxExec. Never give it to a sandbox.\n'
+      printf 'MOCA_RELAY_EXEC_TOKEN=%s\n' "$(generate_token)"
       printf '# REQUIRED by the supervisor. %s is a trial value; for E8 it is a measured output.\n' \
         "${SH_TURNS_PER_WORKER:-4}"
       printf 'SH_TURNS_PER_WORKER=%s\n' "${SH_TURNS_PER_WORKER:-4}"
@@ -110,11 +112,26 @@ require_relay_token() {
   fi
 }
 
+# The exec token is shared only by the relay and the supervisor, both of which compose restarts, so
+# unlike SH_RELAY_TOKEN it is safe to create on an upgrade. Appended, never rewritten.
+ensure_exec_token() {
+  env_file="$SH_COMPOSE_DIR/.env"
+  [ -n "$(env_file_value MOCA_RELAY_EXEC_TOKEN "$env_file")" ] && return 0
+  exec_token="$(generate_token)"
+  [ -n "$exec_token" ] || die "could not generate MOCA_RELAY_EXEC_TOKEN from /dev/urandom"
+  log "adding MOCA_RELAY_EXEC_TOKEN to $env_file"
+  (
+    umask 077
+    printf 'MOCA_RELAY_EXEC_TOKEN=%s\n' "$exec_token" >>"$env_file"
+  )
+}
+
 main() {
   detect_compose
   fetch_compose_file
   write_env_file
   require_relay_token
+  ensure_exec_token
   log "starting the stack ($COMPOSE up -d)"
   # Compose reads .env from the project directory, so the token reaches the containers from that
   # file and never from this command line.

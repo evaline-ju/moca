@@ -17,7 +17,8 @@
 # and it is the same Secret and key the worker reads its SANDBOX_TOKEN from, which is what keeps
 # the two sides equal:
 #
-#   oc create secret generic sh-relay-token -n <ns> --from-literal=SH_RELAY_TOKEN=<token>
+#   oc create secret generic sh-relay-token -n <ns> --from-literal=SH_RELAY_TOKEN=<token> \
+#     --from-literal=MOCA_RELAY_EXEC_TOKEN=<token>
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -34,3 +35,9 @@ spec:
                 secretKeyRef:
                   name: sh-relay-token
                   key: SH_RELAY_TOKEN
+            - name: MOCA_RELAY_EXEC_TOKEN
+              value: null
+              valueFrom:
+                secretKeyRef:
+                  name: sh-relay-token
+                  key: MOCA_RELAY_EXEC_TOKEN

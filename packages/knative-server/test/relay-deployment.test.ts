@@ -59,6 +59,15 @@ describe('relay-deployment.yaml', () => {
       "SH_RELAY_TOKEN must equal worker-example.yaml's SANDBOX_TOKEN, or the relay rejects every Attach from a worker deployed off that example",
     ).toBe(wEnv.find((e) => e.name === 'SANDBOX_TOKEN')!.value);
   });
+
+  it('sets MOCA_RELAY_EXEC_TOKEN, which the relay requires to boot (MI1 R5)', () => {
+    const c = docs().find((o) => o.kind === 'Deployment').spec.template.spec.containers[0];
+    const env: EnvVar[] = c.env;
+    expect(
+      env.find((e) => e.name === 'MOCA_RELAY_EXEC_TOKEN'),
+      'the relay refuses to boot without MOCA_RELAY_EXEC_TOKEN',
+    ).toBeDefined();
+  });
 });
 
 describe('the OCP overlay patches the relay token away from the base literal (#173)', () => {
@@ -123,6 +132,18 @@ describe('the OCP overlay patches the relay token away from the base literal (#1
       setup,
       `the Secret must carry key ${ref.key}, which the overlay reads SH_RELAY_TOKEN from`,
     ).toContain(`--from-literal=${ref.key}=`);
+  });
+
+  it('sources MOCA_RELAY_EXEC_TOKEN from the sh-relay-token Secret, which setup-ocp.sh creates', () => {
+    const env: EnvVar[] = patch().spec.template.spec.containers[0].env;
+    const ref = (
+      env.find((e) => e.name === 'MOCA_RELAY_EXEC_TOKEN') as {
+        valueFrom?: { secretKeyRef?: { name?: string; key?: string } };
+      }
+    )?.valueFrom?.secretKeyRef;
+    expect(ref).toEqual({ name: 'sh-relay-token', key: 'MOCA_RELAY_EXEC_TOKEN' });
+    const setup = readFileSync(resolve(DEPLOY, 'setup-ocp.sh'), 'utf8');
+    expect(setup).toContain('--from-literal=MOCA_RELAY_EXEC_TOKEN=');
   });
 
   it('replaces the literal with a secretKeyRef instead of leaving both fields set', () => {
