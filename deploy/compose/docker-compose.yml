@@ -12,10 +12,11 @@ name: serverless-harness
 services:
   # docker.io/redis:7-alpine, as deploy/vm/setup-vm.sh's start_redis pins. Unpublished: this Redis
   # has no auth and holds sh:sandbox:records, so whoever can write to it chooses the executor for
-  # every turn. Only the compose network reaches it. No volume, same as the VM path: a trial starts
-  # from an empty Redis.
+  # every turn. Only moca-brain reaches it -- no sandbox shares a network with it (MI1 §5 R8). No
+  # volume, same as the VM path: a trial starts from an empty Redis.
   redis:
     image: docker.io/redis:7-alpine
+    networks: [moca-brain]
     restart: unless-stopped
 
   sandbox-relay:
@@ -26,14 +27,22 @@ services:
     command: [node, --import, tsx, src/main.ts]
     user: '1000:1000'
     environment:
-      # One .env value feeds this bind port AND both dial addresses below, so the
-      # relay.env.example footgun (bind and dial ports read from different files) cannot recur.
+      # This value feeds the relay's attach bind AND the sandbox's dial address below;
+      # MOCA_RELAY_EXEC_PORT does the same for the exec side. So the relay.env.example footgun
+      # (bind and dial ports read from different files) cannot recur on either wire.
       SH_RELAY_PORT: ${SH_RELAY_PORT:-9443}
       REDIS_URL: redis://redis:6379
       # Fail-closed at the relay (makeDefaultValidateToken): no token, no attach. Fail here first.
       SH_RELAY_TOKEN: ${SH_RELAY_TOKEN:?SH_RELAY_TOKEN is required -- set it in .env (install.sh generates one)}
       # The workers' credential for SandboxExec (MI1 §5 R5). Never set on the sandbox service.
       MOCA_RELAY_EXEC_TOKEN: ${MOCA_RELAY_EXEC_TOKEN:?MOCA_RELAY_EXEC_TOKEN is required -- set it in .env (install.sh generates one)}
+      # SandboxExec on its own listener, bound to the brain-side address only: the exec port is not
+      # listening on moca-sandbox at all (MI1 §5 R5/R8). The supervisor's SH_RELAY_ADDR dials it.
+      MOCA_RELAY_EXEC_ADDR: ${MOCA_RELAY_BRAIN_IP:-172.31.250.10}:${MOCA_RELAY_EXEC_PORT:-9444}
+    networks:
+      moca-brain:
+        ipv4_address: ${MOCA_RELAY_BRAIN_IP:-172.31.250.10}
+      moca-sandbox: {}
     depends_on: [redis]
     restart: unless-stopped
 
@@ -56,7 +65,7 @@ services:
       SH_WORKER_RESTART_BACKOFF_MS: '250'
       SH_SANDBOX_DISCOVERY: records
       SH_REMOTE_SANDBOX: '1'
-      SH_RELAY_ADDR: sandbox-relay:${SH_RELAY_PORT:-9443}
+      SH_RELAY_ADDR: sandbox-relay:${MOCA_RELAY_EXEC_PORT:-9444}
       MOCA_RELAY_EXEC_TOKEN: ${MOCA_RELAY_EXEC_TOKEN:?MOCA_RELAY_EXEC_TOKEN is required -- set it in .env (install.sh generates one)}
       REDIS_URL: redis://redis:6379
       KAGENTI_SANDBOX_POOL_SELECTOR: app=sandbox
@@ -80,6 +89,7 @@ services:
       # Loopback only. The admin /metrics listener (SH_ADMIN_PORT, 8081) is unauthenticated and
       # stays unpublished; reach it with `docker compose exec supervisor`.
       - 127.0.0.1:${SH_PORT:-8080}:8080
+    networks: [moca-brain]
     depends_on: [redis, sandbox-relay]
     restart: unless-stopped
 
@@ -92,5 +102,18 @@ services:
       SANDBOX_ID: sh-sandbox-0
       RELAY_ADDR: sandbox-relay:${SH_RELAY_PORT:-9443}
       SANDBOX_TOKEN: ${SH_RELAY_TOKEN:?SH_RELAY_TOKEN is required -- set it in .env (install.sh generates one)}
+    networks: [moca-sandbox]
     depends_on: [sandbox-relay]
     restart: unless-stopped
+
+networks:
+  # The brain side: supervisor + workers, Redis, the relay's SandboxExec listener (and, with #348, the
+  # control plane). Sandboxes are never attached here (MI1 §5 R8). A fixed subnet so the relay's exec
+  # listener can bind this side's address alone.
+  moca-brain:
+    ipam:
+      config:
+        - subnet: ${MOCA_BRAIN_SUBNET:-172.31.250.0/24}
+  # The hands side: sandboxes and the relay's Attach listener. Still routed to the internet in S1;
+  # MI1 S5 makes it `internal: true` once moca-egress exists to route through.
+  moca-sandbox: {}

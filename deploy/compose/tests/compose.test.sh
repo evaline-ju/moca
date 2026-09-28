@@ -71,8 +71,9 @@ pass "one supervisor service owns the worker pool; no second worker-bearing serv
 # service names, not 127.0.0.1.
 declare -A ADDRESSING=(
   [supervisor.REDIS_URL]='redis://redis:6379'
-  [supervisor.SH_RELAY_ADDR]='sandbox-relay:9443'
+  [supervisor.SH_RELAY_ADDR]='sandbox-relay:9444'
   [sandbox-relay.REDIS_URL]='redis://redis:6379'
+  [sandbox-relay.MOCA_RELAY_EXEC_ADDR]='172.31.250.10:9444'
 )
 # Keys an example leaves empty or commented are operator inputs, so compose takes them from .env.
 declare -A FROM_DOTENV=(
@@ -103,17 +104,19 @@ OUT_W="$(render workers "${BASE_ENV[@]}" 'SH_WORKERS=2')" || fail "compose confi
   fail "SH_WORKERS=2 in .env does not reach the supervisor"
 pass "SH_WORKERS is absent unless .env sets it, and passes through when it does"
 
-# --- 3. the relay's bind port and the supervisor's dial port cannot disagree ------------------
-# relay.env.example warns these MUST agree and nothing checks them; here both derive from one
-# .env value, so moving the port moves both ends and the sandbox's dial address with them.
-OUT_P="$(render port "${BASE_ENV[@]}" 'SH_RELAY_PORT=7777')" || fail "compose config failed with a port"
+# --- 3. one SH_RELAY_PORT drives the attach side, MOCA_RELAY_EXEC_PORT the exec side ----------
+# relay.env.example warns the exec address and SH_RELAY_ADDR MUST agree and nothing checks them;
+# here both derive from one .env value each, so moving a port moves both ends that describe it.
+OUT_P="$(render port "${BASE_ENV[@]}" 'SH_RELAY_PORT=7777' 'MOCA_RELAY_EXEC_PORT=7778')" || fail "compose config failed with ports"
 [[ "$(jq -r '.services["sandbox-relay"].environment.SH_RELAY_PORT' "$OUT_P")" == 7777 ]] ||
-  fail "SH_RELAY_PORT in .env does not move the relay's bind port"
-[[ "$(jq -r '.services.supervisor.environment.SH_RELAY_ADDR' "$OUT_P")" == sandbox-relay:7777 ]] ||
-  fail "SH_RELAY_PORT moved the relay but not the supervisor's SH_RELAY_ADDR"
+  fail "SH_RELAY_PORT in .env does not move the relay's attach bind"
 [[ "$(jq -r '.services.sandbox.environment.RELAY_ADDR' "$OUT_P")" == sandbox-relay:7777 ]] ||
   fail "SH_RELAY_PORT moved the relay but not the sandbox's RELAY_ADDR"
-pass "one SH_RELAY_PORT drives the relay bind, the supervisor dial and the sandbox dial"
+[[ "$(jq -r '.services["sandbox-relay"].environment.MOCA_RELAY_EXEC_ADDR' "$OUT_P")" == 172.31.250.10:7778 ]] ||
+  fail "MOCA_RELAY_EXEC_PORT does not move the relay's exec bind"
+[[ "$(jq -r '.services.supervisor.environment.SH_RELAY_ADDR' "$OUT_P")" == sandbox-relay:7778 ]] ||
+  fail "MOCA_RELAY_EXEC_PORT moved the exec bind but not the supervisor's SH_RELAY_ADDR"
+pass "SH_RELAY_PORT drives the attach side, MOCA_RELAY_EXEC_PORT the exec side, each end agreeing"
 
 # --- 4. the sandbox authenticates with the relay's own token, under its own id ------------------
 [[ "$(svc_env sandbox SANDBOX_TOKEN)" == tok-under-test ]] ||
@@ -155,7 +158,24 @@ jq -e '.services.supervisor.ports | length == 1 and .[0].host_ip == "127.0.0.1" 
   fail "redis image must match deploy/vm/setup-vm.sh's start_redis (docker.io/redis:7-alpine)"
 pass "only the supervisor's 8080 is published, on loopback; redis is the VM path's image"
 
-# --- 7. model settings pass through when set and stay absent when not --------------------------
+# --- 7. the sandbox shares no network with Redis, the supervisor or anything else (MI1 R8) ---------
+nets() { jq -r --arg s "$1" '(.services[$s].networks // {}) | keys[]' "$OUT" | sort | tr '\n' ' '; }
+[[ "$(nets sandbox)" == 'moca-sandbox ' ]] || fail "the sandbox must be on moca-sandbox only, is on: $(nets sandbox)"
+[[ "$(nets redis)" == 'moca-brain ' ]] || fail "redis must be on moca-brain only, is on: $(nets redis)"
+[[ "$(nets supervisor)" == 'moca-brain ' ]] || fail "the supervisor must be on moca-brain only, is on: $(nets supervisor)"
+[[ "$(nets sandbox-relay)" == 'moca-brain moca-sandbox ' ]] || fail "the relay bridges both networks, is on: $(nets sandbox-relay)"
+# `has()`, not `!= null`: Compose resolves the short-form `networks: [moca-sandbox]` (sandbox's own
+# style below) to {"moca-sandbox": null} -- the key is present with a null value, which `!= null`
+# would misread as absent.
+on_sandbox_net="$(jq -r '.services | to_entries[] | select((.value.networks // {}) | has("moca-sandbox")) | .key' "$OUT" | sort | tr '\n' ' ')"
+[[ "$on_sandbox_net" == 'sandbox sandbox-relay ' ]] ||
+  fail "only sandboxes and the relay may join moca-sandbox (a future service must not): $on_sandbox_net"
+brain_ip="$(jq -r '.services["sandbox-relay"].networks["moca-brain"].ipv4_address' "$OUT")"
+[[ "$(svc_env sandbox-relay MOCA_RELAY_EXEC_ADDR)" == "$brain_ip:9444" ]] ||
+  fail "the relay's exec listener must bind its moca-brain address ($brain_ip), not every interface"
+pass "sandboxes reach only the relay; its exec listener binds the brain side only"
+
+# --- 8. model settings pass through when set and stay absent when not --------------------------
 # An empty SH_MODEL reaches run-turn.ts as '' and `env.SH_MODEL ?? default` keeps it.
 [[ "$(svc_env supervisor SH_MODEL)" == '<absent>' && "$(svc_env supervisor ANTHROPIC_API_KEY)" == '<absent>' ]] ||
   fail "unset model variables reach the supervisor as empty strings"

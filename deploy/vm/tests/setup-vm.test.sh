@@ -179,23 +179,23 @@ grep -qE '^SH_TURNS_PER_WORKER=$' "$ENV_SRC_DIR/supervisor.env.example" ||
   fail "the example env must leave SH_TURNS_PER_WORKER empty"
 pass "no default shipped for SH_TURNS_PER_WORKER"
 
-# --- the relay's bind port and the supervisor's dial port must agree (the real F3 bug) -----
+# --- the supervisor dials the relay's EXEC listener, and the two ports agree (F3, MI1 R5) ---------
 # R46 (same as above): both assignments below can abort the pipeline on no-match under
 # `set -euo pipefail`, before their `[[ -n ... ]] || fail ...` guards run -- `|| true` on the
 # failure-capable stage in each, `grep -q` gating the second.
-relay_port=$(grep -oE '^SH_RELAY_PORT=[0-9]+' "$ENV_SRC_DIR/relay.env.example" | cut -d= -f2 || true)
+exec_port=$(grep -oE '^MOCA_RELAY_EXEC_ADDR=.*:[0-9]+$' "$ENV_SRC_DIR/relay.env.example" | grep -oE '[0-9]+$' || true)
 if grep -qE '^SH_RELAY_ADDR=.*:[0-9]+$' "$ENV_SRC_DIR/supervisor.env.example"; then
-  addr_port=$(grep -oE '^SH_RELAY_ADDR=.*:[0-9]+$' "$ENV_SRC_DIR/supervisor.env.example" |
-    grep -oE '[0-9]+$')
+  addr_port=$(grep -oE '^SH_RELAY_ADDR=.*:[0-9]+$' "$ENV_SRC_DIR/supervisor.env.example" | grep -oE '[0-9]+$')
 else
   addr_port=""
 fi
-[[ -n "$relay_port" ]] || fail "relay.env.example is missing SH_RELAY_PORT"
+[[ -n "$exec_port" ]] || fail "relay.env.example is missing MOCA_RELAY_EXEC_ADDR"
 [[ -n "$addr_port" ]] || fail "supervisor.env.example's SH_RELAY_ADDR has no port"
-[[ "$relay_port" == "$addr_port" ]] ||
-  fail "SH_RELAY_PORT ($relay_port) in relay.env.example must equal the port in" \
-    "SH_RELAY_ADDR ($addr_port) in supervisor.env.example -- they describe the same wire"
-pass "relay bind port and supervisor dial port agree"
+[[ "$exec_port" == "$addr_port" ]] ||
+  fail "MOCA_RELAY_EXEC_ADDR's port ($exec_port) must equal SH_RELAY_ADDR's ($addr_port): they describe one wire"
+grep -qE '^MOCA_RELAY_EXEC_ADDR=127\.0\.0\.1:' "$ENV_SRC_DIR/relay.env.example" ||
+  fail "the exec listener must bind loopback, where no sandbox container can reach it"
+pass "the supervisor dials the relay's loopback exec listener, on the port it binds"
 
 # --- SANDBOX_IMAGE default matches the rest of the repo (B1) --------------------------------
 # deploy/knative/setup-ocp.sh:42 and setup-k8s.sh:30 both default to
