@@ -236,6 +236,30 @@ export async function resolveTurnAuth(
 }
 
 /**
+ * Authorization for READING a run (MI1 §5 R7): the same token rules as a turn — required under
+ * SH_REQUIRE_AUTH, and a present-but-bad token refused in either mode — but no credential exchange,
+ * since a status read spends nothing upstream. A valid token for another session is refused.
+ */
+export function authorizeRunRead(
+  headers: Record<string, string | string[] | undefined>,
+  sessionId: string,
+  deps: TurnAuthDeps,
+): void {
+  const presented = bearer(headers);
+  if (!presented) {
+    if (deps.requireAuth) throw new CpError('token_required', 'this deployment requires a token');
+    return;
+  }
+  const claims = verifyToken(presented, deps.keys, {
+    now: Math.floor((deps.now?.() ?? Date.now()) / 1000),
+    requiredScope: 'turn:write',
+  });
+  if (claims.sid !== sessionId) {
+    throw new CpError('session_mismatch', 'token does not name this session', sessionId);
+  }
+}
+
+/**
  * What the harness self-reports for /resources (spec §7.4, plan gap #5). Everything here is already in
  * this process's environment, so nothing in run-turn.ts has to change to produce it.
  */

@@ -27,6 +27,7 @@ import {
 } from './context-service.js';
 import { CpError, statusFor } from '@sh/control-plane';
 import {
+  authorizeRunRead,
   resolveTurnAuth,
   runtimeFieldsForTurn,
   turnAuthDepsFromEnv,
@@ -516,7 +517,12 @@ async function handleEnqueueLeafParsed(body: any, res: ServerResponse): Promise<
     .end(JSON.stringify({ status: 'accepted', sessionId: body.sessionId }));
 }
 
-async function handleRunLeafParsed(body: any, _raw: string, res: ServerResponse): Promise<void> {
+async function handleRunLeafParsed(
+  body: any,
+  _raw: string,
+  res: ServerResponse,
+  auth: TurnAuth | null = null,
+): Promise<void> {
   if (!isRunEnvelope(body)) {
     res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'envelope_invalid' }));
     return;
@@ -532,11 +538,11 @@ async function handleRunLeafParsed(body: any, _raw: string, res: ServerResponse)
   const cfg = saturationWaitConfig();
   const deadline = Date.now() + cfg.waitMs;
   let delay = cfg.backoffMs;
-  let result = await runLeaf(body, buildConfig());
+  let result = await runLeaf(body, buildConfig(auth));
   while (isSaturated(result) && Date.now() < deadline) {
     await sleep(Math.min(delay, Math.max(0, deadline - Date.now())));
     delay = Math.min(delay * 2, cfg.maxBackoffMs);
-    result = await runLeaf(body, buildConfig());
+    result = await runLeaf(body, buildConfig(auth));
   }
 
   if (isSaturated(result)) {
@@ -654,7 +660,17 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
     (url.startsWith('/runs/status') || url.startsWith('/run-leaf/status'))
   ) {
     if (url.startsWith('/run-leaf/status')) warnDeprecatedRoute('/run-leaf/status');
-    handleLeafStatus(new URL(url, 'http://localhost'), res).catch((err) => {
+    const statusUrl = new URL(url, 'http://localhost');
+    const sessionId = statusUrl.searchParams.get('sessionId');
+    if (sessionId) {
+      try {
+        authorizeRunRead(req.headers, sessionId, turnAuthDeps());
+      } catch (err) {
+        writeAuthError(res, err, sessionId);
+        return;
+      }
+    }
+    handleLeafStatus(statusUrl, res).catch((err) => {
       if (!res.headersSent)
         res.writeHead(500, JSON_HEADERS).end(JSON.stringify({ error: String(err) }));
     });
@@ -675,8 +691,35 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
       // Pool selection is internal routing state. Never accept a Kubernetes selector directly
       // from an external run request; a workload resolver may add one after this boundary.
       if (parsed && typeof parsed === 'object') delete parsed.sandboxPoolSelector;
-      if (parsed && parsed.async === true) return handleEnqueueLeafParsed(parsed, res);
-      return handleRunLeafParsed(parsed, raw, res);
+
+      // The same caller rules as /turn (MI1 §5 R7): required under SH_REQUIRE_AUTH, a bad token
+      // refused in either mode, and the token must name this run's session.
+      let deps: TurnAuthDeps;
+      let auth: TurnAuth | null;
+      try {
+        deps = turnAuthDeps();
+        auth = await resolveTurnAuth(req.headers, parsed ?? {}, deps);
+      } catch (err) {
+        writeAuthError(res, err, parsed?.sessionId);
+        return;
+      }
+
+      if (parsed && parsed.async === true) {
+        if (deps.requireAuth || auth) {
+          // Running it later on its caller's credential would mean storing a bearer in the queue
+          // (MI1 §6.5); running it on the ambient credential would spend the operator's key for a
+          // user. Owned asynchronous runs are MU2's.
+          res.writeHead(501, JSON_HEADERS).end(
+            JSON.stringify({
+              error: 'async_runs_unavailable',
+              message: 'asynchronous runs are not available when callers authenticate',
+            }),
+          );
+          return;
+        }
+        return handleEnqueueLeafParsed(parsed, res);
+      }
+      return handleRunLeafParsed(parsed, raw, res, auth);
     };
     route().catch((err) => {
       if (!res.headersSent)
