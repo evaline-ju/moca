@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 
 	pb "github.com/kagenti/serverless-harness/gen/go/sandbox/v1"
 )
@@ -194,6 +195,14 @@ func runSlot(ctx context.Context, client pb.SandboxExecClient, p *plan, s slot) 
 // measured that binding; if the Go client's throughput plateaus while coresBusy stays low,
 // sharding slots across N connections is the first thing to try.
 func drive(ctx context.Context, p *plan) error {
+	// The relay refuses SandboxExec without the worker credential (MI1 R5), so a rung without
+	// one would time nothing but UNAUTHENTICATED refusals. Refuse before dialing.
+	if p.ExecToken == "" {
+		return errors.New("no exec token: set MOCA_RELAY_EXEC_TOKEN to the relay's worker credential; the relay refuses SandboxExec without it")
+	}
+	// Every Exec derives its context from this one, so each carries the bearer.
+	ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+p.ExecToken)
+
 	// The DIAL is bounded; the rung is not. grpcurl's -max-time covered its connection setup
 	// as well as its call, so without this the Go path hangs forever against an unreachable
 	// target where the reference path failed fast -- and run_density_rung waits on this

@@ -31,6 +31,10 @@ type plan struct {
 	CallDeadlineS int      `json:"callDeadlineS"`
 	Mix           []string `json:"mix"`
 	Slots         []slot   `json:"slots"`
+	// ExecToken is the relay's worker credential (MOCA_RELAY_EXEC_TOKEN), sent as a bearer on
+	// every Exec. It is never read from or written to the plan file: main takes it from the
+	// environment, so the credential does not land on disk beside the rung's results.
+	ExecToken string `json:"-"`
 }
 
 // callsPerSlot is how many Execs each slot issues: the steady-state iterations plus the

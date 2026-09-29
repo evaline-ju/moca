@@ -22,12 +22,14 @@ import (
 // worker author's reading of the contract, not the relay's behavior (spec §10).
 //
 // Skipped unless SH_LIVE_RELAY=1, following the repo's M3_LIVE_SMOKE convention.
-// Start the relay first:
+// Start the relay first. It refuses to boot without MOCA_RELAY_EXEC_TOKEN, and every
+// SandboxExec below presents that token as its bearer (MI1 R5):
 //
 //	docker run --rm -p 6379:6379 redis:7
-//	SH_RELAY_TOKEN=dev-token SH_RELAY_PORT=8443 REDIS_URL=redis://127.0.0.1:6379 \
-//	  pnpm --filter @sh/sandbox-relay start
-//	SH_LIVE_RELAY=1 go test ./internal/session/ -run TestLiveRelay -v
+//	SH_RELAY_TOKEN=dev-token MOCA_RELAY_EXEC_TOKEN=dev-exec-token SH_RELAY_PORT=8443 \
+//	  REDIS_URL=redis://127.0.0.1:6379 pnpm --filter @sh/sandbox-relay start
+//	SH_LIVE_RELAY=1 MOCA_RELAY_EXEC_TOKEN=dev-exec-token \
+//	  go test ./internal/session/ -run TestLiveRelay -v
 func TestLiveRelayInterop(t *testing.T) {
 	if os.Getenv("SH_LIVE_RELAY") != "1" {
 		t.Skip("SH_LIVE_RELAY!=1: skipping real-relay interop")
@@ -35,6 +37,7 @@ func TestLiveRelayInterop(t *testing.T) {
 	addr := envOr("RELAY_ADDR", "localhost:8443")
 	sandboxID := envOr("SANDBOX_ID", "sbx-dev-1")
 	token := envOr("SANDBOX_TOKEN", "dev-token")
+	execToken := envOr("MOCA_RELAY_EXEC_TOKEN", "dev-exec-token")
 
 	// 1. Attach this worker to the real relay.
 	cc, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -76,8 +79,8 @@ func TestLiveRelayInterop(t *testing.T) {
 	})
 	time.Sleep(500 * time.Millisecond) // let the relay park the stream
 
-	// 2. Drive execs from the harness-facing side.
-	execClient := pb.NewSandboxExecClient(cc)
+	// 2. Drive execs from the harness-facing side, as a worker: with the exec token.
+	execClient := liveExecClient{c: pb.NewSandboxExecClient(cc), token: execToken}
 	dir := t.TempDir()
 
 	t.Run("read", func(t *testing.T) {
@@ -121,12 +124,19 @@ func TestLiveRelayInterop(t *testing.T) {
 	})
 }
 
+// liveExecClient is a SandboxExec client plus the worker credential it presents.
+type liveExecClient struct {
+	c     pb.SandboxExecClient
+	token string
+}
+
 // liveExec drives one exec through SandboxExec.Exec and returns the split output.
-func liveExec(t *testing.T, c pb.SandboxExecClient, sandboxID string, e *pb.Exec) ([]byte, []byte, int32) {
+func liveExec(t *testing.T, c liveExecClient, sandboxID string, e *pb.Exec) ([]byte, []byte, int32) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	call, err := c.Exec(ctx, &pb.ExecRequest{SandboxId: sandboxID, Exec: e})
+	ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+c.token)
+	call, err := c.c.Exec(ctx, &pb.ExecRequest{SandboxId: sandboxID, Exec: e})
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
 	}

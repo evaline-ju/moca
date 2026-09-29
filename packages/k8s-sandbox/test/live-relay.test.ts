@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { credentials } from '@grpc/grpc-js';
+import { InterceptingCall, credentials, type Interceptor } from '@grpc/grpc-js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { GrpcRelayTransport, type ExecClientLike } from '../src/grpc-relay-transport.js';
 import { OUTPUT_TRUNCATED_MARKER } from '../src/transport.js';
@@ -20,11 +20,14 @@ import { SandboxExecClient } from '../src/gen/sandbox/v1/sandbox.js';
  * Gated on SH_LIVE_RELAY=1, following the M3_LIVE_SMOKE convention. Setup:
  *
  *   docker run --rm -d -p 6380:6379 --name sh-live-relay-redis redis:7
- *   SH_RELAY_TOKEN=dev-token SH_RELAY_PORT=8443 REDIS_URL=redis://127.0.0.1:6380 \
- *     pnpm --filter @sh/sandbox-relay start &
+ *   SH_RELAY_TOKEN=dev-token MOCA_RELAY_EXEC_TOKEN=dev-exec-token SH_RELAY_PORT=8443 \
+ *     REDIS_URL=redis://127.0.0.1:6380 pnpm --filter @sh/sandbox-relay start &
  *   cd remote-worker && SANDBOX_ID=sbx-dev-1 RELAY_ADDR=localhost:8443 \
  *     SANDBOX_TOKEN=dev-token go run ./cmd/worker &
- *   SH_LIVE_RELAY=1 pnpm --filter @sh/k8s-sandbox test live-relay
+ *   SH_LIVE_RELAY=1 MOCA_RELAY_EXEC_TOKEN=dev-exec-token pnpm --filter @sh/k8s-sandbox test live-relay
+ *
+ * The relay refuses to boot without MOCA_RELAY_EXEC_TOKEN, and every SandboxExec here presents
+ * that token as its bearer, as a worker does (MI1 R5).
  *
  * The first two cases exercise the externally-started worker above. The third
  * (worker-disconnect) spawns and kills its OWN worker process under a distinct
@@ -34,10 +37,24 @@ const LIVE = process.env.SH_LIVE_RELAY === '1';
 const SANDBOX_ID = process.env.SANDBOX_ID ?? 'sbx-dev-1';
 const RELAY_ADDR = process.env.SH_RELAY_ADDR ?? 'localhost:8443';
 const SANDBOX_TOKEN = process.env.SANDBOX_TOKEN ?? 'dev-token';
+const EXEC_TOKEN = process.env.MOCA_RELAY_EXEC_TOKEN ?? 'dev-exec-token';
 
-/** Same two-line construction as select-sandbox.ts:52's defaultExecClient — one dialing idiom in the repo. */
+/** Adds the worker credential to every call, as harness/src/select-sandbox.ts's client does. */
+function execTokenInterceptor(token: string): Interceptor {
+  return (options, nextCall) =>
+    new InterceptingCall(nextCall(options), {
+      start(metadata, listener, next) {
+        metadata.set('authorization', `Bearer ${token}`);
+        next(metadata, listener);
+      },
+    });
+}
+
+/** The same construction as select-sandbox.ts's makeRelayExecClient — one dialing idiom in the repo. */
 function makeExecClient(addr: string): ExecClientLike {
-  return new SandboxExecClient(addr, credentials.createInsecure()) as unknown as ExecClientLike;
+  return new SandboxExecClient(addr, credentials.createInsecure(), {
+    interceptors: [execTokenInterceptor(EXEC_TOKEN)],
+  }) as unknown as ExecClientLike;
 }
 
 function makeLiveTransport(opts: { outputCapBytes?: number } = {}, sandboxId: string = SANDBOX_ID) {

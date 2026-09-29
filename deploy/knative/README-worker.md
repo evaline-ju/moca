@@ -172,25 +172,26 @@ no cost to `make test`. Start a relay and a worker, then run it:
 # Redis — pick a free port; something else on this machine may already hold 6379.
 docker run --rm -d -p 6380:6379 --name sh-live-relay-redis redis:7
 
-# Relay
-SH_RELAY_TOKEN=dev-token SH_RELAY_PORT=8443 REDIS_URL=redis://127.0.0.1:6380 \
-  pnpm --filter @sh/sandbox-relay start &
+# Relay (it refuses to boot without MOCA_RELAY_EXEC_TOKEN, the workers' Exec credential)
+SH_RELAY_TOKEN=dev-token MOCA_RELAY_EXEC_TOKEN=dev-exec-token SH_RELAY_PORT=8443 \
+  REDIS_URL=redis://127.0.0.1:6380 pnpm --filter @sh/sandbox-relay start &
 
 # Reference worker, under the default SANDBOX_ID the test expects
 cd remote-worker && SANDBOX_ID=sbx-dev-1 RELAY_ADDR=localhost:8443 \
   SANDBOX_TOKEN=dev-token go run ./cmd/worker &
 cd ..
 
-# The live cases
-SH_LIVE_RELAY=1 pnpm --filter @sh/k8s-sandbox test live-relay
+# The live cases (each Exec presents the exec token as its bearer)
+SH_LIVE_RELAY=1 MOCA_RELAY_EXEC_TOKEN=dev-exec-token pnpm --filter @sh/k8s-sandbox test live-relay
 
 # Teardown
 kill %1 %2   # relay, worker (job numbers from your shell)
 docker stop sh-live-relay-redis   # started with --rm; stop also removes it
 ```
 
-`RELAY_ADDR`, `SANDBOX_ID`, and `SANDBOX_TOKEN` are all overridable env vars if
-you want to point the first two cases at a relay/worker running elsewhere.
+`RELAY_ADDR`, `SANDBOX_ID`, `SANDBOX_TOKEN` and `MOCA_RELAY_EXEC_TOKEN` are all
+overridable env vars if you want to point the first two cases at a relay/worker
+running elsewhere.
 
 The third case (worker disconnect) does **not** use the worker started above —
 it builds the worker binary itself in a `beforeAll` (`go build -o <tmp> ./cmd/worker`)

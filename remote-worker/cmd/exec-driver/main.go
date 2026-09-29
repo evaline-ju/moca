@@ -24,9 +24,21 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log"
+	"os"
 )
+
+// execTokenFromEnv reads the relay's worker credential. Unset is an error rather than an
+// empty bearer: the relay refuses SandboxExec without the token (MI1 R5).
+func execTokenFromEnv(getenv func(string) string) (string, error) {
+	tok := getenv("MOCA_RELAY_EXEC_TOKEN")
+	if tok == "" {
+		return "", errors.New("MOCA_RELAY_EXEC_TOKEN is not set: the relay refuses SandboxExec without the worker credential")
+	}
+	return tok, nil
+}
 
 func main() {
 	planPath := flag.String("plan", "", "path to the rung plan JSON written by e11-density.sh's write_rung_plan")
@@ -37,6 +49,9 @@ func main() {
 	}
 	p, err := loadPlan(*planPath)
 	if err != nil {
+		log.Fatalf("exec-driver: %v", err)
+	}
+	if p.ExecToken, err = execTokenFromEnv(os.Getenv); err != nil {
 		log.Fatalf("exec-driver: %v", err)
 	}
 	// No overall deadline. The per-call deadline in the plan (callDeadlineS, from
