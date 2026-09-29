@@ -52,12 +52,12 @@ When it finishes, the script prints the Route URL and a ready-to-run `curl`:
 ```bash
 curl -sk -H 'Content-Type: application/json' \
      -d '{"prompt": "Remember the secret word: pineapple. Reply only with OK."}' \
-     https://moca-default.apps.<cluster-domain>/turn | jq .
+     https://serverless-harness-default.apps.<cluster-domain>/turn | jq .
 # => { "sessionId": "019...", "response": "OK" }
 ```
 
 No Kourier port-forward and no `Host` header are needed — OpenShift Serverless
-creates a real Route per Knative Service (`oc get ksvc moca -o jsonpath='{.status.url}'`).
+creates a real Route per Knative Service (`oc get ksvc serverless-harness -o jsonpath='{.status.url}'`).
 
 ## What it installs
 
@@ -111,7 +111,7 @@ To use a different model, edit `service.yaml` before running the setup script:
 Or patch the running Knative Service after deployment:
 
 ```bash
-oc set env ksvc/moca SH_MODEL=claude-sonnet-4-6
+oc set env ksvc/serverless-harness SH_MODEL=claude-sonnet-4-6
 ```
 
 This triggers an automatic revision rollout. Available model IDs:
@@ -166,7 +166,7 @@ env and reference it from `SH_MODEL_HEADERS` via `${VAR}` (the default Bearer is
 Run the repo's smoke suite against the Route by exporting `KSVC_URL`:
 
 ```bash
-KSVC_URL=$(oc get ksvc moca -n default -o jsonpath='{.status.url}') \
+KSVC_URL=$(oc get ksvc serverless-harness -n default -o jsonpath='{.status.url}') \
   ./deploy/knative/smoke.sh
 ```
 
@@ -193,7 +193,7 @@ winning the lease — run the live gate. On OpenShift it needs the harness Route
 two pullable images, since its defaults assume kind:
 
 ```bash
-KSVC_URL=$(oc get ksvc moca -n default -o jsonpath='{.status.url}') \
+KSVC_URL=$(oc get ksvc serverless-harness -n default -o jsonpath='{.status.url}') \
 RELAY_IMAGE=<registry>/moca:latest \
 WORKER_IMAGE=image-registry.openshift-image-registry.svc:5000/default/remote-worker:latest \
 RELAY_LIVE_SMOKE=1 bash deploy/knative/relay-leaf-smoke.sh
@@ -227,7 +227,7 @@ and verifying the async-leaf path itself on OpenShift is a further step.
 - **SCC.** The published harness image declares no `USER` (defaults to root), so it
   runs as an explicit non-root UID (65532) and the script grants the harness
   ServiceAccount the `nonroot-v2` SCC (`oc adm policy add-scc-to-user nonroot-v2 -z
-moca`). The sandbox image sets `USER 65532` itself and needs no grant.
+serverless-harness`). The sandbox image sets `USER 65532` itself and needs no grant.
 
 ## Image delivery
 
@@ -243,10 +243,10 @@ on every push to `main`, so OpenShift pulls them directly — no in-cluster buil
 - **Build the harness from source in-cluster** (no external registry) against the
   OpenShift internal registry:
   ```bash
-  oc new-build --name moca --binary --strategy=docker -n default
-  oc start-build moca --from-dir=. --follow -n default
+  oc new-build --name serverless-harness --binary --strategy=docker -n default
+  oc start-build serverless-harness --from-dir=. --follow -n default
   ./deploy/knative/setup-ocp.sh \
-    --image image-registry.openshift-image-registry.svc:5000/default/moca:latest
+    --image image-registry.openshift-image-registry.svc:5000/default/serverless-harness:latest
   ```
   (Requires the pi-fork submodule to be checked out: `git submodule update --init pi-fork`.)
 
@@ -254,7 +254,7 @@ on every push to `main`, so OpenShift pulls them directly — no in-cluster buil
 
 | Symptom                                                                                                     | Cause / fix                                                                                                                                                                                               |
 | ----------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ksvc` never Ready, pod `CreateContainerConfigError: container has runAsNonRoot and image will run as root` | The `nonroot-v2` SCC grant didn't apply. Re-run the script, or `oc adm policy add-scc-to-user nonroot-v2 -z moca -n <ns>`.                                                                                |
+| `ksvc` never Ready, pod `CreateContainerConfigError: container has runAsNonRoot and image will run as root` | The `nonroot-v2` SCC grant didn't apply. Re-run the script, or `oc adm policy add-scc-to-user nonroot-v2 -z serverless-harness -n <ns>`.                                                                  |
 | `ksvc` never Ready, pod `CrashLoopBackOff` with `ERR_MODULE_NOT_FOUND`                                      | The harness image is broken/stale. Use a newer `--image` (the fix shipped in the image build; see the repo history).                                                                                      |
 | Sandbox `/workspace` PVC stuck `Pending`                                                                    | No (default) StorageClass. Set one, or ensure a provisioner is installed.                                                                                                                                 |
 | `oc apply -k overlays/ocp` fails with a load-restrictor / "not in or below" error                           | The overlay references shared base YAMLs one level up. Render with `oc kustomize --load-restrictor LoadRestrictionsNone deploy/knative/overlays/ocp \| oc apply -f -` — `setup-ocp.sh` does this for you. |
@@ -263,7 +263,7 @@ on every push to `main`, so OpenShift pulls them directly — no in-cluster buil
 ## Cleanup
 
 ```bash
-oc delete ksvc moca -n default
+oc delete ksvc serverless-harness -n default
 oc delete -k <(oc kustomize --load-restrictor LoadRestrictionsNone deploy/knative/overlays/ocp) 2>/dev/null || true
 oc delete sandbox sandbox-0 deployment/redis svc/redis secret/llm-credentials -n default
 # The durable /workspace PVC is provisioned StatefulSet-style from the Sandbox CR's

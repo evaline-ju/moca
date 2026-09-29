@@ -2,12 +2,12 @@
 
 - **Status:** Implemented
 - **Date:** 2026-06-16
-- **Deciders:** MOCA team
+- **Deciders:** Serverless Harness team
 - **Spec:** [`../specs/2026-06-16-m1-redis-session-backend-design.md`](../specs/2026-06-16-m1-redis-session-backend-design.md)
 
 ## Context
 
-MOCA needs a session to survive process death so a fresh process can resume it with no local files. Pi persists session state to local JSONL, tied to a file path, which is incompatible with scale-to-zero. Pi's append API is synchronous and its in-memory tree is authoritative during a live session.
+A serverless harness needs a session to survive process death so a fresh process can resume it with no local files. Pi persists session state to local JSONL, tied to a file path, which is incompatible with scale-to-zero. Pi's append API is synchronous and its in-memory tree is authoritative during a live session.
 
 ## Decision
 

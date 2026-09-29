@@ -38,7 +38,7 @@ When it finishes, the script prints Kourier access instructions:
 kubectl port-forward -n kourier-system svc/kourier 8080:80
 
 # Send a request with the Host header:
-curl -H 'Host: moca.default.example.com' \
+curl -H 'Host: serverless-harness.default.example.com' \
      -H 'Content-Type: application/json' \
      -d '{"prompt": "Remember the secret word: pineapple. Reply only with OK."}' \
      http://localhost:8080/turn | jq .
@@ -53,7 +53,7 @@ single JSON body. Streaming is a _representation_ of `/turn` chosen by content n
 separate route.
 
 ```bash
-curl -N -H 'Host: moca.default.example.com' \
+curl -N -H 'Host: serverless-harness.default.example.com' \
      -H 'Content-Type: application/json' \
      -H 'Accept: text/event-stream' \
      -d '{"prompt":"Count from 1 to 5, one number per line."}' \
@@ -131,7 +131,7 @@ To use a different model, edit `service.yaml` before running the setup script:
 Or patch the running Knative Service after deployment:
 
 ```bash
-kubectl set env ksvc/moca SH_MODEL=claude-sonnet-4-6
+kubectl set env ksvc/serverless-harness SH_MODEL=claude-sonnet-4-6
 ```
 
 This triggers an automatic revision rollout. Available model IDs:

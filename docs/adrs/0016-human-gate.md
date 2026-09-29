@@ -2,7 +2,7 @@
 
 - **Status:** Implemented
 - **Date:** 2026-06-28
-- **Deciders:** MOCA team
+- **Deciders:** Serverless Harness team
 - **Spec:** [`../specs/2026-06-28-human-gate-design.md`](../specs/2026-06-28-human-gate-design.md)
 
 ## Context

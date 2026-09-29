@@ -2,11 +2,11 @@
 
 Version: 1.1 — June 19, 2026
 Status: Design (approved for implementation planning)
-Scope: How MCP tool calls are originated in MOCA — as **code the model
+Scope: How MCP tool calls are originated in the serverless harness — as **code the model
 runs in the sandbox**, not as harness-native tool calls and not through a standalone
 terminating gateway — and the **credential/identity model** that injects per-user,
 unattended-session credentials at egress.
-Parent design: [Zero-Trust, Multi-Agent Extensions to the MOCA](../../../docs/research/2026-06-18-zero-trust-multiagent-harness-extension.md) §3.3 (MCP servers — gateway invocation), M10; §2 spine; M7–M9 credential plane
+Parent design: [Zero-Trust, Multi-Agent Extensions to the Serverless Harness](../../../docs/research/2026-06-18-zero-trust-multiagent-harness-extension.md) §3.3 (MCP servers — gateway invocation), M10; §2 spine; M7–M9 credential plane
 Builds on: M1 (Redis session backend), M2 (`K8sSandboxClient`), M3 (persistent channel), M4 (Knative wrapper)
 
 > **Supersedes §3.3 of the parent design.** The parent doc chose a dedicated MCP gateway

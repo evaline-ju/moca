@@ -53,8 +53,8 @@ export ANTHROPIC_API_KEY=sk-...    # ...or a gateway: ANTHROPIC_BASE_URL + ANTHR
 Set the convenience vars used throughout:
 
 ```bash
-export NS=default KSVC=moca
-export HOSTHDR='Host: moca.default.example.com'
+export NS=default KSVC=serverless-harness
+export HOSTHDR='Host: serverless-harness.default.example.com'
 export BASE=http://localhost:8080
 mkdir -p /tmp/demo-remote
 ```

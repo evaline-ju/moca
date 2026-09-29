@@ -95,14 +95,14 @@ key, never the whole Secret, whose `SH_RELAY_TOKEN` is the sandboxes' credential
 ```bash
 # `oc set env` does not work on a Knative Service: upsert the three entries by name and
 # replace the env array in one patch, passing every other entry through whole.
-NEWENV=$(oc get ksvc moca -n default -o json | jq -c '
+NEWENV=$(oc get ksvc serverless-harness -n default -o json | jq -c '
   (.spec.template.spec.containers[0].env // [])
   | map(select(.name | IN("SH_REMOTE_SANDBOX", "SH_RELAY_ADDR", "MOCA_RELAY_EXEC_TOKEN") | not))
   + [{name: "SH_REMOTE_SANDBOX", value: "1"},
      {name: "SH_RELAY_ADDR", value: "sandbox-relay.default.svc:8443"},
      {name: "MOCA_RELAY_EXEC_TOKEN",
       valueFrom: {secretKeyRef: {name: "sh-relay-token", key: "MOCA_RELAY_EXEC_TOKEN"}}}]')
-oc patch ksvc moca -n default --type=json \
+oc patch ksvc serverless-harness -n default --type=json \
   -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/env\",\"value\":$NEWENV}]"
 ```
 
@@ -256,7 +256,7 @@ overrides:
 
 ```bash
 export KUBECONFIG=/path/to/kubeconfig
-KSVC_URL=https://moca-default.apps.<domain> \
+KSVC_URL=https://serverless-harness-default.apps.<domain> \
 RELAY_IMAGE=<registry>/moca:latest \
 WORKER_IMAGE=image-registry.openshift-image-registry.svc:5000/default/remote-worker:latest \
 RELAY_LIVE_SMOKE=1 bash deploy/knative/relay-leaf-smoke.sh
@@ -437,6 +437,6 @@ fiddly; start in-cluster and graduate only if you need external reachability.
 | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Worker connects but the Attach is immediately closed    | Token unset or mismatched. Set `SH_RELAY_TOKEN` on the relay (Step 1) and give the worker the same value as `SANDBOX_TOKEN`. Auth is fail-closed. On an OCP overlay deployment, rotate the `sh-relay-token` Secret and `oc rollout restart deploy/sandbox-relay` instead of using `oc set env` — see the note in Step 1. |
 | No field in `sh:sandbox:records`                        | The Attach never succeeded (see above), the worker isn't sending `authorization: Bearer <token>` metadata, or it isn't sending `Hello` with `sandbox_id` as the first frame.                                                                                                                                             |
-| Presence is there but the harness never uses the worker | `SH_REMOTE_SANDBOX` / `SH_RELAY_ADDR` not set on the harness ksvc (Step 2). Confirm with `oc set env ksvc/moca --list -n default`.                                                                                                                                                                                       |
+| Presence is there but the harness never uses the worker | `SH_REMOTE_SANDBOX` / `SH_RELAY_ADDR` not set on the harness ksvc (Step 2). Confirm with `oc set env ksvc/serverless-harness --list -n default`.                                                                                                                                                                         |
 | A second worker for the same id won't connect           | Expected — one live Attach per `SANDBOX_ID`. Give each worker a distinct id.                                                                                                                                                                                                                                             |
 | `exit_code` comes back `null`                           | The child was signalled (or the worker sent `exit_code < 0`). Not an error by itself.                                                                                                                                                                                                                                    |

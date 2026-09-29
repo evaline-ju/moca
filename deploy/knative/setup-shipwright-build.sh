@@ -73,8 +73,8 @@ Options:
   --strategy <name>      ClusterBuildStrategy to use (default: ${STRATEGY})
   --tag <tag>            Image tag (default: ${TAG})
   --build-name <name>    Build object name prefix, so this doesn't collide with an existing
-                         Build named "moca" in the namespace (default: derived
-                         from --tag, e.g. "moca-dev")
+                         Build named "serverless-harness" in the namespace (default: derived
+                         from --tag, e.g. "serverless-harness-dev")
   --with-sandbox         Also build the sandbox image (deploy/knative/sandbox.Dockerfile)
   --wait-timeout <dur>   Max time to wait per build (default: ${WAIT_TIMEOUT})
   --context <ctx>        kubectl context to target (default: current-context)
@@ -88,10 +88,10 @@ Output:
 
 Examples:
   $0 --image-repo registry.cr-system.svc.cluster.local:5000/moca \\
-     --namespace moca --with-sandbox
+     --namespace serverless-harness --with-sandbox
 
   # Then:
-  ./deploy/knative/setup-k8s.sh --namespace moca \\
+  ./deploy/knative/setup-k8s.sh --namespace serverless-harness \\
      --image <ref printed above> --sandbox-image <ref printed above>
 EOF
 }
@@ -156,10 +156,10 @@ SANDBOX_IMAGE="${IMAGE_REPO}-sandbox:${TAG}"
 
 # Default Build object names include the tag, so a test/experimental run (different
 # --tag) doesn't silently overwrite an existing Build's revision/output — e.g. a real
-# "moca" Build already pointed at a stable branch. Pass --build-name to
+# "serverless-harness" Build already pointed at a stable branch. Pass --build-name to
 # reuse/update a specific existing Build on purpose — it's a prefix, so the sandbox
 # Build gets "-sandbox" appended rather than colliding with the harness Build's name.
-BUILD_NAME_PREFIX="${BUILD_NAME:-moca-${TAG}}"
+BUILD_NAME_PREFIX="${BUILD_NAME:-serverless-harness-${TAG}}"
 BUILD_NAME_HARNESS="$BUILD_NAME_PREFIX"
 BUILD_NAME_SANDBOX="${BUILD_NAME_PREFIX}-sandbox"
 

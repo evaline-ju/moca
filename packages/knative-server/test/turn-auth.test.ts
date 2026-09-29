@@ -561,12 +561,12 @@ describe('assertKeysetUsable', () => {
 describe('runtimeFieldsForTurn', () => {
   it('reports pod identity from the environment Knative already provides', async () => {
     const fields = runtimeFieldsForTurn(
-      { HOSTNAME: 'harness-abc', K_REVISION: 'moca-00003' },
+      { HOSTNAME: 'harness-abc', K_REVISION: 'serverless-harness-00003' },
       'start',
     );
     expect(fields).toMatchObject({
       harnessPod: 'harness-abc',
-      revision: 'moca-00003',
+      revision: 'serverless-harness-00003',
     });
     expect(Number(fields.turnStartedAt)).toBeGreaterThan(0);
     expect(fields.turnEndedAt).toBeUndefined();

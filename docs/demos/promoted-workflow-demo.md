@@ -59,16 +59,16 @@ code:
 ```bash
 docker build --load -t dev.local/moca:local .
 kind load docker-image dev.local/moca:local --name sh-knative
-kubectl -n default patch ksvc moca --type merge \
+kubectl -n default patch ksvc serverless-harness --type merge \
   -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"deploy.sh/build-ts\":\"$(date +%s)\"}}}}}"
-kubectl wait ksvc/moca -n default --for=condition=Ready --timeout=180s
+kubectl wait ksvc/serverless-harness -n default --for=condition=Ready --timeout=180s
 ```
 
 Set the convenience vars used throughout:
 
 ```bash
-export NS=default KSVC=moca
-export HOSTHDR='Host: moca.default.example.com'
+export NS=default KSVC=serverless-harness
+export HOSTHDR='Host: serverless-harness.default.example.com'
 export BASE=http://localhost:8080
 
 # The SH_* names are the ones demo-promoted-workflow.sh and the make targets read, so the

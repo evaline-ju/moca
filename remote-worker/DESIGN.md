@@ -96,14 +96,14 @@ oc set env deploy/sandbox-relay SH_RELAY_TOKEN=dev-token -n default
 #    exec token: the relay refuses every SandboxExec without it (MI1 R5). The harness reads
 #    it by a secretKeyRef to that ONE key of sh-relay-token (setup-ocp.sh creates it), never
 #    the whole Secret. `oc set env` does not work on a Knative Service, so upsert by name:
-NEWENV=$(oc get ksvc moca -n default -o json | jq -c '
+NEWENV=$(oc get ksvc serverless-harness -n default -o json | jq -c '
   (.spec.template.spec.containers[0].env // [])
   | map(select(.name | IN("SH_REMOTE_SANDBOX", "SH_RELAY_ADDR", "MOCA_RELAY_EXEC_TOKEN") | not))
   + [{name: "SH_REMOTE_SANDBOX", value: "1"},
      {name: "SH_RELAY_ADDR", value: "sandbox-relay.default.svc:8443"},
      {name: "MOCA_RELAY_EXEC_TOKEN",
       valueFrom: {secretKeyRef: {name: "sh-relay-token", key: "MOCA_RELAY_EXEC_TOKEN"}}}]')
-oc patch ksvc moca -n default --type=json \
+oc patch ksvc serverless-harness -n default --type=json \
   -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/env\",\"value\":$NEWENV}]"
 
 # 3. Tunnel the relay to the laptop (leave running).
@@ -149,7 +149,7 @@ For the full **harness → leaf → relay → worker** path, run the worker as a
 # drive a leaf:
 curl -sk -H 'Content-Type: application/json' \
   -d '{"sessionId":"leaf-1","item":{"item_id":"i1","file":"/workspace/README.md","pattern":"hello"},"maxTurns":2}' \
-  https://moca-default.<domain>/runs
+  https://serverless-harness-default.<domain>/runs
 ```
 
 The leaf's file tools (`test -r …`, `file --mime-type …`, `cat …`) now run for real
@@ -159,7 +159,7 @@ actual file content, so the leaf verdict reflects what is really in
 directly with the `grpcurl` exec above; the worker pod log shows the matching
 `exec req_id=…` frames.
 
-> **Required egress rule (upstream gap).** The harness `moca-harness-egress`
+> **Required egress rule (upstream gap).** The harness `serverless-harness-egress`
 > NetworkPolicy is default-deny egress. As shipped it allows DNS, Redis, and
 > :443/:6443 — but **not the relay**, so with `SH_REMOTE_SANDBOX=1` every remote
 > exec is silently default-denied (harness→relay blocked) and times out. This repo's
@@ -167,7 +167,7 @@ directly with the `grpcurl` exec above; the worker pod log shows the matching
 > (`app=sandbox-relay` :8443). If you deployed before that fix, patch it live:
 >
 > ```bash
-> oc patch networkpolicy moca-harness-egress -n default --type=json \
+> oc patch networkpolicy serverless-harness-egress -n default --type=json \
 >   -p '[{"op":"add","path":"/spec/egress/-","value":{"ports":[{"port":8443,"protocol":"TCP"}],"to":[{"podSelector":{"matchLabels":{"app":"sandbox-relay"}}}]}}]'
 > ```
 

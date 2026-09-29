@@ -24,7 +24,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 NS="${NS:-default}"
-KSVC=moca
+KSVC=serverless-harness
 LOG_DIR="${LOG_DIR:-/tmp/kagenti/rc1/ocp}"
 OVERLAY="$SCRIPT_DIR/overlays/ocp-authbridge"
 BASE_OVERLAY="$SCRIPT_DIR/overlays/ocp"

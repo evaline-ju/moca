@@ -61,7 +61,7 @@ kubectl port-forward -n kourier-system svc/kourier 8080:80
 In a second T2 shell (leave the port-forward running):
 
 ```bash
-export HOST="moca.default.example.com"
+export HOST="serverless-harness.default.example.com"
 export BASE="http://localhost:8080"
 ```
 
@@ -74,10 +74,10 @@ remember everything._
 
 ### 1a. Confirm you're at zero
 
-T1 should show no `moca-...` pod. Confirm in T2:
+T1 should show no `serverless-harness-...` pod. Confirm in T2:
 
 ```bash
-kubectl get pods -l serving.knative.dev/service=moca
+kubectl get pods -l serving.knative.dev/service=serverless-harness
 # => No resources found  (a normal agent is a resident process — never at zero)
 ```
 
@@ -101,7 +101,7 @@ Expected:
 export SID="<paste sessionId from above>"
 ```
 
-In **T1** a `moca-...` pod flips to `Running` in under a second.
+In **T1** a `serverless-harness-...` pod flips to `Running` in under a second.
 
 ### 1c. Walk away — watch it scale to zero
 

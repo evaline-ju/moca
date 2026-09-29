@@ -4,7 +4,7 @@
 # (sandbox.Dockerfile), so the command is just `sleep infinity`; the image is the
 # pre-baked GHCR image (build.yaml republishes it on every push to main, symmetric
 # with the harness image; override with setup-ocp.sh --sandbox-image); the pod runs
-# non-root (UID 65532, admitted by nonroot-v2 on the moca-sandbox SA)
+# non-root (UID 65532, admitted by nonroot-v2 on the serverless-harness-sandbox SA)
 # with fsGroup 65532 so the Sandbox CR's durable /workspace PVC (from
 # volumeClaimTemplates) is writable.
 # NOTE: we deliberately do NOT touch volumeClaimTemplates/volumeMounts — /workspace
@@ -17,7 +17,7 @@
   value: ['sleep', 'infinity']
 - op: add
   path: /spec/podTemplate/spec/serviceAccountName
-  value: moca-sandbox
+  value: serverless-harness-sandbox
 - op: add
   path: /spec/podTemplate/spec/securityContext
   value:

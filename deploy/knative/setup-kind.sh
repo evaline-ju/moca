@@ -233,7 +233,7 @@ if [ "${SH_AUTHBRIDGE:-0}" = "1" ]; then
 
   kubectl apply -f "$SCRIPT_DIR/ibac-stub.yaml" -f "$SCRIPT_DIR/authbridge/ab1-deployment.yaml"
   # Applied AFTER any base egress policy so it overwrites the same NetworkPolicy name
-  # (moca-harness-egress) rather than stacking with it.
+  # (serverless-harness-egress) rather than stacking with it.
   kubectl apply -f "$SCRIPT_DIR/authbridge/harness-egress-ab1.yaml"
   kubectl -n default rollout status deploy/authbridge-ab1 --timeout=120s
   kubectl -n default rollout status deploy/ibac-stub --timeout=120s
@@ -320,7 +320,7 @@ if [ "${SH_AUTHBRIDGE:-0}" = "1" ]; then
 fi
 
 # 9. Deploy Knative Service
-echo "--- Deploying moca Knative Service ---"
+echo "--- Deploying serverless-harness Knative Service ---"
 kubectl apply -f "$SCRIPT_DIR/service.yaml"
 
 # The image tag (dev.local/moca:local) is mutable, so re-applying an unchanged
@@ -329,13 +329,13 @@ kubectl apply -f "$SCRIPT_DIR/service.yaml"
 # Revision by stamping a build marker into the template so the (re)loaded image is always picked up.
 # Stamp whenever we loaded an image this run (pull or build); skip when --skip-build reused one.
 if [ "${HARNESS_IMAGE_LOADED:-false}" = "true" ]; then
-  kubectl -n default patch ksvc moca --type merge \
+  kubectl -n default patch ksvc serverless-harness --type merge \
     -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"deploy.sh/build-ts\":\"$(date +%s)\"}}}}}"
 fi
 
 # 10. Wait for service to become ready
 echo "--- Waiting for Knative Service to be ready ---"
-kubectl wait ksvc/moca --for=condition=Ready --timeout=120s
+kubectl wait ksvc/serverless-harness --for=condition=Ready --timeout=120s
 
 # 11. Print access info
 KOURIER_IP=$(kubectl get svc kourier -n kourier-system -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "pending")
@@ -343,7 +343,7 @@ echo ""
 echo "=== Setup complete ==="
 echo ""
 echo "Knative Service URL (in-cluster):"
-echo "  http://moca.default.svc.cluster.local"
+echo "  http://serverless-harness.default.svc.cluster.local"
 echo ""
 echo "Kourier ClusterIP: $KOURIER_IP"
 echo ""
@@ -351,7 +351,7 @@ echo "To access from host, run in a separate terminal:"
 echo "  kubectl port-forward -n kourier-system svc/kourier 8080:80"
 echo ""
 echo "Then send requests with the Host header:"
-echo "  curl -H 'Host: moca.default.example.com' \\"
+echo "  curl -H 'Host: serverless-harness.default.example.com' \\"
 echo "       -H 'Content-Type: application/json' \\"
 echo "       -d '{\"prompt\": \"Hello\"}' \\"
 echo "       http://localhost:8080/turn"

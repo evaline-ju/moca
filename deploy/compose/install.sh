@@ -11,7 +11,7 @@
 # nothing here may rely on bash, on BASH_SOURCE, or on this file's own location on disk.
 #
 # Environment (all optional):
-#   SH_COMPOSE_DIR       Where the compose file and .env live (default $HOME/.moca)
+#   SH_COMPOSE_DIR       Where the compose file and .env live (default $HOME/.serverless-harness)
 #   SH_COMPOSE_BASE_URL  Where to fetch docker-compose.yml from (default: this repo's main branch)
 #   SH_RELAY_TOKEN       The relay's shared secret; generated (32 random bytes, hex) if unset
 #   SH_TURNS_PER_WORKER  Per-worker in-flight turn cap (default 4 -- a trial value, not an E8 result)
@@ -23,7 +23,7 @@
 #                        Model settings copied into .env when set (a turn needs a model)
 set -eu
 
-: "${SH_COMPOSE_DIR:=$HOME/.moca}"
+: "${SH_COMPOSE_DIR:=$HOME/.serverless-harness}"
 : "${SH_COMPOSE_BASE_URL:=https://raw.githubusercontent.com/rossoctl/moca/main/deploy/compose}"
 
 DEFAULT_HARNESS_IMAGE='ghcr.io/rossoctl/moca:latest'

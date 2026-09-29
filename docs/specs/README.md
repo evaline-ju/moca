@@ -36,7 +36,7 @@ The decoupled scale-to-zero pattern. These are done and referenced across commit
 | M3  | Persistent in-pod channel                       | [`2026-06-17-m3-persistent-channel-design.md`](2026-06-17-m3-persistent-channel-design.md)                 |
 | M4  | Knative serverless wrapper (`runTurn`)          | [`2026-06-17-m4-knative-serverless-wrapper-design.md`](2026-06-17-m4-knative-serverless-wrapper-design.md) |
 | M5  | Compaction-checkpoint fast path + budget voter  | [`2026-06-23-m5-compaction-checkpoint-design.md`](2026-06-23-m5-compaction-checkpoint-design.md)           |
-| M6  | Experiments E2/E5 (`@moca/experiments`)         | [`2026-06-24-m6-experiments-design.md`](2026-06-24-m6-experiments-design.md)                               |
+| M6  | Experiments E2/E5 (`@sh/experiments`)           | [`2026-06-24-m6-experiments-design.md`](2026-06-24-m6-experiments-design.md)                               |
 | M7  | Cluster experiments E1/E3/E4                    | [`2026-06-25-m7-cluster-experiments-design.md`](2026-06-25-m7-cluster-experiments-design.md)               |
 
 > **Collision note:** Phase-1 `M7` (_cluster experiments_, built) is **not** the parent doc's `M7`

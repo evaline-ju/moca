@@ -23,9 +23,9 @@ curl -fsSL https://raw.githubusercontent.com/rossoctl/moca/main/deploy/compose/i
 
 `install.sh`:
 
-1. fetches `docker-compose.yml` into `~/.moca` (`SH_COMPOSE_DIR` overrides the
+1. fetches `docker-compose.yml` into `~/.serverless-harness` (`SH_COMPOSE_DIR` overrides the
    location),
-2. writes `~/.moca/.env` (mode 0600) **once**. A re-run never overwrites it. It
+2. writes `~/.serverless-harness/.env` (mode 0600) **once**. A re-run never overwrites it. It
    holds:
    - `SH_RELAY_TOKEN`: yours if you set it, otherwise 32 random bytes from `/dev/urandom`. It
      reaches the relay and the sandbox through `.env` only, never a command line.
@@ -52,8 +52,8 @@ Then:
 ```bash
 curl -s -H 'Content-Type: application/json' -d '{"prompt":"Run uname -a and tell me the kernel."}' \
   http://127.0.0.1:8080/turn
-cd ~/.moca && docker compose logs -f     # watch it
-cd ~/.moca && docker compose down        # stop it (Redis state goes with it)
+cd ~/.serverless-harness && docker compose logs -f     # watch it
+cd ~/.serverless-harness && docker compose down        # stop it (Redis state goes with it)
 ```
 
 ## What runs, and the one constraint on its shape

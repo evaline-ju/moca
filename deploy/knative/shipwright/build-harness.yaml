@@ -12,7 +12,7 @@ metadata:
   name: __NAME__
   namespace: __NAMESPACE__
   labels:
-    app: moca
+    app: serverless-harness
 spec:
   source:
     type: Git

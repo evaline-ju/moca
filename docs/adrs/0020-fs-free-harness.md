@@ -2,7 +2,7 @@
 
 - **Status:** Implemented
 - **Date:** 2026-07-02
-- **Deciders:** MOCA team
+- **Deciders:** Serverless Harness team
 - **Spec:** [`../specs/2026-07-02-p1-fs-free-harness-design.md`](../specs/2026-07-02-p1-fs-free-harness-design.md)
 
 ## Context

@@ -35,7 +35,7 @@ spec:
       template:
         spec:
           restartPolicy: Never
-          serviceAccountName: moca
+          serviceAccountName: serverless-harness
           # The dispatcher only reads the mounted config and makes HTTP POSTs — lock it down.
           # runAsUser 65532 ("nonroot") is required because the harness image has no USER (runs as
           # root by default), so runAsNonRoot alone would refuse to start.
@@ -59,7 +59,7 @@ spec:
                 - name: CRON_CONFIG
                   value: /config/schedule.json
                 - name: SH_SERVICE_URL
-                  value: http://moca.default.svc.cluster.local
+                  value: http://serverless-harness.default.svc.cluster.local
               volumeMounts:
                 - name: config
                   mountPath: /config

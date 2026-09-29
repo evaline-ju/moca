@@ -12,7 +12,7 @@ metadata:
 spec:
   template:
     spec:
-      serviceAccountName: moca
+      serviceAccountName: serverless-harness
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000

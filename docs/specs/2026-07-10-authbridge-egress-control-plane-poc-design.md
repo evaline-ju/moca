@@ -44,7 +44,7 @@
 ## 1. Goal
 
 Prove, end-to-end and single-tenant, that **Rosso Cortex / AuthBridge** can be the concrete mechanism for
-the zero-trust credential plane on MOCA — doing both **credential injection** and
+the zero-trust credential plane on the serverless harness — doing both **credential injection** and
 **action control** on the harness's HTTP egress hops, with the credential itself never held by any
 model-influenced workload. The PoC is a **reference slice** (approach B): every seam is the shape it would
 harden into, even though the credential is static and the control plugin's _judge_ is canned.
@@ -287,7 +287,7 @@ per the repo's context-budget rules.
 ## 11. References
 
 - [ADR-0025 — AuthBridge deployment topology](../adrs/0025-authbridge-deployment-topology.md)
-- Companion architecture diagram: `../../../docs/moca/diagram.md`
+- Companion architecture diagram: `../../../docs/serverless-harness/diagram.md`
 - SandboxTransport spec [`2026-07-08-sandbox-transport-grpc-design.md`](2026-07-08-sandbox-transport-grpc-design.md) + [ADR-0024](../adrs/0024-sandbox-transport-remote-exec.md); epic #89
 - Rosso Cortex / AuthBridge plugin docs (kagenti-extensions `authbridge/docs/`): `framework-architecture.md`,
   `token-broker-plugin.md`, `ibac-plugin.md`, `sparc-plugin.md`

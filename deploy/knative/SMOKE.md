@@ -86,7 +86,7 @@ The Kind smoke/experiment drivers run against the Route — export `KSVC_URL`
 (instead of starting a Kourier port-forward):
 
 ```bash
-KSVC_URL=$(oc get ksvc moca -n default -o jsonpath='{.status.url}') \
+KSVC_URL=$(oc get ksvc serverless-harness -n default -o jsonpath='{.status.url}') \
   ./deploy/knative/smoke.sh
 ```
 

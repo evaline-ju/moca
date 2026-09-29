@@ -38,7 +38,7 @@ ingress domain (so you reach the service by port-forward or NodePort).
 ```bash
 export ANTHROPIC_API_KEY=sk-...
 ./deploy/knative/setup-k8s.sh \
-  --namespace moca \
+  --namespace serverless-harness \
   --image ghcr.io/rossoctl/moca:latest \
   --sandbox-image ghcr.io/rossoctl/moca-sandbox:latest
 ```
@@ -47,7 +47,7 @@ When it finishes it prints how to reach the service (port-forward by default):
 
 ```bash
 kubectl port-forward -n kourier-system svc/kourier 8080:80
-curl -H 'Host: moca.moca.example.com' \
+curl -H 'Host: serverless-harness.serverless-harness.example.com' \
      -H 'Content-Type: application/json' \
      -d '{"prompt":"Hello"}' http://localhost:8080/turn
 ```
@@ -83,11 +83,12 @@ day-to-day dev, but don't rely on it to install a specific release. Two traps:
   Revision is created, and nodes can keep serving the previously cached image.
 
 To install a specific release, pass the versioned tag explicitly instead of relying on
-the default:
+the default. `0.3.0` predates the rename to MOCA, so it is published under the old
+`serverless-harness*` image names:
 
 ```bash
---image ghcr.io/rossoctl/moca:0.3.0 \
---sandbox-image ghcr.io/rossoctl/moca-sandbox:0.3.0
+--image ghcr.io/rossoctl/serverless-harness:0.3.0 \
+--sandbox-image ghcr.io/rossoctl/serverless-harness-sandbox:0.3.0
 ```
 
 ## Building the images
@@ -122,7 +123,7 @@ harness code for testing/experimentation. Whatever you pick, pass the resulting 
   ```bash
   ./deploy/knative/setup-shipwright-build.sh \
     --image-repo registry.cr-system.svc.cluster.local:5000/moca \
-    --namespace moca --with-sandbox
+    --namespace serverless-harness --with-sandbox
   ```
   It prints `HARNESS_IMAGE=`/`SANDBOX_IMAGE=` lines — pass those straight to
   `setup-k8s.sh --image`/`--sandbox-image`. Requires a `ClusterBuildStrategy` already on

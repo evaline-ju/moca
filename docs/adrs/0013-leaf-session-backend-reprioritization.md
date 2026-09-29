@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-06-26
-- **Deciders:** MOCA team
+- **Deciders:** Serverless Harness team
 - **Spec:** [`../specs/2026-06-26-leaf-session-backend-capability-charter.md`](../specs/2026-06-26-leaf-session-backend-capability-charter.md)
 
 ## Context

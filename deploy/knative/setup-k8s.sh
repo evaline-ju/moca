@@ -84,7 +84,7 @@ registry the cluster can pull works, including an in-cluster registry.
 
 Examples:
   $0                                              # default ns, GHCR images, cluster-default storage
-  $0 --namespace moca --with-keda   # dedicated ns + async-leaf support
+  $0 --namespace serverless-harness --with-keda   # dedicated ns + async-leaf support
   $0 --storage-class ibm-scale-csi                # GPFS-backed sandbox workspaces
   $0 --image my-registry.example.com/sh:dev --sandbox-image my-registry.example.com/sbx:dev
 EOF
@@ -278,7 +278,7 @@ log_info "Deploying harness Knative Service"
 # we do NOT `kubectl set env` a Knative Service (that CRD is not a built-in workload kind, so
 # `set env` errors and, under set -euo pipefail, would abort the script).
 apply_base "$SCRIPT_DIR/service.yaml"
-$DRY_RUN || "${KUBECTL[@]}" -n "$NAMESPACE" wait ksvc/moca --for=condition=Ready --timeout=180s
+$DRY_RUN || "${KUBECTL[@]}" -n "$NAMESPACE" wait ksvc/serverless-harness --for=condition=Ready --timeout=180s
 
 # ----------------------------------------------------------------------------
 # 8. Ingress (optional)
@@ -294,15 +294,15 @@ fi
 $DRY_RUN && { log_success "dry-run complete (no changes applied)"; exit 0; }
 log_success "Setup complete."
 echo ""
-echo "In-cluster URL: http://moca.${NAMESPACE}.svc.cluster.local"
+echo "In-cluster URL: http://serverless-harness.${NAMESPACE}.svc.cluster.local"
 if [ "$INGRESS" = "nodeport" ]; then
   NP=$("${KUBECTL[@]}" -n kourier-system get svc kourier -o jsonpath='{.spec.ports[?(@.port==80)].nodePort}' 2>/dev/null || echo "<pending>")
   echo "NodePort (HTTP): reach any node at :$NP with a Host header:"
-  echo "  curl -H 'Host: moca.${NAMESPACE}.example.com' -H 'Content-Type: application/json' \\"
+  echo "  curl -H 'Host: serverless-harness.${NAMESPACE}.example.com' -H 'Content-Type: application/json' \\"
   echo "       -d '{\"prompt\":\"Hello\"}' http://<node-ip>:$NP/turn"
 else
   echo "Reach it via a port-forward (no external ingress configured):"
   echo "  kubectl ${KUBECTL_CONTEXT:+--context $KUBECTL_CONTEXT} port-forward -n kourier-system svc/kourier 8080:80"
-  echo "  curl -H 'Host: moca.${NAMESPACE}.example.com' -H 'Content-Type: application/json' \\"
+  echo "  curl -H 'Host: serverless-harness.${NAMESPACE}.example.com' -H 'Content-Type: application/json' \\"
   echo "       -d '{\"prompt\":\"Hello\"}' http://localhost:8080/turn"
 fi

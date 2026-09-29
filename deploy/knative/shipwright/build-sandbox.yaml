@@ -9,7 +9,7 @@ metadata:
   name: __NAME__
   namespace: __NAMESPACE__
   labels:
-    app: moca-sandbox
+    app: serverless-harness-sandbox
 spec:
   source:
     type: Git

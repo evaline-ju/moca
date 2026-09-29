@@ -146,7 +146,7 @@ function assertDeploymentPatchShape(
 
 describe('patch-ab1.yaml (authbridge-ab1 Deployment patch)', () => {
   const patch = readYaml(resolve(OVERLAY, 'patch-ab1.yaml'));
-  assertDeploymentPatchShape(patch, 'authbridge-ab1', 'authbridge-ab1', 'moca');
+  assertDeploymentPatchShape(patch, 'authbridge-ab1', 'authbridge-ab1', 'serverless-harness');
 
   it('does NOT pin runAsUser (official image already runs as non-root UID 1001)', () => {
     const sc = patch.spec?.template?.spec?.securityContext ?? {};
@@ -156,7 +156,7 @@ describe('patch-ab1.yaml (authbridge-ab1 Deployment patch)', () => {
 
 describe('patch-ibac-stub.yaml (ibac-stub Deployment patch)', () => {
   const patch = readYaml(resolve(OVERLAY, 'patch-ibac-stub.yaml'));
-  assertDeploymentPatchShape(patch, 'ibac-stub', 'ibac-stub', 'moca');
+  assertDeploymentPatchShape(patch, 'ibac-stub', 'ibac-stub', 'serverless-harness');
 
   it('pins runAsUser 65532 (GHCR harness image declares no USER / runs as root)', () => {
     const sc = patch.spec?.template?.spec?.securityContext ?? {};
@@ -166,7 +166,7 @@ describe('patch-ibac-stub.yaml (ibac-stub Deployment patch)', () => {
 
 describe('patch-echo-target.yaml (echo-target Deployment patch)', () => {
   const patch = readYaml(resolve(OVERLAY, 'patch-echo-target.yaml'));
-  assertDeploymentPatchShape(patch, 'echo-target', 'echo-target', 'moca');
+  assertDeploymentPatchShape(patch, 'echo-target', 'echo-target', 'serverless-harness');
 
   it('pins runAsUser 1000 (image USER `node` is non-numeric; kubelet needs a numeric UID to verify non-root)', () => {
     const sc = patch.spec?.template?.spec?.securityContext ?? {};
@@ -182,11 +182,11 @@ describe('patch-sandbox-ab2.yaml (Sandbox CR JSON6902 patch)', () => {
     expect(ops.length).toBeGreaterThan(0);
   });
 
-  it('adds serviceAccountName = moca-sandbox', () => {
+  it('adds serviceAccountName = serverless-harness-sandbox', () => {
     const op = ops.find((o) => o.path === '/spec/podTemplate/spec/serviceAccountName');
     expect(op).toBeTruthy();
     expect(op.op).toBe('add');
-    expect(op.value).toBe('moca-sandbox');
+    expect(op.value).toBe('serverless-harness-sandbox');
   });
 
   it('adds a pod securityContext with runAsUser 65532 and fsGroup 65532', () => {

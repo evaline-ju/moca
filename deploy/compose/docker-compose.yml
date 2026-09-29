@@ -12,7 +12,7 @@
 # to -- is the `control-plane` PROFILE, because it cannot start without a GitHub OAuth client id
 # (SH_GITHUB_CLIENT_ID) and a stack without one must still come up. install.sh sets
 # COMPOSE_PROFILES=control-plane in .env when it is given a client id.
-name: moca
+name: serverless-harness
 
 services:
   # docker.io/redis:7-alpine, as deploy/vm/setup-vm.sh's start_redis pins. Unpublished: this Redis

@@ -2,7 +2,7 @@
 
 - **Status:** Implemented
 - **Date:** 2026-06-17
-- **Deciders:** MOCA team
+- **Deciders:** Serverless Harness team
 - **Spec:** [`../specs/2026-06-17-m3-persistent-channel-design.md`](../specs/2026-06-17-m3-persistent-channel-design.md)
 
 ## Context

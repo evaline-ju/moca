@@ -2,7 +2,7 @@
 
 - **Status:** Implemented
 - **Date:** 2026-06-27
-- **Deciders:** MOCA team
+- **Deciders:** Serverless Harness team
 - **Spec:** [`../specs/2026-06-27-async-leaf-completion-design.md`](../specs/2026-06-27-async-leaf-completion-design.md)
 
 ## Context

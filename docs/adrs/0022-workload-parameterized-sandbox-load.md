@@ -2,7 +2,7 @@
 
 - **Status:** Implemented
 - **Date:** 2026-07-03
-- **Deciders:** MOCA team
+- **Deciders:** Serverless Harness team
 - **Spec:** [`../specs/2026-07-03-e6-workload-parameterized-sandbox-load-design.md`](../specs/2026-07-03-e6-workload-parameterized-sandbox-load-design.md)
 
 ## Context
