@@ -28,16 +28,20 @@ done
 # apart from "not passed at all".
 export MOCK_ENV_LOG="$TMP/mock-env.log"
 # `podman network inspect` also needs real stdout: ensure_sandbox_network parses it back to detect
-# a subnet/gateway mismatch on a pre-existing network (Fix Round 1, #2). MOCK_PODMAN_INSPECT lets a
-# test simulate a live network that disagrees with what's configured; its default matches
-# MOCA_SANDBOX_SUBNET/MOCA_SANDBOX_GATEWAY's own defaults so every call site that doesn't set it
-# (i.e. every ensure_sandbox_network call in this file except the mismatch case below) keeps passing.
+# a pre-existing network whose subnet/gateway or isolation differs from what is configured.
+# MOCK_PODMAN_INSPECT (subnet/gateway) and MOCK_PODMAN_ISOLATE (the isolate option) let a test
+# simulate such a network; their defaults match what setup-vm.sh configures, so every call site that
+# sets neither keeps passing.
 cat >"$TMP/bin/podman" <<'MOCK'
 #!/usr/bin/env bash
 printf '%s %s\n' "$(basename "$0")" "$*" >>"$MOCK_LOG"
 printf 'podman-env SANDBOX_TOKEN=%s\n' "${SANDBOX_TOKEN-<unset>}" >>"$MOCK_ENV_LOG"
 if [[ "$1" == "network" && "$2" == "inspect" ]]; then
-  printf '%s\n' "${MOCK_PODMAN_INSPECT:-10.89.40.0/24 10.89.40.1}"
+  if [[ "$*" == *isolate* ]]; then
+    printf '%s\n' "${MOCK_PODMAN_ISOLATE-strict}"
+  else
+    printf '%s\n' "${MOCK_PODMAN_INSPECT:-10.89.40.0/24 10.89.40.1}"
+  fi
 fi
 MOCK
 chmod +x "$TMP/bin/podman"
@@ -260,6 +264,70 @@ grep -q '^SH_RELAY_TOKEN=keep$' "$EXEC_DIR/relay.env" || fail "ensure_exec_token
 pass "MOCA_RELAY_EXEC_TOKEN: generated once, same value in relay.env and supervisor.env"
 rm -rf "$EXEC_DIR"
 
+# --- MI1 R5: the exec listener and the supervisor's dial address move together ------------------
+# Before MI1 the relay served everything on one listener and the supervisor dialed it at
+# SH_RELAY_ADDR=127.0.0.1:9443. install_env never rewrites an existing env file, so a re-run on such
+# a VM must migrate BOTH files together (relay: MOCA_RELAY_EXEC_ADDR, supervisor: SH_RELAY_ADDR);
+# files that already agree are left alone; and any other combination -- one side migrated, or ports
+# that disagree -- refuses, naming both values, rather than leaving the supervisor dialing a port
+# nothing serves SandboxExec on.
+LST_DIR="$(mktemp -d)"
+sum_files() { cat "$LST_DIR/relay.env" "$LST_DIR/supervisor.env" | cksum; }
+listener_env() { # <relay extra lines> <supervisor SH_RELAY_ADDR line or empty>
+  printf 'SH_RELAY_PORT=9443\nREDIS_URL=redis://127.0.0.1:6379\nSH_RELAY_TOKEN=keep\n%s' "$1" >"$LST_DIR/relay.env"
+  printf 'PORT=8080\nSH_TURNS_PER_WORKER=9\n%s\nREDIS_URL=redis://127.0.0.1:6379\n' "$2" >"$LST_DIR/supervisor.env"
+  chmod 0640 "$LST_DIR/relay.env" "$LST_DIR/supervisor.env"
+}
+exec_addr_of() { grep -E '^MOCA_RELAY_EXEC_ADDR=' "$LST_DIR/relay.env" | cut -d= -f2-; }
+dial_addr_of() { grep -E '^SH_RELAY_ADDR=' "$LST_DIR/supervisor.env" | cut -d= -f2-; }
+
+# fresh: both files straight from the templates already agree -- a no-op
+cp "$ENV_SRC_DIR/relay.env.example" "$LST_DIR/relay.env"
+cp "$ENV_SRC_DIR/supervisor.env.example" "$LST_DIR/supervisor.env"
+before="$(sum_files)"
+SH_ENV_DIR="$LST_DIR" ensure_exec_listener || fail "ensure_exec_listener refused a fresh install's env files"
+[[ "$(sum_files)" == "$before" ]] || fail "ensure_exec_listener rewrote a fresh install's env files"
+pass "ensure_exec_listener: a fresh install is already consistent and left untouched"
+
+# pre-MI1: no exec address, supervisor on the old default -- both migrate, nothing else changes
+listener_env "" "SH_RELAY_ADDR=127.0.0.1:9443"
+SH_ENV_DIR="$LST_DIR" ensure_exec_listener || fail "ensure_exec_listener failed to migrate a pre-MI1 pair"
+[[ "$(exec_addr_of)" == "127.0.0.1:9444" ]] || fail "relay.env did not gain MOCA_RELAY_EXEC_ADDR=127.0.0.1:9444: $(cat "$LST_DIR/relay.env")"
+[[ "$(dial_addr_of)" == "127.0.0.1:9444" ]] || fail "supervisor.env's SH_RELAY_ADDR was not moved to 127.0.0.1:9444: $(cat "$LST_DIR/supervisor.env")"
+[[ "$(grep -c '^SH_RELAY_ADDR=' "$LST_DIR/supervisor.env")" == 1 ]] || fail "the migration duplicated SH_RELAY_ADDR"
+grep -q '^SH_TURNS_PER_WORKER=9$' "$LST_DIR/supervisor.env" || fail "the migration lost an operator setting in supervisor.env"
+grep -q '^SH_RELAY_TOKEN=keep$' "$LST_DIR/relay.env" || fail "the migration touched SH_RELAY_TOKEN"
+[[ "$(stat -c %a "$LST_DIR/supervisor.env" 2>/dev/null || stat -f %Lp "$LST_DIR/supervisor.env")" == 640 ]] ||
+  fail "the migration changed supervisor.env's mode"
+pass "ensure_exec_listener: a pre-MI1 pair migrates both files together, and nothing else"
+
+# already migrated: a second run is a byte-identical no-op
+before="$(sum_files)"
+SH_ENV_DIR="$LST_DIR" ensure_exec_listener || fail "ensure_exec_listener refused an already-migrated pair"
+[[ "$(sum_files)" == "$before" ]] || fail "ensure_exec_listener rewrote an already-migrated pair"
+pass "ensure_exec_listener: an already-migrated pair is left untouched"
+
+# mismatches: each refuses, names both values, and writes nothing
+for case_ in "MOCA_RELAY_EXEC_ADDR=127.0.0.1:9444|SH_RELAY_ADDR=127.0.0.1:9443|127.0.0.1:9444|127.0.0.1:9443" \
+  "|SH_RELAY_ADDR=127.0.0.1:9444|<unset>|127.0.0.1:9444" \
+  "MOCA_RELAY_EXEC_ADDR=127.0.0.1:9444|SH_RELAY_ADDR=127.0.0.1:9555|127.0.0.1:9444|127.0.0.1:9555" \
+  "|SH_RELAY_ADDR=10.0.0.5:9443|<unset>|10.0.0.5:9443"; do
+  IFS='|' read -r relay_line sup_line want_relay want_sup <<<"$case_"
+  listener_env "${relay_line:+$relay_line
+}" "$sup_line"
+  before="$(sum_files)"
+  if mm_err=$(SH_ENV_DIR="$LST_DIR" ensure_exec_listener 2>&1); then
+    fail "ensure_exec_listener accepted relay '${relay_line:-<no exec addr>}' with supervisor '$sup_line'"
+  fi
+  echo "$mm_err" | grep -qF "MOCA_RELAY_EXEC_ADDR=$want_relay" ||
+    fail "the refusal must name the relay's MOCA_RELAY_EXEC_ADDR ($want_relay): $mm_err"
+  echo "$mm_err" | grep -qF "SH_RELAY_ADDR=$want_sup" ||
+    fail "the refusal must name the supervisor's SH_RELAY_ADDR ($want_sup): $mm_err"
+  [[ "$(sum_files)" == "$before" ]] || fail "a refused combination was still written to"
+done
+pass "ensure_exec_listener: a half-migrated or disagreeing pair refuses, naming both values"
+rm -rf "$LST_DIR"
+
 # --- relay_token strips one matched pair of surrounding quotes (systemd's EnvironmentFile=
 # semantics) ----------------------------------------------------------------------------------
 # An operator writing SH_RELAY_TOKEN="s3cr3t" in relay.env gets s3cr3t handed to the relay
@@ -315,18 +383,39 @@ grep -q -- '--network moca-sandbox' "$MOCK_LOG" ||
 grep -q -- '--add-host host.containers.internal:10.89.40.1' "$MOCK_LOG" ||
   fail "host.containers.internal must point at the moca-sandbox gateway: $(cat "$MOCK_LOG")"
 grep -q -- 'host-gateway' "$MOCK_LOG" &&
-  fail "host-gateway exposes every host port to sandboxes (MI1 R8): $(cat "$MOCK_LOG")"
+  fail "sandboxes must reach the host only through the moca-sandbox gateway, where the firewall" \
+    "admits the relay's attach port and DNS alone -- not through host-gateway (MI1 R8): $(cat "$MOCK_LOG")"
 pass "start_sandboxes: dedicated network, gateway-pinned host alias, no host-gateway"
 
 # --- MI1 R8: the sandbox network and the firewall that confines it --------------------------------
 : >"$MOCK_LOG"
 ensure_sandbox_network ||
   fail "ensure_sandbox_network must pass when the live network matches the configured subnet/gateway"
-grep -q -- 'podman network create --ignore --subnet 10.89.40.0/24 --gateway 10.89.40.1 moca-sandbox' "$MOCK_LOG" ||
-  fail "ensure_sandbox_network must create moca-sandbox idempotently with the fixed subnet: $(cat "$MOCK_LOG")"
-pass "ensure_sandbox_network creates the fixed-subnet network and passes when it already matches"
+grep -q -- 'podman network create --ignore --subnet 10.89.40.0/24 --gateway 10.89.40.1 --opt isolate=strict moca-sandbox' "$MOCK_LOG" ||
+  fail "ensure_sandbox_network must create moca-sandbox idempotently with the fixed subnet," \
+    "isolated from every other podman network: $(cat "$MOCK_LOG")"
+grep -q -- 'podman network inspect moca-sandbox --format {{index .Options "isolate"}}' "$MOCK_LOG" ||
+  fail "ensure_sandbox_network must read back the live isolate option: $(cat "$MOCK_LOG")"
+pass "ensure_sandbox_network creates the fixed-subnet, strictly isolated network and passes when it already matches"
 
-# --- ensure_sandbox_network fails closed on a subnet/gateway mismatch (Fix Round 1, #2) --------
+# --- ensure_sandbox_network fails closed on a network that is not strictly isolated (MI1 R8) -----
+# --ignore keeps a pre-existing moca-sandbox whatever its options, so a network created without
+# isolate=strict (or by a netavark that does not record it) would put sandboxes on a bridge that
+# reaches other podman networks -- Redis's among them. Unset and a weaker value both refuse.
+for isolate in "" "<no value>" "true"; do
+  export MOCK_PODMAN_ISOLATE="$isolate"
+  if isolate_err=$(ensure_sandbox_network 2>&1); then
+    fail "ensure_sandbox_network must fail when the live network's isolate option is '$isolate'"
+  fi
+  echo "$isolate_err" | grep -qF "strict" ||
+    fail "the isolation message must name the expected value (strict): $isolate_err"
+  echo "$isolate_err" | grep -qF "isolate=" ||
+    fail "the isolation message must name the option and its actual value: $isolate_err"
+done
+unset MOCK_PODMAN_ISOLATE
+pass "ensure_sandbox_network fails closed, naming expected and actual, on a network without isolate=strict"
+
+# --- ensure_sandbox_network fails closed on a subnet/gateway mismatch ---------------------------
 # podman network create --ignore keeps a pre-existing moca-sandbox network regardless of its
 # actual subnet/gateway, and the firewall's rules are written against
 # MOCA_SANDBOX_SUBNET/MOCA_SANDBOX_GATEWAY specifically -- a live network on different values
@@ -360,10 +449,12 @@ grep -q 'hook forward' "$NFT" && fail "S1 must not filter forwarded (internet) t
 grep -q 'nft -f' "$MOCK_LOG" || fail "install_sandbox_firewall must load the table now: $(cat "$MOCK_LOG")"
 grep -q 'systemctl enable moca-sandbox-firewall.service' "$MOCK_LOG" ||
   fail "the firewall unit must be enabled so the table survives a reboot: $(cat "$MOCK_LOG")"
-pass "moca-sandbox: fixed subnet; host reachable only on the attach port and DNS; persistent"
+grep -q 'systemctl restart moca-sandbox-firewall.service' "$MOCK_LOG" ||
+  fail "the firewall unit must be restarted so a re-run's rendered unit and table take effect: $(cat "$MOCK_LOG")"
+pass "moca-sandbox: fixed subnet; host reachable only on the attach port and DNS; persistent; restarted"
 
 # --- install_sandbox_firewall follows sandbox_relay_addr()'s port, not relay_port()'s
-# unconditionally (Fix Round 1, #4) ------------------------------------------------------------
+# unconditionally --------------------------------------------------------------------------------
 # SH_SANDBOX_RELAY_ADDR can point sandboxes at a different port than relay_port() returns; the
 # firewall must open the port sandboxes actually dial.
 : >"$MOCK_LOG"
@@ -580,16 +671,25 @@ fi
 # sh-supervisor.service` is refused with "start request repeated too quickly" until
 # `systemctl reset-failed`. Enabling without --now sidesteps the crash loop entirely: the unit
 # is wired into multi-user.target for the next boot, but this run does not start it.
+#
+# A re-run must apply what it just wrote: `enable --now` does nothing to a unit that is already
+# running, so env and unit changes would wait for the next reboot. The relay is restarted; the
+# supervisor is try-restarted -- restarted if it is running, left stopped if it is not.
 : >"$MOCK_LOG"
 start_services
-grep -qE '^systemctl enable --now sh-relay\.service$' "$MOCK_LOG" ||
-  fail "start_services must enable --now the relay unit: $(cat "$MOCK_LOG")"
+grep -qE '^systemctl enable sh-relay\.service$' "$MOCK_LOG" ||
+  fail "start_services must enable the relay unit: $(cat "$MOCK_LOG")"
+grep -qE '^systemctl restart sh-relay\.service$' "$MOCK_LOG" ||
+  fail "start_services must restart the relay so a re-run's env takes effect: $(cat "$MOCK_LOG")"
 grep -qE '^systemctl enable sh-supervisor\.service$' "$MOCK_LOG" ||
   fail "start_services must enable (without --now) the supervisor unit: $(cat "$MOCK_LOG")"
-grep -qE '^systemctl enable --now sh-supervisor\.service$' "$MOCK_LOG" &&
-  fail "start_services must NOT --now the supervisor unit (guaranteed crash loop while" \
+grep -qE '^systemctl try-restart sh-supervisor\.service$' "$MOCK_LOG" ||
+  fail "start_services must try-restart the supervisor, so a running one picks up a re-run's" \
+    "env: $(cat "$MOCK_LOG")"
+grep -qE '^systemctl (enable --now|start|restart) sh-supervisor\.service$' "$MOCK_LOG" &&
+  fail "start_services must NOT start a stopped supervisor (guaranteed crash loop while" \
     "SH_TURNS_PER_WORKER is unset): $(cat "$MOCK_LOG")"
-pass "supervisor enabled without --now, relay enabled --now"
+pass "relay restarted; supervisor enabled and try-restarted, never started"
 
 # --- main(), end to end, against mocks (last: exercises the real call order) ---------------
 # require_cmds also needs `install` and `node`, which are on the real PATH (appended after the
@@ -624,7 +724,7 @@ grep -q 'getent passwd harness' "$MOCK_LOG" || fail "main() did not check for th
 
 reload_line=$(grep -n 'systemctl daemon-reload' "$MOCK_LOG" | head -1 | cut -d: -f1)
 redis_line=$(grep -n 'podman run .*sh-redis' "$MOCK_LOG" | head -1 | cut -d: -f1)
-relay_enable_line=$(grep -n 'systemctl enable --now sh-relay.service' "$MOCK_LOG" | head -1 | cut -d: -f1)
+relay_enable_line=$(grep -n 'systemctl restart sh-relay.service' "$MOCK_LOG" | head -1 | cut -d: -f1)
 [[ -n "$reload_line" && -n "$redis_line" && -n "$relay_enable_line" ]] ||
   fail "main() did not perform the expected steps: $(cat "$MOCK_LOG")"
 ((reload_line < redis_line)) ||
@@ -636,6 +736,8 @@ grep -q -- 'podman-env SANDBOX_TOKEN=e2e-token' "$MOCK_ENV_LOG" ||
     "(B5 / require_relay_token wiring): $(cat "$MOCK_ENV_LOG")"
 grep -q -- 'SANDBOX_TOKEN=e2e-token' "$MOCK_LOG" &&
   fail "the relay token leaked into podman's argv on the end-to-end path: $(cat "$MOCK_LOG")"
+declare -f main | grep -q 'ensure_exec_listener' ||
+  fail "main() must run ensure_exec_listener, or a re-run on a pre-MI1 VM keeps the single listener"
 pass "main() end to end: harness-account check, both units, both env files, correct ordering"
 
 # The closing message must match the behaviour we actually land on: the supervisor is enabled

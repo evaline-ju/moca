@@ -7,7 +7,9 @@ containers as podman containers alongside them. `setup-vm.sh` is the sibling of
 
 ## Prerequisites
 
-- A Linux VM with systemd and [podman](https://podman.io/) installed
+- A Linux VM with systemd and [podman](https://podman.io/) installed, with a netavark network
+  backend recent enough to support `isolate=strict` (`setup-vm.sh` refuses otherwise)
+- `nft` (nftables), which loads the sandbox network's firewall
 - Node.js 22+ and pnpm 9+ on the VM (the supervisor and relay run directly via
   `node --import tsx`, not containerized)
 - A user able to install systemd units under `/etc/systemd/system` and run as root (see
@@ -58,17 +60,34 @@ Across those two runs, the script does the following, in this order:
 2. **Checks `relay.env` for a non-empty `SH_RELAY_TOKEN`, and stops here if there is none.**
    Everything below runs only once that is set — which is why a fresh VM needs the second
    invocation above.
-3. Installs `systemd/sh-supervisor.service` and `systemd/sh-relay.service` into
+3. Generates `MOCA_RELAY_EXEC_TOKEN` — the supervisor's credential for the relay's `SandboxExec` —
+   into both env files when absent, one value, never replacing an existing one; and checks that
+   the relay's exec listener (`MOCA_RELAY_EXEC_ADDR` in `relay.env`) and the supervisor's dial
+   address (`SH_RELAY_ADDR` in `supervisor.env`) agree. On a VM set up before MI1 — `relay.env`
+   with no `MOCA_RELAY_EXEC_ADDR`, `supervisor.env` dialing `127.0.0.1:9443` — both files are
+   migrated together to the loopback exec listener `127.0.0.1:9444`. Any other disagreement (one
+   file migrated and not the other, or two different ports) stops the script with a message naming
+   both values.
+4. Installs `systemd/sh-supervisor.service` and `systemd/sh-relay.service` into
    `/etc/systemd/system`, reloads the daemon, and enables `podman-restart.service` so the
    containers below come back after a reboot (see "Reboots" below).
-4. Creates a dedicated `moca-sandbox` podman network (fixed subnet `10.89.40.0/24`, gateway
-   `10.89.40.1`) and installs an nftables table that confines it — see "Sandbox container
-   networking and the relay token" below.
-5. Starts a Redis container and `SH_SANDBOX_COUNT` (default 2) sandbox containers via podman,
+5. Creates a dedicated `moca-sandbox` podman network (fixed subnet `10.89.40.0/24`, gateway
+   `10.89.40.1`, `isolate=strict` so it exchanges no traffic with any other podman network) and
+   installs an nftables table that confines it — see "Sandbox container networking and the relay
+   token" below.
+6. Starts a Redis container and `SH_SANDBOX_COUNT` (default 2) sandbox containers via podman,
    each on that network, wired to reach the relay and to authenticate to it (see "Sandbox
    container networking and the relay token" below).
-6. Enables **and starts** `sh-relay.service`, but only **enables** `sh-supervisor.service` — it
+7. Enables **and restarts** `sh-relay.service`, but only **enables** `sh-supervisor.service` — it
    is deliberately not started yet (see below).
+
+**A re-run restarts what it owns.** `systemctl enable --now` leaves an already-running unit alone,
+so env and unit changes from a re-run would otherwise wait for the next reboot. `setup-vm.sh`
+therefore restarts `sh-relay.service` and `moca-sandbox-firewall.service` on every run, and
+`try-restart`s `sh-supervisor.service` — restarted if it is running, left stopped if it is not, so
+a supervisor whose `SH_TURNS_PER_WORKER` is not set yet is never started by the script. A re-run
+also recreates Redis and the sandbox containers (`podman run --replace`), so Redis state is lost
+(see "Reboots" below).
 
 `SH_TURNS_PER_WORKER` ships empty on purpose (see below), and `readConfig` throws on blank, so
 the supervisor unit is _expected_ to fail if it starts before the operator sets it. With
@@ -158,9 +177,17 @@ through that gateway. `setup-vm.sh` also renders an nftables table
 `nft -f`. `deploy/vm/systemd/moca-sandbox-firewall.service`, a oneshot unit ordered `Before=`
 `sh-relay.service` and `podman-restart.service`, re-loads that same table on every boot, so the
 restriction survives a reboot and is in place before the relay — and so before any sandbox
-container — starts. The table only filters the `input` hook (traffic addressed to the host
-itself); forwarded traffic (outbound internet access from a sandbox) is untouched in this
-round — that is MI1 S5's `moca-egress` work, not this one.
+container — starts. The unit is also `RequiredBy=` both, so the deployment fails closed: if the
+table does not load at boot, the relay does not start and neither does `podman-restart.service`,
+which keeps Redis and every `--restart=always` container down until the firewall loads. The table
+only filters the `input` hook (traffic addressed to the host itself); forwarded traffic (outbound
+internet access from a sandbox) is untouched in this round — that is MI1 S5's `moca-egress` work,
+not this one. Its rules are IPv4-only (`ip saddr`), which matches the network: `moca-sandbox` is
+created with an IPv4 subnet only.
+
+`SandboxExec` is not served on the `moca-sandbox` network at all: the relay binds it on loopback
+(`MOCA_RELAY_EXEC_ADDR=127.0.0.1:9444`), and the exec token (`MOCA_RELAY_EXEC_TOKEN`, held only by
+the relay and the supervisor) is the control.
 
 **This is the item in this deployment layer least verified on real hardware.** Nobody has run
 this script against an actual podman installation; `host.containers.internal` pinned to the
@@ -169,7 +196,9 @@ mechanism, but rootful vs. rootless podman, firewall rules, and SELinux/AppArmor
 still block the container from reaching the host's bound port in ways a unit test cannot see.
 The nftables rule above and the gateway alias fall in the same gap: the shell tests mock
 `podman` and `nft`, so nothing here has confirmed against a real kernel that the attach port is
-actually reachable and everything else is actually dropped. If a sandbox container cannot
+actually reachable and everything else is actually dropped. `isolate=strict` is in it too: it needs
+a netavark that supports it, and `setup-vm.sh` refuses to continue when the created network does
+not report `isolate=strict`, but no real run has yet confirmed the isolation it provides. If a sandbox container cannot
 attach on a real VM, `SH_SANDBOX_RELAY_ADDR` (or, if podman itself cannot resolve
 `host.containers.internal`, the VM's actual gateway or bridge IP) is the override to reach for
 first; `sudo nft list table inet moca_sandbox` shows the loaded rules.

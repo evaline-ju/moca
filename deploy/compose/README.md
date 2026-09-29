@@ -27,6 +27,9 @@ curl -fsSL https://raw.githubusercontent.com/rossoctl/serverless-harness/main/de
    holds:
    - `SH_RELAY_TOKEN`: yours if you set it, otherwise 32 random bytes from `/dev/urandom`. It
      reaches the relay and the sandbox through `.env` only, never a command line.
+   - `MOCA_RELAY_EXEC_TOKEN`: 32 random bytes from `/dev/urandom`, the supervisor's credential for
+     the relay's `SandboxExec`. It reaches the relay and the supervisor through `.env` only, never
+     the sandbox. A re-run adds it to an existing `.env` that lacks it, and never replaces it.
    - `SH_TURNS_PER_WORKER=4`: a trial value (see "Configuration" below).
    - whichever model variables were set in your shell (`ANTHROPIC_*`, `OPENAI_*`, `SH_MODEL*`).
 3. runs `docker compose up -d` in that directory.
@@ -72,9 +75,12 @@ docker compose exec supervisor wget -qO- http://127.0.0.1:8081/metrics
 **Two networks keep the sandbox off everything it must not reach (MI1 R8).** `redis` and
 `supervisor` join `moca-brain` only; `sandbox` joins `moca-sandbox` only; `sandbox-relay` bridges
 both, and binds its `SandboxExec` listener (`MOCA_RELAY_EXEC_ADDR`) to its `moca-brain` address
-alone -- a sandbox that reaches the relay's attach port on `moca-sandbox` still cannot reach
-`SandboxExec`. `tests/compose.test.sh` asserts each service's network membership and that the exec
-listener binds only the brain side. `moca-brain` uses a fixed subnet (`MOCA_BRAIN_SUBNET`, default
+alone: `SandboxExec` is not served on the `moca-sandbox` network, and the exec token is the
+control. `tests/compose.test.sh` asserts each service's network membership and that the exec
+listener binds only the brain side. The separation between the two networks is the Docker
+engine's, which isolates its bridge networks from each other. Under podman-compose the two networks
+are **not** isolated from each other, so this separation does not hold there; the exec token still
+guards `SandboxExec`. `moca-brain` uses a fixed subnet (`MOCA_BRAIN_SUBNET`, default
 `172.31.250.0/24`); override it in `.env` if that range collides with another network already on
 your machine.
 
@@ -88,6 +94,7 @@ Only the addressing changes: `REDIS_URL=redis://redis:6379` and
 | Variable                               | Default                                                       | Notes                                                                                                                                                                                                                                                                   |
 | -------------------------------------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `SH_RELAY_TOKEN`                       | **required**                                                  | The relay's validation is fail-closed, so `docker compose` refuses to start without it.                                                                                                                                                                                 |
+| `MOCA_RELAY_EXEC_TOKEN`                | **required**                                                  | The supervisor's credential for the relay's `SandboxExec`, distinct from `SH_RELAY_TOKEN`. `install.sh` generates it; the relay refuses to boot without it, and `docker compose` refuses to start without it. Never give it to the sandbox.                             |
 | `SH_TURNS_PER_WORKER`                  | **required**                                                  | `install.sh` writes `4`. The VM template ships none on purpose, because for E8 this value is a _measured output_. Treat `4` as a trial setting, not a result.                                                                                                           |
 | `SH_WORKERS`                           | CPUs this container may use                                   | `os.availableParallelism()`, which respects a CPU limit since #341. Set it to pin W.                                                                                                                                                                                    |
 | `SH_RELAY_PORT`                        | `9443`                                                        | Moves the relay's ATTACH bind port and the sandbox's dial address (`RELAY_ADDR`) together. A different wire from `MOCA_RELAY_EXEC_PORT` below.                                                                                                                          |
@@ -100,6 +107,14 @@ Only the addressing changes: `REDIS_URL=redis://redis:6379` and
 
 After editing `.env`, run `docker compose up -d` again to apply it.
 
+## Upgrading
+
+Re-run `install.sh` (the same `curl … | sh` line). It fetches the current `docker-compose.yml`,
+keeps your `.env`, adds any credential the current relay requires (`MOCA_RELAY_EXEC_TOKEN`) and
+then runs `docker compose up -d`. A bare `docker compose pull && docker compose up -d` in an existing
+directory runs the new images under the old compose file, which does not hand the relay
+`MOCA_RELAY_EXEC_TOKEN`, and the relay refuses to boot without it.
+
 ## From a checkout
 
 To run images built from your working tree instead of the published ones (needs
@@ -107,7 +122,7 @@ To run images built from your working tree instead of the published ones (needs
 
 ```bash
 cd deploy/compose
-cp /path/to/your/.env .   # or write one: SH_RELAY_TOKEN=... and SH_TURNS_PER_WORKER=...
+cp /path/to/your/.env .   # or write one: SH_RELAY_TOKEN, MOCA_RELAY_EXEC_TOKEN, SH_TURNS_PER_WORKER
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
@@ -135,6 +150,8 @@ The first three run in CI through `make test-deploy`.
   removing the container) loses sessions, the ownership index and the lease store.
 - **No hardening parity.** None of the systemd `[Service]` sandboxing in `deploy/vm/systemd/`
   applies here. Containers run as uid 1000 with Docker's defaults, and there's no egress control.
+- **No network separation under podman-compose.** `moca-brain` and `moca-sandbox` are isolated
+  from each other on the Docker engine only (see "What runs" above).
 - **One sandbox.** To add another, copy the `sandbox` service with a new `SANDBOX_ID`. Replicas
   would all share one id and collide on a single `sh:sandbox:records` entry.
 - **No Firecracker/KVM tier.** P4 stays bare-metal/systemd-only.

@@ -280,15 +280,75 @@ ensure_exec_token() {
   fi
 }
 
+# env_file_value <key> <file> prints the last <key>= value in <file>, with one matched pair of
+# surrounding quotes stripped the way systemd's EnvironmentFile= strips them (see relay_token).
+env_file_value() {
+  local v
+  v="$( (grep -oE "^$1=.*" "$2" 2>/dev/null || true) | tail -1 | cut -d= -f2-)"
+  if ((${#v} >= 2)); then
+    case "$v" in
+    \"*\") v="${v#\"}"; v="${v%\"}" ;;
+    \'*\') v="${v#\'}"; v="${v%\'}" ;;
+    esac
+  fi
+  printf '%s' "$v"
+}
+
+# The relay serves SandboxExec on its own loopback listener (MOCA_RELAY_EXEC_ADDR) and the
+# supervisor dials it (SH_RELAY_ADDR) -- MI1 §5 R5. install_env never rewrites an existing env file,
+# so on a VM set up before MI1 relay.env has no MOCA_RELAY_EXEC_ADDR (one listener for everything)
+# and supervisor.env dials PRE_MI1_RELAY_ADDR. That exact pair is migrated here, both files together,
+# to the templates' split listener. A pair that already agrees (the two ports equal) is left alone.
+# Anything else -- one file migrated and not the other, or ports that disagree -- is refused, naming
+# both values: guessing would leave the supervisor dialing a port nothing serves SandboxExec on.
+PRE_MI1_RELAY_ADDR="127.0.0.1:9443"
+ensure_exec_listener() {
+  local relay="$SH_ENV_DIR/relay.env" sup="$SH_ENV_DIR/supervisor.env"
+  local exec_addr dial_addr new_addr tmp
+  exec_addr="$(env_file_value MOCA_RELAY_EXEC_ADDR "$relay")"
+  dial_addr="$(env_file_value SH_RELAY_ADDR "$sup")"
+  if [[ -n "$exec_addr" && -n "$dial_addr" && "${exec_addr##*:}" == "${dial_addr##*:}" ]]; then
+    return 0
+  fi
+  if [[ -z "$exec_addr" && "$dial_addr" == "$PRE_MI1_RELAY_ADDR" ]]; then
+    new_addr="$(env_file_value MOCA_RELAY_EXEC_ADDR "$SCRIPT_DIR/env/relay.env.example")"
+    [[ -n "$new_addr" ]] || { echo "relay.env.example has no MOCA_RELAY_EXEC_ADDR" >&2; return 1; }
+    if [[ "${new_addr##*:}" == "$(relay_port "$relay")" ]]; then
+      echo "cannot migrate to the split exec listener: relay.env's SH_RELAY_PORT is" \
+        "$(relay_port "$relay"), the port MOCA_RELAY_EXEC_ADDR=$new_addr would take. Set" \
+        "MOCA_RELAY_EXEC_ADDR in $relay and SH_RELAY_ADDR in $sup to one free loopback port," \
+        "then re-run." >&2
+      return 1
+    fi
+    log "migrating to the split exec listener: MOCA_RELAY_EXEC_ADDR=$new_addr in $relay," \
+      "SH_RELAY_ADDR=$new_addr in $sup"
+    printf 'MOCA_RELAY_EXEC_ADDR=%s\n' "$new_addr" >>"$relay"
+    tmp="$(mktemp)"
+    sed -E "s|^SH_RELAY_ADDR=.*\$|SH_RELAY_ADDR=$new_addr|" "$sup" >"$tmp"
+    cat "$tmp" >"$sup" # in place, so the file keeps its owner and mode
+    rm -f "$tmp"
+    return 0
+  fi
+  echo "relay.env and supervisor.env disagree on the relay's exec listener:" \
+    "MOCA_RELAY_EXEC_ADDR=${exec_addr:-<unset>} ($relay), SH_RELAY_ADDR=${dial_addr:-<unset>} ($sup)." \
+    "The supervisor must dial the port the relay serves SandboxExec on. Set both to the same" \
+    "loopback address (the templates use $(env_file_value MOCA_RELAY_EXEC_ADDR "$SCRIPT_DIR/env/relay.env.example")), then re-run." >&2
+  return 1
+}
+
 # Sandboxes run on their OWN podman network (MI1 §5 R8), with a fixed subnet so the firewall below
-# can name it. --ignore: a re-run finds it already there. If an operator pre-created moca-sandbox
-# with another subnet, set MOCA_SANDBOX_SUBNET/MOCA_SANDBOX_GATEWAY to match it. --ignore accepts a
-# pre-existing network unconditionally, though, so this also reads back the live subnet/gateway and
-# fails closed on a mismatch, rather than letting the firewall below install rules for values the
-# network does not actually have.
+# can name it, and with isolate=strict so it exchanges no traffic with any other podman network --
+# sh-redis runs on podman's default one. --ignore: a re-run finds it already there. If an operator
+# pre-created moca-sandbox with another subnet, set MOCA_SANDBOX_SUBNET/MOCA_SANDBOX_GATEWAY to match
+# it. --ignore accepts a pre-existing network unconditionally, though, so this also reads back the
+# live subnet/gateway and isolate option and fails closed on a mismatch, rather than letting the
+# firewall below install rules for a network that does not have the expected values. isolate=strict
+# needs a netavark that supports it; where it does not, the create or the read-back fails and setup
+# stops here.
 ensure_sandbox_network() {
-  podman network create --ignore --subnet "$MOCA_SANDBOX_SUBNET" --gateway "$MOCA_SANDBOX_GATEWAY" moca-sandbox
-  local expected="$MOCA_SANDBOX_SUBNET $MOCA_SANDBOX_GATEWAY" actual
+  podman network create --ignore --subnet "$MOCA_SANDBOX_SUBNET" --gateway "$MOCA_SANDBOX_GATEWAY" \
+    --opt isolate=strict moca-sandbox
+  local expected="$MOCA_SANDBOX_SUBNET $MOCA_SANDBOX_GATEWAY" actual isolate
   actual="$(podman network inspect moca-sandbox --format '{{range .Subnets}}{{.Subnet}} {{.Gateway}}{{end}}')"
   if [[ "$actual" != "$expected" ]]; then
     echo "moca-sandbox network exists with subnet/gateway '$actual', but" \
@@ -296,6 +356,15 @@ ensure_sandbox_network() {
       "install_sandbox_firewall writes its rules against the expected values, so recreate the" \
       "network to match, or set MOCA_SANDBOX_SUBNET/MOCA_SANDBOX_GATEWAY to the network's actual" \
       "values, then re-run." >&2
+    return 1
+  fi
+  isolate="$(podman network inspect moca-sandbox --format '{{index .Options "isolate"}}')"
+  if [[ "$isolate" != "strict" ]]; then
+    [[ -n "$isolate" && "$isolate" != "<no value>" ]] || isolate="<unset>"
+    echo "moca-sandbox network has isolate=$isolate, but setup expects isolate=strict: sandboxes" \
+      "must exchange no traffic with any other podman network. Stop the sh-sandbox-* containers," \
+      "remove the network (podman network rm moca-sandbox), then re-run -- with a netavark that" \
+      "supports isolate=strict." >&2
     return 1
   fi
 }
@@ -331,6 +400,8 @@ NFT
   rm -f "$tmp_unit"
   systemctl daemon-reload
   systemctl enable moca-sandbox-firewall.service
+  # A re-run must apply the unit it just rendered, not leave the previous one active until reboot.
+  systemctl restart moca-sandbox-firewall.service
 }
 
 # Reaching the host's relay port from inside a container is the one piece of this deployment
@@ -370,16 +441,22 @@ start_sandboxes() {
 }
 
 start_services() {
-  log "enabling relay (started now) and supervisor (enabled, not started)"
-  systemctl enable --now sh-relay.service
+  log "enabling and restarting the relay; enabling the supervisor (restarted only if running)"
+  # `enable --now` leaves an already-running unit alone, so a re-run's env and unit changes would
+  # wait for the next reboot. restart applies them now (and starts the relay on a fresh install).
+  systemctl enable sh-relay.service
+  systemctl restart sh-relay.service
   # SH_TURNS_PER_WORKER ships empty on purpose (§3.8) and readConfig throws on blank, so this
   # unit is EXPECTED to fail until the operator sets it. Restart=always/RestartSec=2 with no
   # StartLimitIntervalSec=0 means systemd's default 5-starts-in-10s limit trips in about ten
   # seconds if this were `enable --now`, after which even the documented recovery command
   # (`systemctl start sh-supervisor.service`) is refused with "start request repeated too
   # quickly" until `systemctl reset-failed`. Enable without --now instead: the unit is wired
-  # into multi-user.target for the next boot, but nothing tries to start it yet.
+  # into multi-user.target for the next boot, but nothing tries to start it yet. try-restart then
+  # restarts it only if it is already running -- a re-run's env reaches a configured supervisor,
+  # and an unconfigured one stays stopped.
   systemctl enable sh-supervisor.service
+  systemctl try-restart sh-supervisor.service
 }
 
 main() {
@@ -390,6 +467,7 @@ main() {
   install_env
   require_relay_token
   ensure_exec_token
+  ensure_exec_listener
   install_units
   # Before the containers, so a `podman run` that lands between the two is already covered.
   enable_container_restart
