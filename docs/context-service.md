@@ -42,11 +42,15 @@ may `DELETE` it. That releases the Context Service pool and frees the name for a
 
 **PVC access is not authorized.** Serverless Harness forwards a caller-provided
 `workspace.claimName` to Context Service, and neither component checks that the caller may use that
-claim. Owning a workload says nothing about owning the volume it names. So under
-`MOCA_TENANCY=multi` a `claimName` is refused (`400 claim_name_not_allowed`), and a workload can use
-only the volume Context Service provisions for it. Under `single` tenancy, the one user owns every
-claim, and `claimName` is passed through. Scoping claims per subject is deferred (MI1 spec §4.3,
-§13).
+claim. Owning a workload says nothing about owning the volume it names. So a `claimName` is refused
+(`400 claim_name_not_allowed`) from any authenticated caller, which under `SH_REQUIRE_AUTH=true` is
+every caller, and always under `MOCA_TENANCY=multi`; such a workload can use only the volume Context
+Service provisions for it. Only the anonymous caller of a deployment with authentication off, which
+tells no callers apart, may still name a claim. Scoping claims per subject is deferred (MI1 spec
+§4.3, §13).
+
+**Do not expose `/workloads` to mutually untrusted clients unless `SH_REQUIRE_AUTH=true`.** With it
+off, every caller without a token is the same principal, and may use any PVC in the namespace.
 
 Kubernetes RBAC on the service account limits what Context Service can provision, but it does not
 authorize one API caller relative to another.

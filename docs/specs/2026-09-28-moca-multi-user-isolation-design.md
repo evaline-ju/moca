@@ -225,8 +225,9 @@ enforces it lands. What S1 already enforces is pinned by the tests in §5's "Pin
 `workspace.claimName` to Context Service, and neither the harness nor Context Service checks that the
 caller may use that PVC. S1 binds a workload to the subject that created it (R7), but owning the
 workload says nothing about owning the volume it names. On the Kubernetes path a user could otherwise
-create a workload over another user's claim and run on it. So under `MOCA_TENANCY=multi` a
-`claimName` is refused (`400 claim_name_not_allowed`), and a workload gets only the volume Context
+create a workload over another user's claim and run on it. So a `claimName` is refused
+(`400 claim_name_not_allowed`) from any authenticated caller, which under `SH_REQUIRE_AUTH=true` is
+every caller, and always under `MOCA_TENANCY=multi`. Such a workload gets only the volume Context
 Service provisions for it. Scoping claims per subject is deferred (§13). Workload names also remain
 one namespace across subjects, first come, first served.
 
@@ -825,7 +826,7 @@ prediction sealed before E8's next rung, since it sits on the hot path.
   (`packages/session-backend/src/redis-backend.ts`) returns every tenant's sessions. No route
   exposes it to a caller today, but no caller-facing use may be added before S2 scopes it.
 - **Per-subject PVC authorization and subject-scoped workload names** for `/workloads`. Under `multi`
-  a caller-named `workspace.claimName` is refused instead (§4.3). `docs/context-service.md` states the
+  and from any authenticated caller, a caller-named `workspace.claimName` is refused instead (§4.3). `docs/context-service.md` states the
   boundary.
 - **Any `pi-fork` change.**
 

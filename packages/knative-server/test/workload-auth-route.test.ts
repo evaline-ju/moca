@@ -269,7 +269,21 @@ describe('a caller-named workspace claim', () => {
     expect(createWorkload).not.toHaveBeenCalled();
   });
 
-  it('is passed through under single tenancy, where the one user owns every claim', async () => {
+  it('is refused from any authenticated caller, even under single tenancy', async () => {
+    // SH_REQUIRE_AUTH=true with MOCA_TENANCY unset is demo-multiuser.sh's configuration: several
+    // subjects, one tenancy mode. ALICE owning the workload would not make BOB's PVC hers.
+    for (const requireAuth of ['true', undefined]) {
+      if (requireAuth) process.env.SH_REQUIRE_AUTH = requireAuth;
+      else delete process.env.SH_REQUIRE_AUTH;
+      expect(await call('POST', '/workloads', ALICE, withClaim)).toEqual({
+        status: 400,
+        json: { error: 'claim_name_not_allowed' },
+      });
+    }
+    expect(createWorkload).not.toHaveBeenCalled();
+  });
+
+  it('is passed through only for the anonymous caller of an unauthenticated deployment', async () => {
     expect((await call('POST', '/workloads', undefined, withClaim)).status).toBe(201);
     expect(createWorkload).toHaveBeenCalledWith(
       'demo-workload',

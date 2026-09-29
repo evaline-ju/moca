@@ -524,9 +524,15 @@ async function handleCreateWorkload(req: IncomingMessage, res: ServerResponse): 
     return;
   }
   // A caller-named claim is any PVC in the namespace: owning the workload says nothing about owning
-  // the volume, and nothing here or in Context Service authorizes one against the other. Refused
-  // under multi tenancy until claims are scoped to their subject (MI1 §4.3, §13).
-  if (spec.workspace?.claimName !== undefined && readTenancy(process.env) === 'multi') {
+  // the volume, and nothing here or in Context Service authorizes one against the other. So it is
+  // refused wherever callers are told apart -- any authenticated caller (which is every caller under
+  // SH_REQUIRE_AUTH=true), and always under multi tenancy -- until claims are scoped to their
+  // subject (MI1 §4.3, §13). Only the anonymous caller of an unauthenticated deployment, which
+  // distinguishes no one, may still name one.
+  if (
+    spec.workspace?.claimName !== undefined &&
+    (subject !== null || readTenancy(process.env) === 'multi')
+  ) {
     res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'claim_name_not_allowed' }));
     return;
   }
