@@ -229,6 +229,22 @@ describe('/workloads under SH_REQUIRE_AUTH=true: records the harness did not wri
     log.mockRestore();
   });
 
+  it('refuses a GET reply that names a different workload, and stores nothing under it', async () => {
+    // GET writes back what Context Service returns. A reply naming `other` must not become a
+    // record at sh:workload:other owned by the caller, nor overwrite the one that was asked for.
+    await call('POST', '/workloads', ALICE, { name: 'demo-workload' });
+    const before = records.get('sh:workload:demo-workload');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    getWorkload.mockResolvedValue({ ...record, workloadId: 'other' });
+    expect(await call('GET', '/workloads/demo-workload', ALICE)).toEqual({
+      status: 502,
+      json: { error: 'context_service_error' },
+    });
+    expect(records.has('sh:workload:other')).toBe(false);
+    expect(records.get('sh:workload:demo-workload')).toBe(before);
+    log.mockRestore();
+  });
+
   describe('a workload stored before workloads had owners', () => {
     beforeEach(() => {
       records.set('sh:workload:demo-workload', JSON.stringify(record)); // no `owner`
