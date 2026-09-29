@@ -173,8 +173,8 @@ code's own default, if that line is missing). Override the whole address with
 changes what address a sandbox dials — by itself it does not stop a sandbox from reaching
 anything else the host listens on, since podman still routes the whole subnet to the host
 through that gateway. `setup-vm.sh` also renders an nftables table
-(`$SH_ENV_DIR/moca-sandbox.nft`, table `inet moca_sandbox`) that drops all traffic from the
-`moca-sandbox` subnet to the host **except** the relay's attach port (`SH_RELAY_PORT`) and DNS
+(`$SH_ENV_DIR/moca-sandbox.nft`, table `inet moca_sandbox`) that drops all traffic arriving from
+the `moca-sandbox` network to the host **except** the relay's attach port (`SH_RELAY_PORT`) and DNS
 (port 53, answered by podman's own resolver on the gateway), and loads it immediately with
 `nft -f`. `deploy/vm/systemd/moca-sandbox-firewall.service`, a oneshot unit ordered `Before=`
 `sh-relay.service` and `podman-restart.service`, re-loads that same table on every boot, so the
@@ -184,8 +184,11 @@ table does not load at boot, the relay does not start and neither does `podman-r
 which keeps Redis and every `--restart=always` container down until the firewall loads. The table
 only filters the `input` hook (traffic addressed to the host itself); forwarded traffic (outbound
 internet access from a sandbox) is untouched in this round — that is MI1 S5's `moca-egress` work,
-not this one. Its rules are IPv4-only (`ip saddr`), which matches the network: `moca-sandbox` is
-created with an IPv4 subnet only.
+not this one. The rules match the bridge a packet arrives on — `MOCA_SANDBOX_BRIDGE`, default
+`moca-sandbox0`, pinned when the network is created and checked on every run — not only its source
+address: netavark leaves IPv6 enabled on the bridge and in every container, so link-local IPv6
+reaches the host even though `moca-sandbox` has only an IPv4 subnet. The two accepts are IPv4 from
+the sandbox subnet; everything else arriving on the bridge, IPv6 included, is dropped.
 
 `SandboxExec` is not served on the `moca-sandbox` network at all: the relay binds it on loopback
 (`MOCA_RELAY_EXEC_ADDR=127.0.0.1:9444`), and the exec token (`MOCA_RELAY_EXEC_TOKEN`, held only by

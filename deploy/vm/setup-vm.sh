@@ -27,6 +27,9 @@
 #                          network, so the firewall below can name this subnet precisely.
 #   MOCA_SANDBOX_GATEWAY   Gateway address on that subnet (default 10.89.40.1); also what
 #                          host.containers.internal resolves to inside a sandbox container.
+#   MOCA_SANDBOX_BRIDGE    Name of that network's bridge interface (default moca-sandbox0, at most
+#                          15 characters). The firewall matches sandbox traffic by the bridge it
+#                          arrives on, so it covers every address family, IPv6 link-local included.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,6 +40,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${SANDBOX_IMAGE:=ghcr.io/rossoctl/serverless-harness-sandbox:latest}"
 MOCA_SANDBOX_SUBNET="${MOCA_SANDBOX_SUBNET:-10.89.40.0/24}"
 MOCA_SANDBOX_GATEWAY="${MOCA_SANDBOX_GATEWAY:-10.89.40.1}"
+MOCA_SANDBOX_BRIDGE="${MOCA_SANDBOX_BRIDGE:-moca-sandbox0}"
 
 log() { printf '==> %s\n' "$*"; }
 
@@ -341,14 +345,14 @@ ensure_exec_listener() {
 # sh-redis runs on podman's default one. --ignore: a re-run finds it already there. If an operator
 # pre-created moca-sandbox with another subnet, set MOCA_SANDBOX_SUBNET/MOCA_SANDBOX_GATEWAY to match
 # it. --ignore accepts a pre-existing network unconditionally, though, so this also reads back the
-# live subnet/gateway and isolate option and fails closed on a mismatch, rather than letting the
-# firewall below install rules for a network that does not have the expected values. isolate=strict
-# needs a netavark that supports it; where it does not, the create or the read-back fails and setup
-# stops here.
+# live subnet/gateway, isolate option and bridge name and fails closed on a mismatch, rather than
+# letting the firewall below install rules for a network that does not have the expected values.
+# isolate=strict needs a netavark that supports it; where it does not, the create or the read-back
+# fails and setup stops here.
 ensure_sandbox_network() {
   podman network create --ignore --subnet "$MOCA_SANDBOX_SUBNET" --gateway "$MOCA_SANDBOX_GATEWAY" \
-    --opt isolate=strict moca-sandbox
-  local expected="$MOCA_SANDBOX_SUBNET $MOCA_SANDBOX_GATEWAY" actual isolate
+    --opt isolate=strict --interface-name "$MOCA_SANDBOX_BRIDGE" moca-sandbox
+  local expected="$MOCA_SANDBOX_SUBNET $MOCA_SANDBOX_GATEWAY" actual isolate bridge
   actual="$(podman network inspect moca-sandbox --format '{{range .Subnets}}{{.Subnet}} {{.Gateway}}{{end}}')"
   if [[ "$actual" != "$expected" ]]; then
     echo "moca-sandbox network exists with subnet/gateway '$actual', but" \
@@ -367,11 +371,23 @@ ensure_sandbox_network() {
       "supports isolate=strict." >&2
     return 1
   fi
+  bridge="$(podman network inspect moca-sandbox --format '{{.NetworkInterface}}')"
+  if [[ "$bridge" != "$MOCA_SANDBOX_BRIDGE" ]]; then
+    echo "moca-sandbox network's bridge interface is '$bridge', but setup expects" \
+      "'$MOCA_SANDBOX_BRIDGE': the firewall matches sandbox traffic by that bridge. Stop the" \
+      "sh-sandbox-* containers, remove the network (podman network rm moca-sandbox), then re-run," \
+      "or set MOCA_SANDBOX_BRIDGE to the network's actual bridge." >&2
+    return 1
+  fi
 }
 
-# Traffic from the sandbox subnet TO THIS HOST is dropped except the address sandboxes actually
+# Traffic from the sandbox network TO THIS HOST is dropped except the address sandboxes actually
 # dial (sandbox_relay_addr(), which SH_SANDBOX_RELAY_ADDR may point at a different port than
-# relay_port()) and DNS (podman's resolver answers on the gateway). Forwarded (internet) traffic is
+# relay_port()) and DNS (podman's resolver answers on the gateway), both over IPv4 from the
+# sandbox subnet. The rules match the bridge a packet arrives on, not only its source address:
+# netavark leaves IPv6 enabled on the bridge and in every container, so link-local IPv6 reaches the
+# host even though the network has no IPv6 subnet, and everything on the bridge that is not one of
+# the two IPv4 accepts -- IPv6 included -- is dropped. Forwarded (internet) traffic is
 # untouched in S1; MI1 S5 routes it through moca-egress. The declare/delete/redeclare idiom makes
 # `nft -f` replace the table atomically, so a re-run never stacks duplicate rules. The checked-in
 # unit carries an @SH_ENV_DIR@ placeholder rather than a literal path -- SH_ENV_DIR is itself
@@ -386,9 +402,10 @@ delete table inet moca_sandbox
 table inet moca_sandbox {
   chain input {
     type filter hook input priority filter; policy accept;
-    ip saddr $MOCA_SANDBOX_SUBNET ct state established,related accept
-    ip saddr $MOCA_SANDBOX_SUBNET tcp dport $attach accept
-    ip saddr $MOCA_SANDBOX_SUBNET meta l4proto { tcp, udp } th dport 53 accept
+    iifname "$MOCA_SANDBOX_BRIDGE" ct state established,related accept
+    iifname "$MOCA_SANDBOX_BRIDGE" ip saddr $MOCA_SANDBOX_SUBNET tcp dport $attach accept
+    iifname "$MOCA_SANDBOX_BRIDGE" ip saddr $MOCA_SANDBOX_SUBNET meta l4proto { tcp, udp } th dport 53 accept
+    iifname "$MOCA_SANDBOX_BRIDGE" counter drop
     ip saddr $MOCA_SANDBOX_SUBNET counter drop
   }
 }

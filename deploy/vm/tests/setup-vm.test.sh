@@ -29,9 +29,9 @@ done
 export MOCK_ENV_LOG="$TMP/mock-env.log"
 # `podman network inspect` also needs real stdout: ensure_sandbox_network parses it back to detect
 # a pre-existing network whose subnet/gateway or isolation differs from what is configured.
-# MOCK_PODMAN_INSPECT (subnet/gateway) and MOCK_PODMAN_ISOLATE (the isolate option) let a test
-# simulate such a network; their defaults match what setup-vm.sh configures, so every call site that
-# sets neither keeps passing.
+# MOCK_PODMAN_INSPECT (subnet/gateway), MOCK_PODMAN_ISOLATE (the isolate option) and MOCK_PODMAN_IFACE
+# (the bridge interface name) let a test simulate such a network; their defaults match what
+# setup-vm.sh configures, so every call site that sets none of them keeps passing.
 cat >"$TMP/bin/podman" <<'MOCK'
 #!/usr/bin/env bash
 printf '%s %s\n' "$(basename "$0")" "$*" >>"$MOCK_LOG"
@@ -39,6 +39,8 @@ printf 'podman-env SANDBOX_TOKEN=%s\n' "${SANDBOX_TOKEN-<unset>}" >>"$MOCK_ENV_L
 if [[ "$1" == "network" && "$2" == "inspect" ]]; then
   if [[ "$*" == *isolate* ]]; then
     printf '%s\n' "${MOCK_PODMAN_ISOLATE-strict}"
+  elif [[ "$*" == *NetworkInterface* ]]; then
+    printf '%s\n' "${MOCK_PODMAN_IFACE-moca-sandbox0}"
   else
     printf '%s\n' "${MOCK_PODMAN_INSPECT:-10.89.40.0/24 10.89.40.1}"
   fi
@@ -391,11 +393,13 @@ pass "start_sandboxes: dedicated network, gateway-pinned host alias, no host-gat
 : >"$MOCK_LOG"
 ensure_sandbox_network ||
   fail "ensure_sandbox_network must pass when the live network matches the configured subnet/gateway"
-grep -q -- 'podman network create --ignore --subnet 10.89.40.0/24 --gateway 10.89.40.1 --opt isolate=strict moca-sandbox' "$MOCK_LOG" ||
+grep -q -- 'podman network create --ignore --subnet 10.89.40.0/24 --gateway 10.89.40.1 --opt isolate=strict --interface-name moca-sandbox0 moca-sandbox' "$MOCK_LOG" ||
   fail "ensure_sandbox_network must create moca-sandbox idempotently with the fixed subnet," \
     "isolated from every other podman network: $(cat "$MOCK_LOG")"
 grep -q -- 'podman network inspect moca-sandbox --format {{index .Options "isolate"}}' "$MOCK_LOG" ||
   fail "ensure_sandbox_network must read back the live isolate option: $(cat "$MOCK_LOG")"
+grep -q -- 'podman network inspect moca-sandbox --format {{.NetworkInterface}}' "$MOCK_LOG" ||
+  fail "ensure_sandbox_network must read back the live bridge interface name: $(cat "$MOCK_LOG")"
 pass "ensure_sandbox_network creates the fixed-subnet, strictly isolated network and passes when it already matches"
 
 # --- ensure_sandbox_network fails closed on a network that is not strictly isolated (MI1 R8) -----
@@ -435,15 +439,36 @@ echo "$mismatch_err" | grep -qF "10.89.41.0/24 10.89.41.1" ||
 unset MOCK_PODMAN_INSPECT
 pass "ensure_sandbox_network fails closed and names both values on a subnet/gateway mismatch"
 
+# --- ensure_sandbox_network fails closed on a bridge with another interface name (MI1 R8) ---------
+# The firewall matches sandbox traffic by the bridge it arrives on, so a pre-existing moca-sandbox
+# whose bridge has another name would leave that traffic unmatched by the per-bridge rules.
+export MOCK_PODMAN_IFACE="podman1"
+if iface_err=$(ensure_sandbox_network 2>&1); then
+  fail "ensure_sandbox_network must fail when the live bridge interface is not moca-sandbox0"
+fi
+echo "$iface_err" | grep -qF "moca-sandbox0" || fail "the interface message must name the expected bridge: $iface_err"
+echo "$iface_err" | grep -qF "podman1" || fail "the interface message must name the actual bridge: $iface_err"
+unset MOCK_PODMAN_IFACE
+pass "ensure_sandbox_network fails closed and names both values on a bridge interface mismatch"
+
 cp "$TOKENED_RELAY_ENV" "$SH_ENV_DIR/relay.env"
 : >"$MOCK_LOG"
 install_sandbox_firewall
 NFT="$SH_ENV_DIR/moca-sandbox.nft"
 [[ -f "$NFT" ]] || fail "install_sandbox_firewall must render $NFT"
-grep -q 'ip saddr 10.89.40.0/24 tcp dport 9443 accept' "$NFT" || fail "the attach port must be allowed: $(cat "$NFT")"
-grep -q 'ip saddr 10.89.40.0/24 meta l4proto { tcp, udp } th dport 53 accept' "$NFT" ||
-  fail "DNS to podman's resolver must be allowed: $(cat "$NFT")"
-grep -q 'ip saddr 10.89.40.0/24 counter drop' "$NFT" || fail "everything else from the sandbox subnet must drop: $(cat "$NFT")"
+grep -qF 'iifname "moca-sandbox0" ip saddr 10.89.40.0/24 tcp dport 9443 accept' "$NFT" ||
+  fail "the attach port must be allowed, over IPv4 from the sandbox bridge only: $(cat "$NFT")"
+grep -qF 'iifname "moca-sandbox0" ip saddr 10.89.40.0/24 meta l4proto { tcp, udp } th dport 53 accept' "$NFT" ||
+  fail "DNS to podman's resolver must be allowed, over IPv4 from the sandbox bridge only: $(cat "$NFT")"
+grep -qF 'iifname "moca-sandbox0" counter drop' "$NFT" ||
+  fail "everything else arriving on the sandbox bridge -- IPv6 included -- must drop: $(cat "$NFT")"
+grep -qF 'ip saddr 10.89.40.0/24 counter drop' "$NFT" ||
+  fail "traffic from the sandbox subnet on any other interface must drop too: $(cat "$NFT")"
+# Every accept other than the established/related one must be IPv4-only: an accept without
+# `ip saddr` would let IPv6 (link-local is up on the bridge and in every container) through.
+if grep -E 'accept' "$NFT" | grep -vE 'ct state established,related accept|policy accept' | grep -vqF 'ip saddr'; then
+  fail "an accept rule without ip saddr would admit IPv6 from the sandbox bridge: $(cat "$NFT")"
+fi
 grep -q 'hook input' "$NFT" || fail "the table must filter traffic TO the host (input), not forwarding"
 grep -q 'hook forward' "$NFT" && fail "S1 must not filter forwarded (internet) traffic; that is S5's"
 grep -q 'nft -f' "$MOCK_LOG" || fail "install_sandbox_firewall must load the table now: $(cat "$MOCK_LOG")"
