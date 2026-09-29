@@ -46,6 +46,13 @@ spec:
               value: dev-token
             # The workers' credential for SandboxExec (MI1 §5 R5). A documented public DEV value,
             # like SH_RELAY_TOKEN above; the OCP overlay replaces it from a Secret.
+            #
+            # So on plain Kubernetes (Kind, setup-k8s.sh, relay-leaf-smoke.sh) R5 gives NO
+            # sandbox-to-sandbox isolation: this value is in the repo, and with no
+            # MOCA_RELAY_EXEC_ADDR set the relay serves SandboxExec on the same :8443 every
+            # sandbox attaches to, so any sandbox pod can Exec into any other. Multi-user on this
+            # path is out of scope (MI1 spec §13); use the OCP overlay's Secret, or deploy/vm or
+            # compose, where the exec listener is split off.
             - name: MOCA_RELAY_EXEC_TOKEN
               value: dev-exec-token
           ports:

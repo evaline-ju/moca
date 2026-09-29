@@ -235,7 +235,11 @@ function addExecService(
   server.addService(SandboxExecService, execImpl);
 }
 
-/** One listener serving both services — the Kubernetes shape, where the token is the control. */
+/**
+ * One listener serving both services — the Kubernetes shape, where the token is the ONLY control:
+ * every sandbox can reach SandboxExec, and only a secret exec token keeps it out. With the base
+ * manifest's public dev token there is no isolation between sandboxes at all.
+ */
 export function buildServer(deps: RelayServerDeps): { server: Server } {
   const relay = createRelay(deps);
   const server = newServer();
@@ -245,8 +249,11 @@ export function buildServer(deps: RelayServerDeps): { server: Server } {
 }
 
 /**
- * Two listeners over ONE relay: sandboxes reach only the attach server; only workers can reach the
- * exec server (MI1 §5 R5). Same relay instance, so an Exec routes to a worker attached on the other.
+ * Two listeners over ONE relay (MI1 §5 R5), so the exec server can be bound where sandboxes cannot
+ * reach it: loopback on deploy/vm, the brain network in compose. That reachability comes from the
+ * address it is bound to, not from this function; bound on an address sandboxes can reach, the
+ * exec token is again the only control. Same relay instance, so an Exec routes to a worker attached
+ * on the other listener.
  */
 export function buildServers(deps: RelayServerDeps): { attachServer: Server; execServer: Server } {
   const relay = createRelay(deps);
