@@ -1,10 +1,19 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DefaultResourceLoader } from '@earendil-works/pi-coding-agent';
 import { turnLoaderInputs } from '../src/run-turn.js';
 import type { PromotedConfig } from '../src/config-resolver.js';
+
+// Read through the installed package, so the fixture tracks the pi version the harness runs.
+const DARK_THEME = fileURLToPath(
+  new URL(
+    '../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/dark.json',
+    import.meta.url,
+  ),
+);
 
 let root: string;
 let cwd: string;
@@ -37,6 +46,12 @@ beforeEach(() => {
   );
   mkdirSync(join(agentDir, 'prompts'), { recursive: true });
   writeFileSync(join(agentDir, 'prompts', 'planted-prompt.md'), 'PLANTED-PROMPT-TEMPLATE\n');
+  // A theme in the agent directory: pi's own bundled dark theme, renamed, so it is certainly valid.
+  mkdirSync(join(agentDir, 'themes'), { recursive: true });
+  writeFileSync(
+    join(agentDir, 'themes', 'planted-theme.json'),
+    JSON.stringify({ ...JSON.parse(readFileSync(DARK_THEME, 'utf8')), name: 'planted-theme' }),
+  );
   savedHome = process.env.HOME;
   process.env.HOME = home;
   savedAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -74,9 +89,20 @@ describe('server-mode resource loader (MI1 R4)', () => {
     expect((globalThis as Record<string, unknown>).__MI1_PLANTED_EXTENSION).toBeUndefined();
   });
 
-  it('outside server mode the same files ARE picked up — the test is sensitive', async () => {
+  it('outside server mode the same files ARE picked up — each assertion above is sensitive', async () => {
+    // One control per assertion in the test above: without it, an assertion that pi never
+    // discovers the file in this configuration at all would pass with the lockdown deleted.
     const loader = await load(false);
     expect(loader.getSystemPrompt() ?? '').toContain('PLANTED-PROJECT-SYSTEM');
+    expect(loader.getAppendSystemPrompt().join('\n')).toContain('PLANTED-PROJECT-APPEND');
+    expect(
+      loader
+        .getAgentsFiles()
+        .agentsFiles.map((f) => f.content)
+        .join('\n'),
+    ).toContain('PLANTED-AGENTS');
+    expect(loader.getExtensions().extensions.length).toBeGreaterThan(0);
+    expect((globalThis as Record<string, unknown>).__MI1_PLANTED_EXTENSION).toBe(true);
   });
 
   it('discovers no skill, prompt template or theme in server mode', async () => {
@@ -93,12 +119,14 @@ describe('server-mode resource loader (MI1 R4)', () => {
     const loader = await load(true);
     expect(loader.getSkills().skills.map((s) => s.name)).not.toContain('planted-home-skill');
     expect(loader.getPrompts().prompts.map((p) => p.name)).not.toContain('planted-prompt');
+    expect(loader.getThemes().themes.map((t) => t.name)).not.toContain('planted-theme');
   });
 
   it('outside server mode the user skill and the prompt template ARE discovered — the test is sensitive', async () => {
     const loader = await load(false);
     expect(loader.getSkills().skills.map((s) => s.name)).toContain('planted-home-skill');
     expect(loader.getPrompts().prompts.map((p) => p.name)).toContain('planted-prompt');
+    expect(loader.getThemes().themes.map((t) => t.name)).toContain('planted-theme');
   });
 
   it('a promoted bundle still delivers its skills and prompt templates in server mode', async () => {
