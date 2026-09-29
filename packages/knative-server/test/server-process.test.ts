@@ -47,6 +47,11 @@ describe('readTenancy', () => {
       'MOCA-TENANCY',
       ' MOCA_TENANCY',
       'MOCA_TENANCY_OLD',
+      'MULTI_TENANCY',
+      'MOCA_MULTI_TENANCY',
+      'MOCA_MULTITENANCY',
+      'SH_MOCA_TENANCY',
+      'SH_KAGENTI_TENANCY',
     ];
     for (const name of nearMisses) {
       expect(isTenancyNearMiss(name), name).toBe(true);
@@ -64,6 +69,17 @@ describe('readTenancy', () => {
       'MOCA_RELAY_EXEC_TOKEN',
       'SH',
       'MOCA',
+      // Another product's variable, and an English word that contains the letters.
+      'OCI_CLI_TENANCY',
+      'MAINTENANCE_MODE',
+      // Kubernetes service links for a Service named `tenancy` or `moca-tenancy`.
+      'TENANCY_SERVICE_HOST',
+      'TENANCY_SERVICE_PORT',
+      'MOCA_TENANCY_PORT',
+      'MOCA_TENANCY_SERVICE_HOST',
+      'MOCA_TENANCY_SERVICE_PORT_HTTP',
+      'MOCA_TENANCY_PORT_8080_TCP',
+      'MOCA_TENANCY_PORT_8080_TCP_ADDR',
     ]) {
       expect(isTenancyNearMiss(name), name).toBe(false);
     }

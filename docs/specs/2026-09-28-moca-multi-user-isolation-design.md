@@ -676,12 +676,16 @@ The first deployment that sets `multi` arrives with S2, together with the grants
 credential-free worker usable (§10.3).
 
 A misspelled variable name is a boot failure, the same as a misspelled value, rather than being read
-as `single`. The rule (`isTenancyNearMiss`, `tenancy.ts`) ignores case, separators and whitespace, and
-strips one `MOCA`, `KAGENTI` or `SH` prefix. It then refuses what remains if that is within one edit
-of `TENANCY` or starts with it. That catches `SH_TENANCY`, `MOCA_TENENCY`, `MOCA__TENANCY` and
-`MOCA_TENANCY_MODE`, but not `TENANT`, which is two edits away. So the `MOCA_TENANCY_*` names are
-reserved, and a leftover such as `MOCA_TENANCY_OLD` must be unset. A test runs the rule over every
-identifier in the repository and asserts that none of them is flagged.
+as `single`. The rule (`isTenancyNearMiss`, `tenancy.ts`) splits the name into segments, ignoring
+case, and strips any `MOCA`, `KAGENTI`, `SH` or `MULTI` glued onto a segment. A name is refused when a
+segment is then within one edit of `TENANCY`, or starts with it, and every segment before it is one
+of those four words. That catches `SH_TENANCY`, `MULTI_TENANCY`, `SH_MOCA_TENANCY`,
+`MOCA_TENENCY`, `MOCA__TENANCY` and `MOCA_TENANCY_MODE`. It leaves alone another product's
+`OCI_CLI_TENANCY`, the word `MAINTENANCE`, `TENANT` (two edits away), and Kubernetes service-link
+variables such as `MOCA_TENANCY_SERVICE_HOST`. So the `MOCA_TENANCY_*` names are reserved, and a
+leftover such as `MOCA_TENANCY_OLD` must be unset. A test runs the rule over every other identifier in
+the repository and asserts that none of them is flagged; names injected at run time, beyond the
+service-link shapes, are outside what that test can see.
 
 ### 10.2 Order
 

@@ -2,9 +2,14 @@
 export type Tenancy = 'single' | 'multi';
 
 const CORE = 'TENANCY';
-// The prefixes an operator might reach for: this package's knobs are SH_-prefixed, and the repo
-// was kagenti before it was MOCA.
-const PREFIXES = ['MOCA', 'KAGENTI', 'SH'];
+// Segments an operator might put in front of the word: this package's knobs are SH_-prefixed, the
+// repo was kagenti before it was MOCA, and "multi" is the value an operator is trying to set.
+const LEADING = ['MOCA', 'KAGENTI', 'SH', 'MULTI'];
+// Kubernetes injects <SERVICE>_SERVICE_HOST, _SERVICE_PORT[_<name>], _PORT and _PORT_<n>_<proto>[_*]
+// for every Service in the namespace (enableServiceLinks). A Service named `tenancy` or
+// `moca-tenancy` must not crashloop every pod beside it.
+const SERVICE_LINK =
+  /_(SERVICE_HOST|SERVICE_PORT(_[A-Z0-9_]+)?|PORT|PORT_\d+_(TCP|UDP|SCTP)(_[A-Z]+)?)$/;
 
 function editDistanceAtMostOne(a: string, b: string): boolean {
   if (Math.abs(a.length - b.length) > 1) return false;
@@ -28,11 +33,31 @@ function editDistanceAtMostOne(a: string, b: string): boolean {
   return edits + (a.length - i) + (b.length - j) <= 1;
 }
 
+/** Strip known leading words glued onto a segment (`MOCATENANCY`, `MULTITENANCY`) — repeatedly. */
+function core(segment: string): string {
+  let out = segment;
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const p of LEADING) {
+      if (out.startsWith(p) && out.length > p.length) {
+        out = out.slice(p.length);
+        changed = true;
+      }
+    }
+  }
+  return out;
+}
+
+const tenancyLike = (c: string): boolean => c.startsWith(CORE) || editDistanceAtMostOne(c, CORE);
+
 /**
- * Whether `name` looks like an attempt at MOCA_TENANCY without being it. Case, separators and
- * whitespace are ignored and one known prefix is stripped; what remains is refused when it is within
- * one edit of TENANCY (`MOCA_TENENCY`, `MOCA_TENNANCY`, `SH_TENANCY`, `MOCA__TENANCY`, `TENANCY`) or
- * starts with it (`MOCA_TENANCY_MODE`). One edit, not two, so an unrelated `TENANT` is left alone.
+ * Whether `name` looks like an attempt at MOCA_TENANCY without being it. The name is split into
+ * segments on anything that is not a letter or digit, case ignored. It is a near-miss when some
+ * segment, after stripping glued-on MOCA/KAGENTI/SH/MULTI, is within one edit of TENANCY or starts
+ * with it, AND every segment before that one is itself one of those leading words. So
+ * `SH_TENANCY`, `MULTI_TENANCY`, `SH_MOCA_TENANCY`, `MOCA_MULTITENANCY`, `MOCA_TENENCY`,
+ * `MOCA__TENANCY` and `MOCA_TENANCY_MODE` are refused, while another product's `OCI_CLI_TENANCY`,
+ * `MAINTENANCE_MODE` and `TENANT` (two edits) are not. Kubernetes service-link variables are exempt.
  *
  * The `MOCA_TENANCY_*` names are therefore reserved: a leftover such as `MOCA_TENANCY_OLD` is a
  * boot failure too, and the fix is to unset it. A variable that silently fails to set tenancy costs
@@ -40,10 +65,14 @@ function editDistanceAtMostOne(a: string, b: string): boolean {
  */
 export function isTenancyNearMiss(name: string): boolean {
   if (name === 'MOCA_TENANCY') return false;
-  let core = name.toUpperCase().replace(/[^A-Z0-9]/g, '');
-  const prefix = PREFIXES.find((p) => core.startsWith(p) && core.length > p.length);
-  if (prefix) core = core.slice(prefix.length);
-  return core.startsWith(CORE) || editDistanceAtMostOne(core, CORE);
+  const upper = name.toUpperCase();
+  if (SERVICE_LINK.test(upper.trim())) return false;
+  const segments = upper.split(/[^A-Z0-9]+/).filter(Boolean);
+  for (const segment of segments) {
+    if (tenancyLike(core(segment))) return true;
+    if (!LEADING.includes(segment)) return false;
+  }
+  return false;
 }
 
 export function readTenancy(env: NodeJS.ProcessEnv): Tenancy {
