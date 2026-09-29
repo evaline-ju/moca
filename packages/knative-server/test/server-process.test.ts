@@ -1,8 +1,9 @@
+import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { AMBIENT_KEY_SENTINEL } from '@sh/harness/ambient-sentinel';
-import { readTenancy } from '../src/tenancy.js';
+import { isTenancyNearMiss, readTenancy } from '../src/tenancy.js';
 import { prepareServerProcess, scrubAmbientCredentials } from '../src/server-process.js';
 import { buildConfig } from '../src/server.js';
 
@@ -31,13 +32,69 @@ describe('readTenancy', () => {
   });
 
   it('refuses a misspelled variable name rather than reading it as unset (PR #350 review)', () => {
-    for (const name of ['MOCA_TENANCY_MODE', 'moca_tenancy', 'MOCATENANCY', 'MOCA_TENANCE']) {
+    const nearMisses = [
+      'MOCA_TENANCY_MODE',
+      'moca_tenancy',
+      'MOCATENANCY',
+      'MOCA_TENANCE',
+      'SH_TENANCY',
+      'TENANCY',
+      'KAGENTI_TENANCY',
+      'MOCA_TENENCY',
+      'MOCA_TENNANCY',
+      'MOCA_TENACY',
+      'MOCA__TENANCY',
+      'MOCA-TENANCY',
+      ' MOCA_TENANCY',
+      'MOCA_TENANCY_OLD',
+    ];
+    for (const name of nearMisses) {
+      expect(isTenancyNearMiss(name), name).toBe(true);
       expect(() => readTenancy({ [name]: 'multi' }), name).toThrow(
-        new RegExp(`unrecognised variable ${name}`),
+        `unrecognised variable '${name}'`,
       );
     }
-    // The real name alongside an unrelated MOCA_ setting is fine.
-    expect(readTenancy({ MOCA_TENANCY: 'multi', MOCA_RELAY_EXEC_TOKEN: 'x' })).toBe('multi');
+  });
+
+  it('leaves the real name and unrelated variables alone', () => {
+    for (const name of [
+      'MOCA_TENANCY',
+      'TENANT',
+      'SH_TENANT',
+      'MOCA_RELAY_EXEC_TOKEN',
+      'SH',
+      'MOCA',
+    ]) {
+      expect(isTenancyNearMiss(name), name).toBe(false);
+    }
+    expect(readTenancy({ MOCA_TENANCY: 'multi', TENANT: 'acme', MOCA_RELAY_EXEC_TOKEN: 'x' })).toBe(
+      'multi',
+    );
+  });
+
+  it('flags no environment variable name used anywhere in this repository', () => {
+    // A false positive is a crashloop on a correctly configured deployment. Every name this repo
+    // sets, reads or documents is fixed input here; only the deliberate test fixtures above match.
+    const names = execFileSync(
+      'git',
+      [
+        'grep',
+        '-ohE',
+        '[A-Z][A-Z0-9_]{3,}',
+        '--',
+        ':(top)',
+        ':(top,exclude)pnpm-lock.yaml',
+        ':(top,exclude)packages/knative-server/src/tenancy.ts',
+        ':(top,exclude)packages/knative-server/test/server-process.test.ts',
+        // Names near-misses on purpose, to document the rule.
+        ':(top,exclude)docs/specs/2026-09-28-moca-multi-user-isolation-design.md',
+      ],
+      { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
+    )
+      .split('\n')
+      .filter(Boolean);
+    expect(names.length).toBeGreaterThan(500);
+    expect([...new Set(names)].filter(isTenancyNearMiss)).toEqual([]);
   });
 });
 
