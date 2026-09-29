@@ -269,12 +269,21 @@ require_relay_token() {
 # The workers' credential for the relay's SandboxExec (MI1 §5 R5). Only the relay and the
 # supervisor hold it, so it is generated here when absent -- into BOTH files, one value -- and an
 # existing value is never replaced. It is never handed to a sandbox container (start_sandboxes).
+# Terminate an operator-edited file's last line before appending to it: `>>` onto a file with no final
+# newline glues the new assignment onto the last one (SH_RELAY_TOKEN=<t>MOCA_RELAY_EXEC_TOKEN=...),
+# silently changing that value. $(...) strips a trailing newline, so it is empty only when the file
+# already ends in one.
+end_with_newline() {
+  if [[ -s "$1" && -n "$(tail -c 1 "$1")" ]]; then printf '\n' >>"$1"; fi
+}
+
 ensure_exec_token() {
   local relay="$SH_ENV_DIR/relay.env" sup="$SH_ENV_DIR/supervisor.env" token
   token="$( (grep -oE '^MOCA_RELAY_EXEC_TOKEN=.+' "$relay" 2>/dev/null || true) | tail -1 | cut -d= -f2-)"
   if [[ -z "$token" ]]; then
     token="$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
     [[ -n "$token" ]] || { echo "could not generate MOCA_RELAY_EXEC_TOKEN" >&2; return 1; }
+    end_with_newline "$relay"
     (umask 077; printf 'MOCA_RELAY_EXEC_TOKEN=%s\n' "$token" >>"$relay")
   fi
   if ! grep -qE "^MOCA_RELAY_EXEC_TOKEN=${token}\$" "$sup" 2>/dev/null; then
@@ -328,6 +337,7 @@ ensure_exec_listener() {
     fi
     log "migrating to the split exec listener: MOCA_RELAY_EXEC_ADDR=$new_addr in $relay," \
       "SH_RELAY_ADDR=$new_addr in $sup"
+    end_with_newline "$relay"
     printf 'MOCA_RELAY_EXEC_ADDR=%s\n' "$new_addr" >>"$relay"
     tmp="$(mktemp)"
     sed -E "s|^SH_RELAY_ADDR=.*\$|SH_RELAY_ADDR=$new_addr|" "$sup" >"$tmp"

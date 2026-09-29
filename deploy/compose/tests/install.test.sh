@@ -158,6 +158,15 @@ run_install || fail "upgrade re-run exited non-zero"
   fail "the upgrade did not add MOCA_RELAY_EXEC_TOKEN"
 pass "an existing .env without MOCA_RELAY_EXEC_TOKEN gains one; nothing else changes"
 
+# The same upgrade, when the operator's editor left no newline at the end of the last line.
+printf 'SH_TURNS_PER_WORKER=4\nSH_RELAY_TOKEN=keep-me' >"$SH_COMPOSE_DIR/.env"
+run_install || fail "upgrade re-run exited non-zero on an .env with no final newline"
+[[ "$(env_value SH_RELAY_TOKEN "$SH_COMPOSE_DIR/.env")" == keep-me ]] ||
+  fail "appending to an .env with no final newline changed SH_RELAY_TOKEN: $(cat "$SH_COMPOSE_DIR/.env")"
+[[ "$(env_value MOCA_RELAY_EXEC_TOKEN "$SH_COMPOSE_DIR/.env")" =~ ^[0-9a-f]{64}$ ]] ||
+  fail "the exec token was not appended as its own line: $(cat "$SH_COMPOSE_DIR/.env")"
+pass "an .env with no final newline gains the exec token on its own line"
+
 # --- 3. a re-run never clobbers an operator-edited .env ------------------------------------------
 export SH_COMPOSE_DIR="$TMP/two"
 sed -i.bak 's/^SH_TURNS_PER_WORKER=.*/SH_TURNS_PER_WORKER=11/' "$SH_COMPOSE_DIR/.env"

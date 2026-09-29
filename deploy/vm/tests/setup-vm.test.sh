@@ -273,6 +273,18 @@ grep -q '^SH_RELAY_TOKEN=keep$' "$EXEC_DIR/relay.env" || fail "ensure_exec_token
 pass "MOCA_RELAY_EXEC_TOKEN: generated once, same value in relay.env and supervisor.env"
 rm -rf "$EXEC_DIR"
 
+# An operator-edited relay.env whose last line has no newline: the append must not glue onto it.
+EXEC_DIR="$(mktemp -d)"
+printf 'SH_RELAY_PORT=9443\nSH_RELAY_TOKEN=keep' >"$EXEC_DIR/relay.env"
+printf 'PORT=8080\n' >"$EXEC_DIR/supervisor.env"
+SH_ENV_DIR="$EXEC_DIR" ensure_exec_token || fail "ensure_exec_token failed on a file with no final newline"
+grep -q '^SH_RELAY_TOKEN=keep$' "$EXEC_DIR/relay.env" ||
+  fail "appending to a relay.env with no final newline changed SH_RELAY_TOKEN: $(cat "$EXEC_DIR/relay.env")"
+grep -qE '^MOCA_RELAY_EXEC_TOKEN=[0-9a-f]{64}$' "$EXEC_DIR/relay.env" ||
+  fail "the exec token was not appended as its own line: $(cat "$EXEC_DIR/relay.env")"
+pass "ensure_exec_token appends on its own line to a relay.env with no final newline"
+rm -rf "$EXEC_DIR"
+
 # --- MI1 R5: the exec listener and the supervisor's dial address move together ------------------
 # Before MI1 the relay served everything on one listener and the supervisor dialed it at
 # SH_RELAY_ADDR=127.0.0.1:9443. install_env never rewrites an existing env file, so a re-run on such

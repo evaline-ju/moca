@@ -114,6 +114,14 @@ require_relay_token() {
 
 # The exec token is shared only by the relay and the supervisor, both of which compose restarts, so
 # unlike SH_RELAY_TOKEN it is safe to create on an upgrade. Appended, never rewritten.
+# Terminate an operator-edited file's last line before appending to it: `>>` onto a file with no final
+# newline glues the new assignment onto the last one (SH_RELAY_TOKEN=<t>MOCA_RELAY_EXEC_TOKEN=...),
+# silently changing that value. $(...) strips a trailing newline, so it is empty only when the file
+# already ends in one.
+end_with_newline() {
+  if [ -s "$1" ] && [ -n "$(tail -c 1 "$1")" ]; then printf '\n' >>"$1"; fi
+}
+
 ensure_exec_token() {
   env_file="$SH_COMPOSE_DIR/.env"
   [ -n "$(env_file_value MOCA_RELAY_EXEC_TOKEN "$env_file")" ] && return 0
@@ -122,6 +130,7 @@ ensure_exec_token() {
   log "adding MOCA_RELAY_EXEC_TOKEN to $env_file"
   (
     umask 077
+    end_with_newline "$env_file"
     printf 'MOCA_RELAY_EXEC_TOKEN=%s\n' "$exec_token" >>"$env_file"
   )
 }
