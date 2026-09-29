@@ -679,11 +679,13 @@ A misspelled variable name is a boot failure, the same as a misspelled value, ra
 as `single`. The rule (`isTenancyNearMiss`, `tenancy.ts`) splits the name into segments, ignoring
 case, and strips any `MOCA`, `KAGENTI`, `SH` or `MULTI` glued onto a segment. A name is refused when a
 segment is then within one edit of `TENANCY`, or starts with it, and every segment before it is one
-of those four words. That catches `SH_TENANCY`, `MULTI_TENANCY`, `SH_MOCA_TENANCY`,
-`MOCA_TENENCY`, `MOCA__TENANCY` and `MOCA_TENANCY_MODE`. It leaves alone another product's
-`OCI_CLI_TENANCY`, the word `MAINTENANCE`, `TENANT` (two edits away), and Kubernetes service-link
-variables such as `MOCA_TENANCY_SERVICE_HOST`. So the `MOCA_TENANCY_*` names are reserved, and a
-leftover such as `MOCA_TENANCY_OLD` must be unset. A test runs the rule over every other identifier in
+of those four words. Once such a leading word has been seen, any segment starting `TENAN` is
+refused as well. That catches `SH_TENANCY`, `MULTI_TENANCY`, `SH_MOCA_TENANCY`, `MOCA_TENENCY`,
+`MOCA__TENANCY`, `MOCA_TENANCY_MODE`, `MOCA_TENANCIES`, `MOCA_TENANT` and `MOCA_MULTI_TENANT`. It
+leaves alone another product's `OCI_CLI_TENANCY`, the word `MAINTENANCE`, a bare `TENANT`, and
+Kubernetes service-link variables such as `MOCA_TENANCY_SERVICE_HOST`. So names starting
+`MOCA_TENAN`, `SH_TENAN` or `KAGENTI_TENAN` are reserved, and a leftover such as `MOCA_TENANCY_OLD`
+must be unset. A test runs the rule over every other identifier in
 the repository and asserts that none of them is flagged; names injected at run time, beyond the
 service-link shapes, are outside what that test can see.
 

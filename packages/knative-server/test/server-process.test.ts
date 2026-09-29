@@ -53,6 +53,15 @@ describe('readTenancy', () => {
       'MOCA_MULTITENANCY',
       'SH_MOCA_TENANCY',
       'SH_KAGENTI_TENANCY',
+      // Round 3: the TENAN... family after a leading word.
+      'MOCA_TENANCIES',
+      'MOCA_TENANT',
+      'MOCA_MULTI_TENANT',
+      'MOCA_MULTITENANT',
+      'SH_MULTI_TENANT',
+      'SH_TENANT',
+      'KAGENTI_TENANT_MODE',
+      'MOCATENANT',
     ];
     for (const name of nearMisses) {
       expect(isTenancyNearMiss(name), name).toBe(true);
@@ -66,7 +75,7 @@ describe('readTenancy', () => {
     for (const name of [
       'MOCA_TENANCY',
       'TENANT',
-      'SH_TENANT',
+      'TENANT_ID',
       'MOCA_RELAY_EXEC_TOKEN',
       'SH',
       'MOCA',

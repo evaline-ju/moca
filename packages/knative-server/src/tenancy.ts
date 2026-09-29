@@ -49,6 +49,9 @@ function core(segment: string): string {
 }
 
 const tenancyLike = (c: string): boolean => c.startsWith(CORE) || editDistanceAtMostOne(c, CORE);
+// After a leading word, any TENAN... is an attempt at this switch: `MOCA_TENANCIES` (two edits),
+// `MOCA_TENANT`, `MOCA_MULTI_TENANT`. Bare, without one, `TENANT` stays another product's word.
+const TENAN = 'TENAN';
 
 /**
  * Whether `name` looks like an attempt at MOCA_TENANCY without being it. The name is split into
@@ -56,10 +59,13 @@ const tenancyLike = (c: string): boolean => c.startsWith(CORE) || editDistanceAt
  * segment, after stripping glued-on MOCA/KAGENTI/SH/MULTI, is within one edit of TENANCY or starts
  * with it, AND every segment before that one is itself one of those leading words. So
  * `SH_TENANCY`, `MULTI_TENANCY`, `SH_MOCA_TENANCY`, `MOCA_MULTITENANCY`, `MOCA_TENENCY`,
- * `MOCA__TENANCY` and `MOCA_TENANCY_MODE` are refused, while another product's `OCI_CLI_TENANCY`,
- * `MAINTENANCE_MODE` and `TENANT` (two edits) are not. Kubernetes service-link variables are exempt.
+ * `MOCA__TENANCY` and `MOCA_TENANCY_MODE` are refused. Once a leading word has been seen -- as its
+ * own segment or glued on -- any segment starting TENAN is refused too, which catches
+ * `MOCA_TENANCIES`, `MOCA_TENANT`, `MOCA_MULTI_TENANT`, `MOCA_MULTITENANT` and `SH_MULTI_TENANT`.
+ * Another product's `OCI_CLI_TENANCY`, `MAINTENANCE_MODE` and a bare `TENANT` (two edits, and no
+ * leading word) are not. Kubernetes service-link variables are exempt.
  *
- * The `MOCA_TENANCY_*` names are therefore reserved: a leftover such as `MOCA_TENANCY_OLD` is a
+ * The `MOCA_TENAN*` names (and `SH_`/`KAGENTI_` alike) are therefore reserved: a leftover such as `MOCA_TENANCY_OLD` is a
  * boot failure too, and the fix is to unset it. A variable that silently fails to set tenancy costs
  * every `multi` protection; one that refuses to boot costs a restart.
  */
@@ -68,9 +74,13 @@ export function isTenancyNearMiss(name: string): boolean {
   const upper = name.toUpperCase();
   if (SERVICE_LINK.test(upper.trim())) return false;
   const segments = upper.split(/[^A-Z0-9]+/).filter(Boolean);
+  let led = false;
   for (const segment of segments) {
-    if (tenancyLike(core(segment))) return true;
+    const c = core(segment);
+    led ||= c !== segment; // a leading word glued onto this segment counts as one seen
+    if (tenancyLike(c) || (led && c.startsWith(TENAN))) return true;
     if (!LEADING.includes(segment)) return false;
+    led = true;
   }
   return false;
 }
