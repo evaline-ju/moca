@@ -36,6 +36,9 @@ cat >"$TMP/bin/podman" <<'MOCK'
 #!/usr/bin/env bash
 printf '%s %s\n' "$(basename "$0")" "$*" >>"$MOCK_LOG"
 printf 'podman-env SANDBOX_TOKEN=%s\n' "${SANDBOX_TOKEN-<unset>}" >>"$MOCK_ENV_LOG"
+# The exec token must never reach a sandbox by inheritance either (an `export`, a `set -a` over
+# relay.env): record whether podman's own environment carries it.
+printf 'podman-env MOCA_RELAY_EXEC_TOKEN=%s\n' "${MOCA_RELAY_EXEC_TOKEN-<unset>}" >>"$MOCK_ENV_LOG"
 if [[ "$1" == "network" && "$2" == "inspect" ]]; then
   if [[ "$*" == *isolate* ]]; then
     printf '%s\n' "${MOCK_PODMAN_ISOLATE-strict}"
@@ -464,6 +467,10 @@ grep -qF 'iifname "moca-sandbox0" ip saddr 10.89.40.0/24 tcp dport 9443 accept' 
   fail "the attach port must be allowed, over IPv4 from the sandbox bridge only: $(cat "$NFT")"
 grep -qF 'iifname "moca-sandbox0" ip saddr 10.89.40.0/24 meta l4proto { tcp, udp } th dport 53 accept' "$NFT" ||
   fail "DNS to podman's resolver must be allowed, over IPv4 from the sandbox bridge only: $(cat "$NFT")"
+# Pinned on its own: the IPv4-only sweep below exempts this rule, so dropping its iifname -- accepting
+# established/related traffic from every interface -- would otherwise pass the whole file.
+grep -qxF '    iifname "moca-sandbox0" ct state established,related accept' "$NFT" ||
+  fail "the established/related accept must be scoped to the sandbox bridge: $(cat "$NFT")"
 grep -qF 'iifname "moca-sandbox0" counter drop' "$NFT" ||
   fail "everything else arriving on the sandbox bridge -- IPv6 included -- must drop: $(cat "$NFT")"
 grep -qF 'ip saddr 10.89.40.0/24 counter drop' "$NFT" ||
@@ -770,6 +777,28 @@ grep -q -- 'podman-env SANDBOX_TOKEN=e2e-token' "$MOCK_ENV_LOG" ||
     "(B5 / require_relay_token wiring): $(cat "$MOCK_ENV_LOG")"
 grep -q -- 'SANDBOX_TOKEN=e2e-token' "$MOCK_LOG" &&
   fail "the relay token leaked into podman's argv on the end-to-end path: $(cat "$MOCK_LOG")"
+# The firewall is load-bearing only if it is in place before the first sandbox starts.
+firewall_line=$(grep -n 'nft -f' "$MOCK_LOG" | head -1 | cut -d: -f1)
+sandbox_line=$(grep -n 'podman run .*sh-sandbox-' "$MOCK_LOG" | head -1 | cut -d: -f1)
+[[ -n "$firewall_line" && -n "$sandbox_line" ]] ||
+  fail "main() must both load the firewall and start sandboxes: $(cat "$MOCK_LOG")"
+((firewall_line < sandbox_line)) ||
+  fail "main() must load the sandbox firewall before it starts the first sandbox"
+# A sandbox never receives the exec token -- the credential that authorizes SandboxExec into ANY
+# sandbox -- by any route: not by argv, not from an env file, not inherited.
+exec_token=$(sed -n 's/^MOCA_RELAY_EXEC_TOKEN=//p' "$SH_ENV_DIR/relay.env")
+[[ -n "$exec_token" ]] || fail "main() must have generated MOCA_RELAY_EXEC_TOKEN in relay.env"
+grep -F -- "$exec_token" "$MOCK_LOG" | grep -q 'sh-sandbox-' &&
+  fail "a sandbox's podman run carries the exec token in argv: $(cat "$MOCK_LOG")"
+grep -qF -- "podman-env MOCA_RELAY_EXEC_TOKEN=$exec_token" "$MOCK_ENV_LOG" &&
+  fail "podman inherits MOCA_RELAY_EXEC_TOKEN, so every sandbox it starts would too"
+if grep 'podman run .*sh-sandbox-' "$MOCK_LOG" | grep -qE -- '--env-file|--env-host|--env-merge'; then
+  fail "a sandbox is started with an env file or the host environment: $(cat "$MOCK_LOG")"
+fi
+# Only the three settings a sandbox worker needs are set, by -e.
+bad_e=$(grep 'podman run .*sh-sandbox-' "$MOCK_LOG" | grep -oE -- '-e [A-Za-z_][A-Za-z0-9_]*' |
+  sed 's/^-e //' | grep -vxE 'SANDBOX_ID|RELAY_ADDR|SANDBOX_TOKEN' | sort -u || true)
+[[ -z "$bad_e" ]] || fail "a sandbox is given environment beyond SANDBOX_ID/RELAY_ADDR/SANDBOX_TOKEN: $bad_e"
 declare -f main | grep -q 'ensure_exec_listener' ||
   fail "main() must run ensure_exec_listener, or a re-run on a pre-MI1 VM keeps the single listener"
 pass "main() end to end: harness-account check, both units, both env files, correct ordering"
