@@ -641,6 +641,17 @@ requirement turns on, and **each component refuses to start on an inconsistent c
 | `microvm-worker` | no grant public keys                                                                              |
 | `moca-egress`    | no CA key, no allowlist, no control-plane credential, no `sandboxes.json` on the container tier   |
 
+**What S1 turns on, and what it only ships.** No deployment artifact in S1 sets `MOCA_TENANCY`:
+`service.yaml`, the leaf manifests, compose, `deploy/vm` and the setup scripts all run the `single`
+default. So the requirements that §5 applies in both modes are live everywhere after S1, but the
+`multi`-only behaviour — R2's ambient-credential scrub and its refusals of `SH_LOCAL_TOOLS=1` and of
+`SH_REQUIRE_AUTH` other than `true` — is shipped, tested and **inert** until an operator sets
+`MOCA_TENANCY=multi`. That is deliberate. Under `single` the ambient provider key is the operator's
+own credential and is meant to stay (§5 R2); the leaf job's mounted `llm-credentials` are that case.
+The first deployment that sets `multi` arrives with S2, together with the grants that make a
+credential-free worker usable (§10.3). A misspelled variable name, such as `MOCA_TENANCY_MODE`, is
+a boot failure, the same as a misspelled value. It is not read as `single`.
+
 ### 10.2 Order
 
 | Slice  | Content                                                                                                | Depends on                   |

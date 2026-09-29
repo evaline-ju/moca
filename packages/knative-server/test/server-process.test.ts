@@ -29,6 +29,16 @@ describe('readTenancy', () => {
     expect(() => readTenancy({ MOCA_TENANCY: 'Multi' })).toThrow(/MOCA_TENANCY/);
     expect(() => readTenancy({ MOCA_TENANCY: '' })).toThrow(/MOCA_TENANCY/);
   });
+
+  it('refuses a misspelled variable name rather than reading it as unset (PR #350 review)', () => {
+    for (const name of ['MOCA_TENANCY_MODE', 'moca_tenancy', 'MOCATENANCY', 'MOCA_TENANCE']) {
+      expect(() => readTenancy({ [name]: 'multi' }), name).toThrow(
+        new RegExp(`unrecognised variable ${name}`),
+      );
+    }
+    // The real name alongside an unrelated MOCA_ setting is fine.
+    expect(readTenancy({ MOCA_TENANCY: 'multi', MOCA_RELAY_EXEC_TOKEN: 'x' })).toBe('multi');
+  });
 });
 
 describe('prepareServerProcess', () => {
