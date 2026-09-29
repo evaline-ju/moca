@@ -46,8 +46,7 @@ claim. Owning a workload says nothing about owning the volume it names. So a `cl
 (`400 claim_name_not_allowed`) from any authenticated caller, which under `SH_REQUIRE_AUTH=true` is
 every caller, and always under `MOCA_TENANCY=multi`; such a workload can use only the volume Context
 Service provisions for it. Only the anonymous caller of a deployment with authentication off, which
-tells no callers apart, may still name a claim. Scoping claims per subject is deferred (MI1 spec
-§4.3, §13).
+tells no callers apart, may still name a claim. Scoping claims per subject is deferred (MI1 spec §4.3, §13; rossoctl/moca#358).
 
 **Do not expose `/workloads` to mutually untrusted clients unless `SH_REQUIRE_AUTH=true`.** With it
 off, every caller without a token is the same principal, and may use any PVC in the namespace.
