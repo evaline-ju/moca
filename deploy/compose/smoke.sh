@@ -193,45 +193,52 @@ CRED_BODY="$(SMOKE_TOKEN="$INFERENCE_TOKEN" jq -nc --arg ep "$ENDPOINT" --arg ho
   '{kind: "bearer", consumer: "inference", destination: {hosts: [$host]}, endpoint: $ep, secret: {token: env.SMOKE_TOKEN}}')"
 PUT_STATUS="$(curl -s -o "$PROJ/put.json" -w '%{http_code}' -X PUT -H @"$API_HDR" -H 'Content-Type: application/json' \
   --data-binary @- "$CP/v1/credentials/smoke-inference" <<<"$CRED_BODY" || true)"
-SESSION="$(curl -s -X POST -H @"$API_HDR" -H 'Content-Type: application/json' -d '{}' "$CP/v1/sessions" || true)"
-SID="$(jq -r '.sessionId // empty' <<<"$SESSION" 2>/dev/null || true)"
-(
-  umask 077
-  printf 'Authorization: Bearer %s\n' "$(jq -r '.token // empty' <<<"$SESSION" 2>/dev/null || true)" >"$TURN_HDR"
-)
+# One authenticated turn: a new session on the stored credential, its session token, and an SSE
+# /v1/turn with it. The turn only succeeds if the exchange DECRYPTS the credential and the gateway
+# accepts it -- which is what makes it, unlike `GET /v1/credentials` (list never decrypts), proof
+# that the stored secret is intact.
+authed_turn() {
+  local tag="$1" session sid done_sid sse="$PROJ/turn-$1.sse"
+  session="$(curl -s -X POST -H @"$API_HDR" -H 'Content-Type: application/json' -d '{}' "$CP/v1/sessions" || true)"
+  sid="$(jq -r '.sessionId // empty' <<<"$session" 2>/dev/null || true)"
+  if [[ -z "$sid" ]]; then
+    ko "POST /v1/sessions returned no session: ${session:0:300}"
+    return
+  fi
+  (
+    umask 077
+    printf 'Authorization: Bearer %s\n' "$(jq -r '.token // empty' <<<"$session" 2>/dev/null || true)" >"$TURN_HDR"
+  )
+  curl -sN --max-time 180 -H @"$TURN_HDR" -H 'Accept: text/event-stream' -H 'Content-Type: application/json' \
+    -D "$PROJ/turn-$tag.headers" -d "$(jq -nc --arg s "$sid" '{sessionId: $s, prompt: "Reply with exactly the word: pong"}')" \
+    "http://127.0.0.1:$SH_PORT/v1/turn" >"$sse" || true
+  done_sid="$(sed -n 's/^data: //p' "$sse" | jq -r 'select(.type == "done") | .sessionId' 2>/dev/null | head -1)"
+  if ! grep -qi '^content-type: text/event-stream' "$PROJ/turn-$tag.headers"; then
+    ko "not an SSE response: $(head -c 400 "$sse")"
+  elif grep -q '^event: text' "$sse" && [[ "$done_sid" == "$sid" ]]; then
+    ok "session $sid streamed $(grep -c '^event: text' "$sse") text frame(s) and a done frame"
+  else
+    ko "expected text frames and a done frame for $sid: $(head -c 600 "$sse")"
+  fi
+}
+
 if [[ -z "$INFERENCE_TOKEN" ]]; then
   ko "no ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY to store as the caller's credential"
 elif [[ "$PUT_STATUS" != 2* ]]; then
   ko "PUT /v1/credentials/smoke-inference answered $PUT_STATUS: $(head -c 300 "$PROJ/put.json")"
-elif [[ -z "$SID" ]]; then
-  ko "POST /v1/sessions returned no session: ${SESSION:0:300}"
 else
-  SSE="$PROJ/turn.sse"
-  curl -sN --max-time 180 -H @"$TURN_HDR" -H 'Accept: text/event-stream' -H 'Content-Type: application/json' \
-    -D "$PROJ/turn.headers" -d "$(jq -nc --arg s "$SID" '{sessionId: $s, prompt: "Reply with exactly the word: pong"}')" \
-    "http://127.0.0.1:$SH_PORT/v1/turn" >"$SSE" || true
-  DONE_SID="$(sed -n 's/^data: //p' "$SSE" | jq -r 'select(.type == "done") | .sessionId' 2>/dev/null | head -1)"
-  if ! grep -qi '^content-type: text/event-stream' "$PROJ/turn.headers"; then
-    ko "not an SSE response: $(head -c 400 "$SSE")"
-  elif grep -q '^event: text' "$SSE" && [[ "$DONE_SID" == "$SID" ]]; then
-    ok "session $SID streamed $(grep -c '^event: text' "$SSE") text frame(s) and a done frame"
-  else
-    ko "expected text frames and a done frame for $SID: $(head -c 600 "$SSE")"
-  fi
+  authed_turn before
 fi
 
-claim 7 "a stored credential survives docker compose down && up"
+claim 7 "a stored credential survives docker compose down && up, and still DECRYPTS for a turn"
+# Redis has no volume, so every session is gone after the restart; the credential, on its own
+# volume, is not. The api token still verifies: the signing key lives in .env.
 dc down >/dev/null 2>&1
 dc up -d >/dev/null 2>&1
-if wait_for 90 cp_ready; then
-  LISTED="$(curl -s -H @"$API_HDR" "$CP/v1/credentials" | jq -r '[.credentials[]?.name] | join(",")' 2>/dev/null || true)"
-  if [[ ",$LISTED," == *,smoke-inference,* ]]; then
-    ok "listed after restart: $LISTED"
-  else
-    ko "smoke-inference is gone after down && up (listed: '$LISTED')"
-  fi
+if wait_for 90 cp_ready && wait_for 120 metrics && wait_for 90 sandbox_attached; then
+  authed_turn after
 else
-  ko "control plane did not come back after down && up"
+  ko "the stack did not come back after down && up"
 fi
 
 printf '\n=== Results: %s passed, %s failed ===\n' "$PASS" "$FAIL"

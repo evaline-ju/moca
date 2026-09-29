@@ -248,6 +248,18 @@ pass "no docker on PATH: refuses before writing anything"
 MU1_KEYS='SH_SESSION_TOKEN_PRIVATE_KEY SH_SESSION_TOKEN_PUBLIC_KEYS SH_CREDENTIAL_KEK SH_EXCHANGE_TOKEN'
 genkeys_runs() { grep -c '^docker run .*genkeys\.ts' "$MOCK_LOG" || true; }
 
+# Without a control plane nothing is generated: no generator run, no MU1 key in .env.
+export SH_COMPOSE_DIR="$TMP/eight-none"
+run_install || fail "install without a client id exited non-zero"
+[[ "$(genkeys_runs)" == 0 ]] || fail "an install with no control plane ran the key generator"
+if grep -qE '^SH_(SESSION_TOKEN|CREDENTIAL_KEK|EXCHANGE_TOKEN)' "$SH_COMPOSE_DIR/.env"; then
+  fail "an install with no control plane wrote MU1 secrets"
+fi
+pass "no control plane: the key generator never runs"
+
+# Every case below wants the control plane.
+export SH_GITHUB_CLIENT_ID=Iv1.fabricated
+
 export SH_COMPOSE_DIR="$TMP/eight"
 run_install || fail "fresh install exited non-zero"
 ENV8="$SH_COMPOSE_DIR/.env"
@@ -311,6 +323,8 @@ grep -qE '^docker run .* dev\.local/harness:test node ' "$MOCK_LOG" ||
   fail "SH_HARNESS_IMAGE did not reach the key generator: $(grep '^docker run' "$MOCK_LOG")"
 pass "SH_HARNESS_IMAGE picks the key generator's image"
 
+unset SH_GITHUB_CLIENT_ID
+
 # --- 9. SH_GITHUB_CLIENT_ID turns the control plane on ---------------------------------------------
 export SH_COMPOSE_DIR="$TMP/nine"
 run_install >"$TMP/out" || fail "install without a client id exited non-zero"
@@ -331,21 +345,42 @@ pass "SH_GITHUB_CLIENT_ID records the client id and turns on the control-plane p
 export SH_COMPOSE_DIR="$TMP/nine-own"
 mkdir -p "$SH_COMPOSE_DIR"
 printf 'SH_RELAY_TOKEN=t\nSH_TURNS_PER_WORKER=4\nCOMPOSE_PROFILES=mine\n' >"$SH_COMPOSE_DIR/.env"
-SH_GITHUB_CLIENT_ID=Iv1.fabricated run_install >/dev/null || fail "install exited non-zero"
+SH_GITHUB_CLIENT_ID=Iv1.fabricated run_install >"$TMP/out" || fail "install exited non-zero"
 [[ "$(env_value COMPOSE_PROFILES "$SH_COMPOSE_DIR/.env")" == mine ]] ||
   fail "an operator's own COMPOSE_PROFILES line was rewritten"
-pass "an operator's own COMPOSE_PROFILES is left alone"
+grep -q 'WARNING: .*without control-plane' "$TMP/out" || fail "a profile line without control-plane must be warned about"
+if grep -q '^==> control plane:' "$TMP/out"; then fail "the closing message claims a control plane the profile never starts"; fi
+[[ "$(genkeys_runs)" == 0 ]] || fail "keys were generated for a control plane that will not run"
+pass "an operator's own COMPOSE_PROFILES is left alone, warned about, and not claimed as running"
+
+# A line that does list control-plane, among others, runs it -- and the message uses .env's ports.
+printf 'SH_RELAY_TOKEN=t\nSH_TURNS_PER_WORKER=4\nCOMPOSE_PROFILES=mine, control-plane\nSH_PORT=18080\nSH_CP_PORT=18090\n' \
+  >"$SH_COMPOSE_DIR/.env"
+SH_GITHUB_CLIENT_ID=Iv1.fabricated run_install >"$TMP/out" || fail "install exited non-zero"
+grep -q '^==> control plane: http://127.0.0.1:18090 ' "$TMP/out" ||
+  fail "the closing message ignores SH_CP_PORT: $(grep '^==> control plane' "$TMP/out")"
+grep -q 'Supervisor: http://127.0.0.1:18080 ' "$TMP/out" || fail "the closing message ignores SH_PORT"
+[[ "$(genkeys_runs)" == 1 ]] || fail "a profile line listing control-plane must get its keys generated"
+pass "a COMPOSE_PROFILES list including control-plane runs it, and the message prints the real ports"
 
 # The fallback is opt-in: a fresh .env carries it commented out, never on.
 if grep -qE '^SH_ALLOW_OPERATOR_FALLBACK=' "$TMP/nine/.env"; then fail "install turned the operator-key fallback on"; fi
 grep -qE '^#SH_ALLOW_OPERATOR_FALLBACK=true$' "$TMP/nine/.env" || fail "a fresh .env should show how to opt in to the fallback"
 pass "the operator-key fallback stays off, documented in .env"
 
-# --- 10. only docker-compose, no docker CLI: the generator cannot run, so refuse before up ---------
+# --- 10. only docker-compose, no docker CLI ------------------------------------------------------
+# Without a control plane that machine installs as it always did; with one, the key generator cannot
+# run, so it refuses before starting anything.
 export SH_COMPOSE_DIR="$TMP/ten"
 mv "$TMP/bin/docker" "$TMP/bin/docker.off"
-if run_install 2>"$TMP/err"; then fail "install succeeded with no docker CLI to generate keys"; fi
+run_install || fail "a docker-compose-only machine with no control plane must still install"
+grep -qE "^docker-compose up -d \[cwd=$SH_COMPOSE_DIR\]$" "$MOCK_LOG" ||
+  fail "expected docker-compose up: $(grep -E '^docker' "$MOCK_LOG")"
+export SH_COMPOSE_DIR="$TMP/ten-cp"
+if SH_GITHUB_CLIENT_ID=Iv1.fabricated run_install 2>"$TMP/err"; then
+  fail "install succeeded with a control plane and no docker CLI to generate its keys"
+fi
 grep -q 'docker CLI' "$TMP/err" || fail "the refusal must say the docker CLI is needed: $(cat "$TMP/err")"
 if grep -q ' up ' "$MOCK_LOG"; then fail "containers were started with no keys generated"; fi
 mv "$TMP/bin/docker.off" "$TMP/bin/docker"
-pass "without a docker CLI for the key generator, refuses before starting anything"
+pass "docker-compose only: installs without a control plane, refuses one it cannot generate keys for"

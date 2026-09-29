@@ -1,7 +1,7 @@
 #!/bin/sh
 # Dev-machine trial bootstrap (#342): fetches deploy/compose/docker-compose.yml, writes a .env
-# next to it (generating SH_RELAY_TOKEN when none is supplied, and the MU1 control plane's secrets,
-# #348) and runs `docker compose up -d`.
+# next to it (generating SH_RELAY_TOKEN when none is supplied, and -- when SH_GITHUB_CLIENT_ID turns
+# the MU1 control plane on -- its secrets, #348) and runs `docker compose up -d`.
 #
 #   curl -fsSL https://raw.githubusercontent.com/rossoctl/serverless-harness/main/deploy/compose/install.sh | sh
 #
@@ -219,8 +219,9 @@ ensure_mu1_secrets() {
 }
 
 # The control plane needs a GitHub OAuth app (device flow ENABLED -- it is off by default) for login.
-# Given one, record it and turn on the control-plane profile; an existing COMPOSE_PROFILES line is the
-# operator's and is left alone.
+# Given one, record it and turn on the control-plane profile. An existing COMPOSE_PROFILES line is the
+# operator's and is left alone, so CONTROL_PLANE is set from what that line ENABLES, not from the
+# client id alone: the closing message and the key generation both follow it.
 ensure_control_plane_profile() {
   env_file="$SH_COMPOSE_DIR/.env"
   if [ -n "${SH_GITHUB_CLIENT_ID:-}" ] && [ -z "$(env_file_value SH_GITHUB_CLIENT_ID "$env_file")" ]; then
@@ -229,11 +230,26 @@ ensure_control_plane_profile() {
   fi
   CONTROL_PLANE=''
   [ -n "$(env_file_value SH_GITHUB_CLIENT_ID "$env_file")" ] || return 0
-  CONTROL_PLANE=1
   if ! grep -Eq '^COMPOSE_PROFILES=' "$env_file"; then
     log "enabling the control-plane profile in $env_file"
     append_env COMPOSE_PROFILES control-plane
   fi
+  # Comma-separated, as Compose reads it; spaces around entries are tolerated.
+  case ",$(env_file_value COMPOSE_PROFILES "$env_file" | tr -d ' ')," in
+  *,control-plane,*) CONTROL_PLANE=1 ;;
+  *)
+    log "WARNING: $env_file sets COMPOSE_PROFILES without control-plane, so the control plane will" \
+      "not run. Add control-plane to that line and re-run install.sh to enable it."
+    ;;
+  esac
+}
+
+# A port as compose will publish it: the caller's environment wins over .env, as it does for compose.
+published_port() {
+  eval "from_env=\${$1:-}"
+  # shellcheck disable=SC2154 # assigned by the eval above
+  port="${from_env:-$(env_file_value "$1" "$SH_COMPOSE_DIR/.env")}"
+  printf '%s' "${port:-$2}"
 }
 
 main() {
@@ -242,16 +258,21 @@ main() {
   write_env_file
   require_relay_token
   ensure_exec_token
-  ensure_mu1_secrets
   ensure_control_plane_profile
+  # Only a control plane needs the MU1 secrets, and generating them needs the docker CLI and a harness
+  # image that ships the generator. A stack without the profile needs neither; a later re-run with a
+  # client id fills them in.
+  [ -z "$CONTROL_PLANE" ] || ensure_mu1_secrets
   log "starting the stack ($COMPOSE up -d)"
   # Compose reads .env from the project directory, so the token reaches the containers from that
   # file and never from this command line.
   cd "$SH_COMPOSE_DIR"
   $COMPOSE up -d
-  log "done. Supervisor: http://127.0.0.1:8080  (logs: cd $SH_COMPOSE_DIR && $COMPOSE logs -f)"
+  sh_port="$(published_port SH_PORT 8080)"
+  log "done. Supervisor: http://127.0.0.1:$sh_port  (logs: cd $SH_COMPOSE_DIR && $COMPOSE logs -f)"
   if [ -n "$CONTROL_PLANE" ]; then
-    log "control plane: http://127.0.0.1:8090  (mocactl --control-plane-url http://127.0.0.1:8090 login)"
+    cp_url="http://127.0.0.1:$(published_port SH_CP_PORT 8090)"
+    log "control plane: $cp_url  (mocactl --control-plane-url $cp_url login)"
   else
     log "no control plane (mocactl needs one): re-run with SH_GITHUB_CLIENT_ID set to a GitHub OAuth" \
       "app's client id, device flow enabled"

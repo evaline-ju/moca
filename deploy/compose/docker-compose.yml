@@ -94,7 +94,9 @@ services:
       # control plane's PUBLIC keys and swaps them for the caller's credential over the exchange hop.
       # A present-but-invalid token is refused even with SH_REQUIRE_AUTH=false (turn-auth.ts), so
       # these must match the control plane's, which install.sh guarantees by generating both halves
-      # together. Passed only when .env sets them: without the control-plane profile they are inert.
+      # together (only once the control plane is enabled). The keyset and exchange token pass
+      # through only when .env sets them; SH_CONTROL_PLANE_URL is always the service address.
+      # Without the control-plane profile all of it is inert: nothing can mint a token.
       SH_SESSION_TOKEN_PUBLIC_KEYS:
       SH_CONTROL_PLANE_URL: http://control-plane:8080
       SH_EXCHANGE_TOKEN:
