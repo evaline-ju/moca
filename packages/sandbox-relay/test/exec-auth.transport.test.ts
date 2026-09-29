@@ -7,6 +7,8 @@ import {
   type Client,
   type ClientDuplexStream,
 } from '@grpc/grpc-js';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   SandboxExecClient,
@@ -23,11 +25,18 @@ afterEach(async () => {
   for (const c of closers.splice(0)) await c();
 });
 
+// The REAL validator, so the guards below exercise the comparison and not a stub of it.
+// 'wrong-token' is the same length as 'right-token', so it reaches timingSafeEqual.
 const deps = {
   records,
   validateToken: () => true,
-  validateExecToken: (p: string | undefined) => p === 'right-token', // notsecret
+  validateExecToken: makeExecTokenValidator({ MOCA_RELAY_EXEC_TOKEN: 'right-token' }), // notsecret
 };
+
+// What an authorized Exec with no worker attached ends with: a routing failure, not an auth one.
+// Matching the detail (not just "not UNAUTHENTICATED") rules out UNIMPLEMENTED -- a relay with no
+// exec service registered at all.
+const NO_WORKER = /no live worker for sandbox/;
 
 async function bindOne(): Promise<string> {
   const { server } = buildServer(deps);
@@ -41,6 +50,10 @@ async function bindOne(): Promise<string> {
 }
 
 function execCode(addr: string, token?: string): Promise<number> {
+  return execResult(addr, token).then((r) => r.code);
+}
+
+function execResult(addr: string, token?: string): Promise<{ code: number; details: string }> {
   const client = new SandboxExecClient(addr, credentials.createInsecure());
   const md = new Metadata();
   if (token) md.set('authorization', `Bearer ${token}`);
@@ -58,11 +71,13 @@ function execCode(addr: string, token?: string): Promise<number> {
     },
     md,
   );
-  return new Promise((resolve) => {
+  return new Promise<{ code: number; details: string }>((resolve) => {
     call.on('data', () => {});
-    call.on('error', (err: { code: number }) => resolve(err.code));
-    call.on('end', () => resolve(status.OK));
-  }).finally(() => client.close()) as Promise<number>;
+    call.on('error', (err: { code: number; details: string }) =>
+      resolve({ code: err.code, details: err.details }),
+    );
+    call.on('end', () => resolve({ code: status.OK, details: '' }));
+  }).finally(() => client.close());
 }
 
 function abortCode(addr: string, token?: string): Promise<number> {
@@ -121,13 +136,24 @@ describe('SandboxExec requires the worker credential (MI1 R5)', () => {
   });
 
   it('admits the right token (then fails for the ordinary reason: no worker attached)', async () => {
-    const code = await execCode(await bindOne(), 'right-token');
-    expect(code).not.toBe(status.UNAUTHENTICATED);
-    expect(code).not.toBe(status.OK);
+    const r = await execResult(await bindOne(), 'right-token');
+    expect(r.code).not.toBe(status.UNAUTHENTICATED);
+    expect(r.details).toMatch(NO_WORKER);
   });
 
   it('refuses an Abort with no token', async () => {
     expect(await abortCode(await bindOne())).toBe(status.UNAUTHENTICATED);
+  });
+
+  it('refuses an Abort with a wrong token, of equal and of differing length', async () => {
+    const addr = await bindOne();
+    expect(await abortCode(addr, 'wrong-token')).toBe(status.UNAUTHENTICATED);
+    expect(await abortCode(addr, 'right-token-2')).toBe(status.UNAUTHENTICATED);
+  });
+
+  it('admits an Abort with the right token', async () => {
+    // Positive control: a relay that refused every Abort would pass the two tests above.
+    expect(await abortCode(await bindOne(), 'right-token')).toBe(status.OK);
   });
 });
 
@@ -173,11 +199,13 @@ describe('makeExecTokenValidator', () => {
   it('builds when the exec token is distinct from every sandbox token', () => {
     const v = makeExecTokenValidator({
       MOCA_RELAY_EXEC_TOKEN: 'exec-only', // notsecret
-      SH_RELAY_TOKEN: 'sandbox-global', // notsecret
+      // The same length as the exec token, so refusing it takes the comparison, not the length check.
+      SH_RELAY_TOKEN: 'sandbox-9', // notsecret
       SH_RELAY_TOKEN_sbx1: 'sandbox-one', // notsecret
     });
     expect(v('exec-only')).toBe(true);
-    expect(v('sandbox-global')).toBe(false);
+    expect(v('sandbox-9')).toBe(false);
+    expect(v('sandbox-one')).toBe(false);
   });
 
   it('accepts exactly the configured token', () => {
@@ -195,9 +223,8 @@ describe('startRelay with MOCA_RELAY_EXEC_ADDR serves the two services apart', (
     closers.push(relay.shutdown);
     expect(relay.execPort).toBeGreaterThan(0);
     expect(await execCode(`127.0.0.1:${relay.port}`, 'right-token')).toBe(status.UNIMPLEMENTED);
-    const execOnExecPort = await execCode(`127.0.0.1:${relay.execPort}`, 'right-token');
-    expect(execOnExecPort).not.toBe(status.UNIMPLEMENTED);
-    expect(execOnExecPort).not.toBe(status.UNAUTHENTICATED);
+    const execOnExecPort = await execResult(`127.0.0.1:${relay.execPort}`, 'right-token');
+    expect(execOnExecPort.details).toMatch(NO_WORKER);
     expect(await attachCode(`127.0.0.1:${relay.execPort}`)).toBe(status.UNIMPLEMENTED);
   });
 
@@ -213,4 +240,27 @@ describe('startRelay with MOCA_RELAY_EXEC_ADDR serves the two services apart', (
       /MOCA_RELAY_EXEC_TOKEN/,
     );
   });
+});
+
+describe('the relay bootstrap', () => {
+  const MAIN = fileURLToPath(new URL('../src/main.ts', import.meta.url));
+  const TSX = fileURLToPath(new URL('../node_modules/.bin/tsx', import.meta.url));
+
+  it('turns a boot refusal into a one-line error and exit 1, not an unhandled rejection', () => {
+    const r = spawnSync(TSX, [MAIN], {
+      encoding: 'utf8',
+      timeout: 20_000,
+      env: {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        SH_RELAY_TOKEN: 't',
+        SH_RELAY_PORT: '0',
+      },
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(
+      /^sandbox-relay: refusing to start: MOCA_RELAY_EXEC_TOKEN is required/m,
+    );
+    expect(r.stderr).not.toMatch(/\n\s+at /); // no stack trace
+  }, 30_000);
 });

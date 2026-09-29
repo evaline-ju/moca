@@ -414,8 +414,10 @@ fi
 # does not use a kustomize secretGenerator, which would clobber it on every apply.
 gen_relay_token() {
   local t
-  t="$(openssl rand -hex 16 2>/dev/null || true)"
-  [ -n "$t" ] || t="$(head -c 16 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' || true)"
+  # 32 random bytes / 64 hex chars, the same strength as every other path that mints one
+  # (setup-vm.sh, compose install.sh, deploy-incluster.sh) and as the MI1 spec states.
+  t="$(openssl rand -hex 32 2>/dev/null || true)"
+  [ -n "$t" ] || t="$(head -c 32 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' || true)"
   [ -n "$t" ] || die "could not generate a relay token (no openssl, and /dev/urandom is not readable). Set SH_RELAY_TOKEN to supply one."
   printf '%s' "$t"
 }

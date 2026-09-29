@@ -319,9 +319,18 @@ export async function startRelay(
 
 // Bootstrap when run directly (tsx entrypoint), not when imported by tests.
 if (import.meta.url === `file://${process.argv[1]}`) {
-  startRelay().then(({ port, execPort }) =>
-    console.log(
-      `sandbox-relay attach :${port}${execPort ? `, exec :${execPort}` : ' (exec on the same listener)'}`,
-    ),
+  startRelay().then(
+    ({ port, execPort }) =>
+      console.log(
+        `sandbox-relay attach :${port}${execPort ? `, exec :${execPort}` : ' (exec on the same listener)'}`,
+      ),
+    // Every boot refusal (a missing or clashing exec token, an unbindable address) lands here. Left
+    // unhandled it would print a raw stack; the operator needs the reason, on one line.
+    (err: unknown) => {
+      console.error(
+        `sandbox-relay: refusing to start: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      process.exit(1);
+    },
   );
 }
