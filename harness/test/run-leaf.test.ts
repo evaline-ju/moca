@@ -414,7 +414,7 @@ describe('realProduceVerdict transport wiring (Task 9)', () => {
   });
 });
 
-describe('realProduceSolve / realProduceVerdict: server-mode sandbox gate (MI1 R3 fix round 1)', () => {
+describe('realProduceSolve / realProduceVerdict: a lease without a sandbox config (MI1 R3, defense in depth)', () => {
   // A truthy lease with a falsy `config` cannot happen via the real selectPoolSandbox
   // (SelectedSandbox's `config` is a non-optional K8sSandboxConfig) — see select-sandbox.test.ts's
   // assertServerSandbox unit tests for the exhaustive truth table. This mocked shape exists only to
@@ -472,6 +472,55 @@ describe('realProduceSolve / realProduceVerdict: server-mode sandbox gate (MI1 R
     // those still sit downstream of the guard, so asserting they never ran is exactly what proves
     // the guard fired before either could be reached.
     expect(lease.release).toHaveBeenCalled();
+    expect(createAgentSessionMock).not.toHaveBeenCalled();
+    expect(k8sSandboxExtensionMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('realProduceSolve / realProduceVerdict: no resolvable sandbox in server mode (MI1 R3)', () => {
+  // The reachable shape: selectPoolSandbox resolves to null when no sandbox is configured at all.
+  it('realProduceVerdict: refuses with SandboxRequiredError and never builds an agent session', async () => {
+    selectPoolSandboxMock.mockReset().mockResolvedValue(null);
+    createAgentSessionMock.mockClear();
+    k8sSandboxExtensionMock.mockClear();
+
+    const item = { item_id: 'i1', file: 'f', pattern: 'p' };
+    const env: LeafEnvelope = { sessionId: 'run/verdict-none', item };
+
+    const err = await realProduceVerdict(item, env, { serverMode: true }, {}).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(SandboxRequiredError);
+    // No agent session means no tool of any kind -- local or sandboxed -- was registered.
+    expect(createAgentSessionMock).not.toHaveBeenCalled();
+    expect(k8sSandboxExtensionMock).not.toHaveBeenCalled();
+  });
+
+  it('realProduceVerdict: outside server mode the same null sandbox still runs the leaf (control)', async () => {
+    selectPoolSandboxMock.mockReset().mockResolvedValue(null);
+    createAgentSessionMock.mockClear();
+
+    const item = { item_id: 'i1', file: 'f', pattern: 'p' };
+    const env: LeafEnvelope = { sessionId: 'run/verdict-none-local', item };
+
+    await realProduceVerdict(item, env, {}, {}).catch(() => {});
+    expect(createAgentSessionMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('realProduceSolve: refuses a null sandbox and never builds an agent session', async () => {
+    selectPoolSandboxMock.mockReset().mockResolvedValue(null);
+    createAgentSessionMock.mockClear();
+    k8sSandboxExtensionMock.mockClear();
+
+    const env: LeafEnvelope = {
+      sessionId: 'run/solve-none',
+      item: { item_id: 'i1', file: 'f', pattern: 'p' },
+    };
+
+    // A solve leaf needs a sandbox worktree in every mode, so it refuses a null sandbox before the
+    // server-mode gate is reached.
+    const err = await realProduceSolve(env, { serverMode: true }, {}).catch((e: unknown) => e);
+    expect((err as Error).message).toMatch(/solve leaf requires a configured sandbox pool/);
     expect(createAgentSessionMock).not.toHaveBeenCalled();
     expect(k8sSandboxExtensionMock).not.toHaveBeenCalled();
   });
