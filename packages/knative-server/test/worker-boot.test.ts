@@ -32,9 +32,15 @@ describe('every server entry point runs the same boot function (MI1 R2)', () => 
     });
     let stderr = '';
     child.stderr!.on('data', (d: Buffer) => (stderr += d.toString()));
-    const status = await new Promise<number | null>((resolve) => {
+    // 'close', not 'exit': only 'close' guarantees the piped stderr has been drained. An 'error'
+    // (tsx missing, spawn refused) rejects instead of waiting out the timer.
+    const status = await new Promise<number | null>((resolve, reject) => {
       const timer = setTimeout(() => child.kill('SIGKILL'), 20_000);
-      child.on('exit', (code) => {
+      child.once('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+      child.once('close', (code) => {
         clearTimeout(timer);
         resolve(code);
       });
@@ -43,9 +49,12 @@ describe('every server entry point runs the same boot function (MI1 R2)', () => 
     expect(status).toBe(2);
   }, 30_000);
   it('the async-run job calls prepareServerProcess before it touches the queue', () => {
-    const boot = leafJobSrc.indexOf('prepareServerProcess(process.env)');
+    // The anchored match, as above: a comment naming the call must not satisfy the ordering either.
+    const boot = BOOT_CALL.exec(leafJobSrc)?.index ?? -1;
+    const queue = leafJobSrc.indexOf('new RedisWorkQueue(');
     expect(boot).toBeGreaterThan(-1);
-    expect(boot).toBeLessThan(leafJobSrc.indexOf('new RedisWorkQueue('));
+    expect(queue).toBeGreaterThan(-1);
+    expect(boot).toBeLessThan(queue);
   });
   it('no entry point calls assertKeysetUsable directly any more', () => {
     expect(src).not.toMatch(/^\s*assertKeysetUsable\(/m);
