@@ -829,6 +829,9 @@ prediction sealed before E8's next rung, since it sits on the hot path.
 - **Tenant-scoped session listing.** `RedisSessionBackend.list()`
   (`packages/session-backend/src/redis-backend.ts`) returns every tenant's sessions. No route
   exposes it to a caller today, but no caller-facing use may be added before S2 scopes it.
+- **An atomic workload create.** `POST /workloads` checks for another subject's live workload, then
+  creates. Two subjects creating one new name concurrently can both succeed, and the later write's
+  owner wins. Closing it needs a set-if-absent owner reservation before Context Service is called.
 - **Per-subject PVC authorization and subject-scoped workload names** for `/workloads`. Under `multi`
   and from any authenticated caller, a caller-named `workspace.claimName` is refused instead (§4.3). `docs/context-service.md` states the
   boundary.

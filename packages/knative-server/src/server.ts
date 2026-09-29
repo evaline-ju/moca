@@ -445,9 +445,11 @@ function contextServiceFailure(operation: string, err: unknown, res: ServerRespo
 }
 
 /**
- * A workload belongs to the subject that created it. A caller may reach one only with the same
- * subject — an unowned workload (created unauthenticated) only without one. A mismatch reads as
- * `workload_not_found`, so a workload ID is not an existence oracle across subjects.
+ * A workload belongs to the subject that created it. A caller may read or run on one only with the
+ * same subject — an unowned workload (created unauthenticated) only without one. A mismatch reads as
+ * `workload_not_found` there. Names are still one namespace, though: re-creating another subject's
+ * live name answers `409`, and deleting an unowned one answers `204`, so a name's existence is
+ * probeable — only its contents and its pool are not.
  */
 const ownedBy = (record: WorkloadRecord, subject: string | null): boolean =>
   (record.owner ?? null) === subject;
@@ -536,7 +538,10 @@ async function handleCreateWorkload(req: IncomingMessage, res: ServerResponse): 
     res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'claim_name_not_allowed' }));
     return;
   }
-  // A live workload of another subject's cannot be claimed by re-creating its name.
+  // A live workload of another subject's cannot be claimed by re-creating its name. Check-then-act:
+  // two subjects creating one NEW name at the same moment can both pass this, and the later
+  // saveWorkload's owner wins. Accepted for S1 -- the window is one Context Service round trip, and
+  // the store offers no set-if-absent -- and recorded in MI1 §13.
   const existing = await findWorkload(workloadId);
   if (existing && existing.status !== 'deleted' && !ownedBy(existing, subject)) {
     res.writeHead(409, JSON_HEADERS).end(JSON.stringify({ error: 'workload_name_taken' }));
