@@ -398,8 +398,11 @@ function synthesizeOpenAICompletionsModel(
     // Endpoint authenticates via a custom header (already in `headers`) or not at all — strip the
     // SDK's default Authorization Bearer so an unknown/empty Bearer isn't sent. pi's openai client
     // still requires a non-empty api key even when the Bearer is unused, so seed a placeholder.
+    // Read and written on process.env because that is where pi looks. The one recorded exception
+    // to R2's "the multi scrub leaves no OPENAI_API_KEY" (MI1 §5): like ANTHROPIC_API_KEY's
+    // sentinel, the value is a constant that authenticates nothing.
     headers.Authorization = null;
-    if (!env.OPENAI_API_KEY) process.env.OPENAI_API_KEY = 'unused';
+    if (!process.env.OPENAI_API_KEY) process.env.OPENAI_API_KEY = 'unused';
   }
   const model: Model<'openai-completions'> = {
     id: modelId,
@@ -502,8 +505,11 @@ export function applyModelGateway<M extends { headers?: Record<string, unknown> 
   // litellm compat-flag disables) applies ONLY to the Anthropic-messages path. OpenAI-compatible
   // models carry their own baseUrl/headers/auth from synthesizeOpenAICompletionsModel — leave
   // them untouched (else we'd clobber baseUrl with ANTHROPIC_BASE_URL and inject a wrong Bearer).
-  const api = (baseModel as { api?: string }).api;
-  if (api && api !== 'anthropic-messages') {
+  // An absent `api` IS the Anthropic path: pi's own Anthropic models and this file's synthesized
+  // one both carry 'anthropic-messages', and the fixtures and callers that omit the field mean it.
+  // Anything else -- including an empty string -- is some other wire protocol.
+  const api = (baseModel as { api?: string }).api ?? 'anthropic-messages';
+  if (api !== 'anthropic-messages') {
     // A caller's own credential can only be applied on this path. Returning the model unchanged
     // would discard it silently and send the turn on the shared operator credential instead --
     // spending one principal's turn on another's key (MI1 §5 R2). Fail the turn rather than that.

@@ -164,6 +164,24 @@ describe('applyModelGateway', () => {
     });
   });
 
+  describe('which models carry a caller credential (PR #350 review)', () => {
+    const caller = { upstreamCredential: { mode: 'direct' as const, value: 'sk-caller' } }; // notsecret
+
+    it("applies it to an explicit 'anthropic-messages' model", () => {
+      const m = applyModelGateway(
+        { id: 'claude', api: 'anthropic-messages', headers: { 'x-api-key': 'orig' } } as never,
+        caller,
+      ) as any;
+      expect(m.headers.Authorization).toBe('Bearer sk-caller'); // notsecret
+      expect(m.headers['x-api-key']).toBeNull();
+    });
+
+    it('applies it to a model with no api field: absent means anthropic-messages, deliberately', () => {
+      const m = applyModelGateway(baseModel, caller) as any;
+      expect(m.headers.Authorization).toBe('Bearer sk-caller'); // notsecret
+    });
+  });
+
   describe('a non-Anthropic model (PR #350 review)', () => {
     const openaiModel = { id: 'gpt-x', api: 'openai-completions', headers: {} } as never;
 
@@ -173,6 +191,15 @@ describe('applyModelGateway', () => {
           upstreamCredential: { mode: 'direct', value: 'sk-caller' }, // notsecret
         }),
       ).toThrow(/per-caller upstream credential cannot be applied to a 'openai-completions' model/);
+    });
+
+    it('treats an empty api as non-Anthropic, not as the default', () => {
+      const blank = { id: 'x', api: '', headers: {} } as never;
+      expect(() =>
+        applyModelGateway(blank, {
+          upstreamCredential: { mode: 'direct', value: 'sk-caller' }, // notsecret
+        }),
+      ).toThrow(/cannot be applied to a '' model/);
     });
 
     it('still returns the model untouched when no caller credential is in play', () => {
