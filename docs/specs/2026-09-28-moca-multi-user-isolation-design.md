@@ -31,7 +31,9 @@ Naming: new components and settings use the **MOCA** name from day one (`moca-eg
 > because commands need the image's own `ENV`; R7 also authorizes `/runs/status` and refuses
 > asynchronous runs under `SH_REQUIRE_AUTH` until MU2; R8 keeps sandbox internet egress until S5.
 > Execution added four more: R3's refusal and R4's lockdown apply at every leaf that builds
-> tools or a loader (`/turn`, solve and verdict); R6 also excludes `RELAY_TLS` and
+> tools or a loader (`/turn` and the `prompt` leaf through `executeTurn`, the `solve` leaf's
+> `realProduceSolve`, and the default `converge` leaf's `realProduceVerdict` — every kind in
+> `run-leaf.ts`'s `'converge' | 'solve' | 'prompt'`); R6 also excludes `RELAY_TLS` and
 > `WORKER_MAX_CONCURRENT`; R7 refuses a caller-supplied `tenant` on an authenticated request
 > (`400 tenant_not_allowed`); R8's firewall unit is required by the relay and by
 > `podman-restart`, so a failed load keeps sandboxes down, and setup refuses a pre-existing
@@ -69,21 +71,26 @@ regress and keeps today's single-tenancy behaviour by default (§10); it gains n
 ## 2. Current state — verified, with citations
 
 Traced on `rossoctl/main` at `8545b5e` (harness, worker, sandbox, relay, supervisor and proto code are
-identical on this branch's base `ac0d859`). Designed-only items are marked as such.
+identical on this branch's base `ac0d859`). Line numbers are at that commit. S1 shifts some of them;
+where it restructured the cited code, the symbol and its location on this branch are given too.
+Designed-only items are marked as such.
 
 ### 2.1 Skills: the promotion pipeline
 
-| Stage                           | Mechanism today                                                                                                                                                                                                                                 | Citation                                                                                       |
-| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| Build                           | `pnpm promote` collects user/project skills, `CLAUDE.md` chain, memory, top-level commands into a canonical USTAR; digest `sha256:<hex>` over the tar minus the lockfile                                                                        | `harness/src/promote.ts:234-259`, `packages/config-bundle/src/build.ts:78-204`, `tar.ts:25-63` |
-| Store                           | One Redis string per bundle, `config:bundle:<digest>`, 30-day TTL; integrity = stored bytes hash to the requested digest                                                                                                                        | `harness/src/config-store.ts:16-20`, `:52-58`, `:86-92`                                        |
-| Selection                       | `configRef` on a `kind:"prompt"` run envelope only; `/turn` cannot carry one; nothing binds a bundle to an owner, session or subject, and the control plane has no bundle concept                                                               | `harness/src/run-leaf.ts:113-118`; `server.ts:168-181`                                         |
-| Harness side                    | Unpacked to `/tmp/sh-config/<digest>/` (skills, prompts); context kept in memory; Pi loader gets `additionalSkillPaths`, `noSkills`/`noPromptTemplates`/`noContextFiles`, `agentsFilesOverride`, `skillsOverride` (path rewrite to the sandbox) | `harness/src/config-resolver.ts:8`, `:49-84`, `:174-190`                                       |
-| Sandbox side                    | Whole bundle piped as a base64 tarball into `/workspace/.sh-config/<digest>/`, refcounted per leaf under a per-pod `flock` (#216, #225)                                                                                                         | `harness/src/config-overlay.ts:10-33`, `:84-202`                                               |
-| How the model reads skill files | Through the sandbox `read`/`bash` tools, at the rewritten path                                                                                                                                                                                  | `packages/k8s-sandbox/src/extension.ts:55`                                                     |
+| Stage                           | Mechanism today                                                                                                                                                                                                                                 | Citation                                                                                                                                                    |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Build                           | `pnpm promote` collects user/project skills, `CLAUDE.md` chain, memory, top-level commands into a canonical USTAR; digest `sha256:<hex>` over the tar minus the lockfile                                                                        | `harness/src/promote.ts:234-259`, `packages/config-bundle/src/build.ts:78-204`, `tar.ts:25-63`                                                              |
+| Store                           | One Redis string per bundle, `config:bundle:<digest>`, 30-day TTL; integrity = stored bytes hash to the requested digest                                                                                                                        | `harness/src/config-store.ts:16-20`, `:52-58`, `:86-92`                                                                                                     |
+| Selection                       | `configRef` on a `kind:"prompt"` run envelope only; `/turn` cannot carry one; nothing binds a bundle to an owner, session or subject, and the control plane has no bundle concept                                                               | `harness/src/run-leaf.ts:113-119`; `server.ts:132-140` (`handleTurn` types the body `{sessionId?, prompt?}` and destructures it; `:141-149` on this branch) |
+| Harness side                    | Unpacked to `/tmp/sh-config/<digest>/` (skills, prompts); context kept in memory; Pi loader gets `additionalSkillPaths`, `noSkills`/`noPromptTemplates`/`noContextFiles`, `agentsFilesOverride`, `skillsOverride` (path rewrite to the sandbox) | `harness/src/config-resolver.ts:8`, `:49-84`, `:174-190`                                                                                                    |
+| Sandbox side                    | Whole bundle piped as a base64 tarball into `/workspace/.sh-config/<digest>/`, refcounted per leaf under a per-pod `flock` (#216, #225)                                                                                                         | `harness/src/config-overlay.ts:10-33`, `:84-202`                                                                                                            |
+| How the model reads skill files | Through the sandbox `read`/`bash` tools, at the rewritten path                                                                                                                                                                                  | `packages/k8s-sandbox/src/extension.ts:55`                                                                                                                  |
 
 Pi already separates skills per session inside one process: the harness builds a new
-`SettingsManager`, `DefaultResourceLoader` and `AgentSession` every turn (`harness/src/run-turn.ts:710-770`),
+`SettingsManager`, `DefaultResourceLoader` and `AgentSession` every turn
+(`harness/src/run-turn.ts:711-765`: `SettingsManager.create`, `new DefaultResourceLoader`,
+`createAgentSession`; on this branch `turnLoaderInputs`, `:629-658`, builds the settings manager and
+loader options with R4's lockdown, and `executeTurn` constructs the loader and session at `:836-848`),
 and the loader keeps skills in an instance field. Pi's loader also already exposes everything §7 needs
 to load a bundle **without touching disk**: `noExtensions`, `skillsOverride`
 returning in-memory `Skill` records (name, description, `filePath`, `baseDir` — no content),
@@ -97,7 +104,7 @@ returning in-memory `Skill` records (name, description, `filePath`, `baseDir` �
   `sub tenant roles scope iat exp jti sid` (`packages/control-plane/src/token.ts:25-40`); the worker
   verifies with public keys only and requires `token.sid === body.sessionId`
   (`packages/knative-server/src/turn-auth.ts:199-236`). `tenant` is set to the subject — MU1 treats one
-  subject as one tenant (`handlers.ts:182`).
+  subject as one tenant (`handlers.ts:194`).
 - **Per-turn exchange (MU1, implemented).** The worker posts the session token to
   `/internal/credentials` with a shared `SH_EXCHANGE_TOKEN`; the control plane checks owner and
   tombstone and returns `{mode, anthropicAuthToken, anthropicBaseUrl}`
@@ -125,7 +132,7 @@ returning in-memory `Skill` records (name, description, `filePath`, `baseDir` �
   sandbox's pool labels **as the sandbox reports them** in its `Hello` (`packages/sandbox-relay/src/relay.ts:73-74`),
   so no partition keyed on those labels can be trusted. `deploy/vm` runs sandboxes under rootful podman
   with default capabilities and reaches the relay through `host-gateway` (`deploy/vm/setup-vm.sh:256-283`);
-  Redis is correctly bound to loopback (`:160`). `deploy/compose` puts every service on one network.
+  Redis is correctly bound to loopback (`:160-161`). `deploy/compose` puts every service on one network.
 - **MicroVM tier.** One Firecracker VM per `Exec`, restored from a golden snapshot in its own jailer
   chroot; pools are per workspace key (`remote-worker/internal/vmpool/runpool.go:16`,
   `pool.go:388-580`). `Exec.workspace_key` is the session id on the `/turn` path
@@ -145,7 +152,9 @@ event on a successful injection. Per-subject resolution (cortex#905) has no PRs.
 which a prompt injection can exfiltrate and replay from another user's VM on the same host. That
 finding, plus the dependency it would create on another repository's roadmap, is why §8 builds
 `moca-egress` and keeps Cortex as a later, conformance-gated replacement (D4, §14). cortex#905 has
-been rescoped accordingly.
+been rescoped accordingly. This reading holds for Cortex at `403d5d2` and no earlier; it is a dated
+capability survey, not a conformance result. Adoption (S6) re-runs §12.3's suite against the specific
+Cortex release proposed, and nothing here is inherited as a pass.
 
 ### 2.5 What this implies
 
@@ -189,7 +198,8 @@ egress socket.
 
 ### 4.2 Invariants
 
-Each is enforced at a named point and pinned by a named test (§12).
+Each is enforced at a named point and will be pinned by a named test (§12) when the slice that
+enforces it lands. What S1 already enforces is pinned by the tests in §5's "Pinned by" column.
 
 | #      | Invariant                                                                                                                                                                                                                                                          | Enforced by                                                    |
 | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------- |
@@ -211,22 +221,31 @@ Each is enforced at a named point and pinned by a named test (§12).
 | **`moca-egress`**                           | The credentials in its cache, and credentials for grants currently bound on that host. **No standing access** to the credential store: it can only redeem grants that are presented to it                                                                                                                               |
 | **The control plane**                       | Everything. It is the crown jewel, as Z1 §9 and MU1 §3.3 already record                                                                                                                                                                                                                                                 |
 
+**One gap this design does not yet close: caller-named volumes.** `POST /workloads` forwards
+`workspace.claimName` to Context Service, and neither the harness nor Context Service checks that the
+caller may use that PVC. S1 binds a workload to the subject that created it (R7), but owning the
+workload says nothing about owning the volume it names. On the Kubernetes path a user could otherwise
+create a workload over another user's claim and run on it. So under `MOCA_TENANCY=multi` a
+`claimName` is refused (`400 claim_name_not_allowed`), and a workload gets only the volume Context
+Service provisions for it. Scoping claims per subject is deferred (§13). Workload names also remain
+one namespace across subjects, first come, first served.
+
 ## 5. Slice S1 — worker and sandbox-tier hardening (prerequisites)
 
 S1 hardens the worker and sandbox tiers as they stand, independently of grants, and every later slice
 assumes it. Its requirements apply in **both** tenancy modes: each is a hardening, not a feature. This
 section states the required behaviour and the test that pins it.
 
-| #   | Requirement                                                                                                                                                                                                                                                                                                                                                                                                             | Pinned by                                                                                                                                                                                                                                                                                                                                       |
-| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| R1  | The sandbox receives an **explicit environment allowlist** (`LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`), never the worker's process environment. It is applied in `createPodBashOps`, which both the `bash` tool and the `user_bash` hook reach — no `pi-fork` change                                                                                                                                                           | a planted secret-shaped variable never appears in any `Exec.command`, through the real bash tool                                                                                                                                                                                                                                                |
-| R2  | `applyModelGateway` seeds `ANTHROPIC_API_KEY` only with the constant sentinel, never a caller's token. A shared `prepareServerProcess()` runs in `startServer()`, the P6 worker and the async-run job (`leaf-job.ts`); under `multi` it performs P5's full scrub and refuses `SH_LOCAL_TOOLS=1` and `SH_REQUIRE_AUTH` other than `true`. Under `single` an operator's own ambient key is left in place                  | a token-less call after an authenticated one sees only the sentinel; the multi scrub deletes the OAuth token, which outranks the sentinel                                                                                                                                                                                                       |
-| R3  | In server and worker mode, a turn with **no resolvable sandbox fails** rather than running tools in the worker. Local tools remain only in the CLI (`harness/src/cli.ts`), or behind an explicit `SH_LOCAL_TOOLS=1` that `multi` refuses                                                                                                                                                                                | no sandbox → the turn fails and no local tool is registered                                                                                                                                                                                                                                                                                     |
-| R4  | In server and worker mode: `noExtensions: true`, `noContextFiles: true`, `noSkills: true`, `noPromptTemplates: true`, `noThemes: true` (a promoted bundle still delivers its skills and prompt templates through its own paths), the project untrusted (`projectTrusted: false`, so no project settings, `SYSTEM.md` or `APPEND_SYSTEM.md`), and `PI_CODING_AGENT_DIR` pointed at a fresh private per-process directory | planted project `SYSTEM.md`, `APPEND_SYSTEM.md`, `AGENTS.md`, extension file, `$HOME/.agents/skills` skill and agent-directory prompt template are not loaded by the real Pi loader, and are loaded outside server mode; a promoted bundle's skills still load                                                                                  |
-| R5  | `SandboxExec` and `Abort` require a worker credential (`MOCA_RELAY_EXEC_TOKEN`), distinct from every sandbox token, on every deployment; the relay refuses to boot without it. `MOCA_RELAY_EXEC_ADDR` serves `SandboxExec` on its own listener (compose: the relay's brain-network address; `deploy/vm`: loopback)                                                                                                      | an Exec or Abort without the token is refused; on a split relay the attach listener does not serve Exec                                                                                                                                                                                                                                         |
-| R6  | `remote-worker` runs commands with an **explicit `cmd.Env`**: the container's environment minus the worker's own settings (`SANDBOX_TOKEN`, `RELAY_ADDR`, `SANDBOX_ID`, `SANDBOX_IMAGE`, `SANDBOX_TRUST`, `RELAY_TLS`, `WORKER_MAX_CONCURRENT`, `SANDBOX_TOKEN_*`, `SH_*`, `MOCA_*`)                                                                                                                                    | a grandchild of a command sees none of them, and still sees the image's own environment                                                                                                                                                                                                                                                         |
-| R7  | Under `SH_REQUIRE_AUTH=true`, `POST /runs` and `/v1/runs` require a session token naming the run's session and execute on the exchanged credential; `GET /runs/status` is authorized by session; asynchronous runs are refused (`501`) until MU2's owned runs; a caller-supplied `tenant` on an authenticated request is refused                                                                                        | no token → `401`; another session's token → `400 session_mismatch`; async → `501`; authenticated request with `tenant` → `400 tenant_not_allowed`                                                                                                                                                                                               |
-| R8  | Compose puts sandboxes on `moca-sandbox` and Redis and the supervisor on `moca-brain`, with only the relay on both. `deploy/vm` runs sandboxes on a dedicated podman network, isolated from every other podman network (`isolate=strict`), whose traffic to the host is dropped, in every address family, except the relay's attach port and DNS. Outbound internet is unchanged until S5                               | the compose topology test; the sandbox network created with `isolate=strict` and a pinned bridge name, and setup refusing a network that does not report both; the table matching that bridge, so IPv6 is dropped too; the nftables table rendered and loaded by a oneshot unit ordered before, and required by, the relay and `podman-restart` |
+| #   | Requirement                                                                                                                                                                                                                                                                                                                                                                                                             | Pinned by                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R1  | The sandbox receives an **explicit environment allowlist** (`LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`), never the worker's process environment. It is applied in `createPodBashOps`, which both the `bash` tool and the `user_bash` hook reach — no `pi-fork` change                                                                                                                                                           | a planted secret-shaped variable never appears in any `Exec.command`, through the real bash tool — `packages/k8s-sandbox/test/extension.test.ts`; the allowlist prefix built by `createPodBashOps`, `test/operations.test.ts`; the allowlist itself, `test/sandbox-env.test.ts`                                                                                                                                                                                                   |
+| R2  | `applyModelGateway` seeds `ANTHROPIC_API_KEY` only with the constant sentinel, never a caller's token. A shared `prepareServerProcess()` runs in `startServer()`, the P6 worker and the async-run job (`leaf-job.ts`); under `multi` it performs P5's full scrub and refuses `SH_LOCAL_TOOLS=1` and `SH_REQUIRE_AUTH` other than `true`. Under `single` an operator's own ambient key is left in place                  | a token-less call after an authenticated one sees only the sentinel, and a caller credential on a non-Anthropic model throws — `harness/test/model-gateway.test.ts`; the multi scrub deletes the OAuth token, which outranks the sentinel, `single` keeps an operator key, and `multi` refuses both settings — `packages/knative-server/test/server-process.test.ts`; all three entry points call `prepareServerProcess` — `test/worker-boot.test.ts`                             |
+| R3  | In server and worker mode, a turn with **no resolvable sandbox fails** rather than running tools in the worker. Local tools remain only in the CLI (`harness/src/cli.ts`), or behind an explicit `SH_LOCAL_TOOLS=1` that `multi` refuses                                                                                                                                                                                | no sandbox → the turn fails before an agent session (and so any tool) is built — `harness/test/turn-require-sandbox.test.ts`; the guard, `assertServerSandbox`, in `test/select-sandbox.test.ts`; the solve and verdict leaves in `test/run-leaf.test.ts`; every server turn marked `serverMode`, `packages/knative-server/test/server-process.test.ts`                                                                                                                           |
+| R4  | In server and worker mode: `noExtensions: true`, `noContextFiles: true`, `noSkills: true`, `noPromptTemplates: true`, `noThemes: true` (a promoted bundle still delivers its skills and prompt templates through its own paths), the project untrusted (`projectTrusted: false`, so no project settings, `SYSTEM.md` or `APPEND_SYSTEM.md`), and `PI_CODING_AGENT_DIR` pointed at a fresh private per-process directory | planted project `SYSTEM.md`, `APPEND_SYSTEM.md`, `AGENTS.md`, extension file, `$HOME/.agents/skills` skill and agent-directory prompt template are not loaded by the real Pi loader, and are loaded outside server mode; a promoted bundle's skills still load — `harness/test/loader-lockdown.test.ts`; the same options on the solve and verdict leaves, `test/run-leaf.test.ts`; the private 0700 `PI_CODING_AGENT_DIR`, `packages/knative-server/test/server-process.test.ts` |
+| R5  | `SandboxExec` and `Abort` require a worker credential (`MOCA_RELAY_EXEC_TOKEN`), distinct from every sandbox token, on every deployment; the relay refuses to boot without it. `MOCA_RELAY_EXEC_ADDR` serves `SandboxExec` on its own listener (compose: the relay's brain-network address; `deploy/vm`: loopback)                                                                                                      | an Exec or Abort without the token is refused, the relay refuses to boot without it or with one equal to a sandbox token, and on a split relay the attach listener does not serve Exec — `packages/sandbox-relay/test/exec-auth.transport.test.ts`, `test/split-listeners.transport.test.ts`; the worker sends it, `harness/test/relay-exec-client.test.ts`, `harness/test/select-sandbox.test.ts`, `remote-worker/cmd/exec-driver/drive_test.go`                                 |
+| R6  | `remote-worker` runs commands with an **explicit `cmd.Env`**: the container's environment minus the worker's own settings (`SANDBOX_TOKEN`, `RELAY_ADDR`, `SANDBOX_ID`, `SANDBOX_IMAGE`, `SANDBOX_TRUST`, `RELAY_TLS`, `WORKER_MAX_CONCURRENT`, `SANDBOX_TOKEN_*`, `SH_*`, `MOCA_*`)                                                                                                                                    | a grandchild of a command sees none of them, and still sees the image's own environment — `remote-worker/internal/exec/runner_test.go` (`TestCommandsDoNotInheritWorkerSettings`; it plants every name but `SANDBOX_IMAGE` and `SANDBOX_TRUST`)                                                                                                                                                                                                                                   |
+| R7  | Under `SH_REQUIRE_AUTH=true`, `POST /runs` and `/v1/runs` require a session token naming the run's session and execute on the exchanged credential; `GET /runs/status` is authorized by session; asynchronous runs are refused (`501`) until MU2's owned runs; a caller-supplied `tenant` on an authenticated request is refused                                                                                        | no token → `401`; another session's token → `400 session_mismatch`; async → `501`; authenticated request with `tenant` → `400 tenant_not_allowed`, on `/runs`, `/v1/runs` and `/runs/status` — `packages/knative-server/test/runs-auth-route.test.ts`, `test/turn-auth.test.ts`; `/workloads` owned by the creating subject — `test/workload-auth-route.test.ts`                                                                                                                  |
+| R8  | Compose puts sandboxes on `moca-sandbox` and Redis and the supervisor on `moca-brain`, with only the relay on both. `deploy/vm` runs sandboxes on a dedicated podman network, isolated from every other podman network (`isolate=strict`), whose traffic to the host is dropped, in every address family, except the relay's attach port and DNS. Outbound internet is unchanged until S5                               | the compose topology test — `deploy/compose/tests/compose.test.sh`; the sandbox network created with `isolate=strict` and a pinned bridge name, and setup refusing a network that does not report both or sits on another subnet; the table matching that bridge, so IPv6 is dropped too; the nftables table rendered and loaded by a oneshot unit ordered before, and required by, the relay and `podman-restart` — `deploy/vm/tests/setup-vm.test.sh`                           |
 
 R6 is honest about its limit: commands still run as the same Unix user as `remote-worker`, so its
 token remains readable through `/proc`. §9.2's per-sandbox tokens are what make that exposure cross no
@@ -325,9 +344,12 @@ within a minute. `moca-egress` caches per (sid, credential) for `min(expires_in,
 mode, `grant`: the worker sends `Authorization: Bearer <inference grant>` to `inferenceUrl`, and
 `moca-egress` swaps it (§8.6). Two existing gaps close inside this slice:
 
-- `applyModelGateway` returns early for any API other than `anthropic-messages`
-  (`run-turn.ts:495-496`), so OpenAI-compatible models would still use an ambient `OPENAI_API_KEY`. The
-  grant header must be installed for every model API the worker supports.
+- `applyModelGateway` handles only `anthropic-messages`; an absent `api` is read as that default, and
+  any other value, the empty string included, is non-Anthropic (`run-turn.ts:511-522`). A non-Anthropic
+  model is returned untouched when no caller credential is in play, so an OpenAI-compatible model still
+  uses an ambient `OPENAI_API_KEY`; with a per-caller credential present the call **throws** rather than
+  drop it for the shared operator key. S2 must install the grant header for every model API the worker
+  supports, which retires the throw.
 - The worker keeps P5's sentinel so Pi's by-provider-name existence check passes (P5 §3.3); the sentinel
   carries no identity and is stripped at `moca-egress`.
 
@@ -587,9 +609,10 @@ exactly what option A's launcher would do, and why option B never reassigns.
   `[{ "id": "sh-sandbox-0", "owner": "github:123", "ip": "10.89.0.10" }, …]`. The owner comes from this
   file, keyed by the **authenticated** sandbox id — never from the sandbox's `Hello` labels, which the
   sandbox chooses (§2.3). The relay writes the owner into the sandbox's record.
-- **Per-sandbox tokens are required** under `multi` (`SH_RELAY_TOKEN_<id>` already exists,
-  `packages/sandbox-relay/src/main.ts:172-185`); the relay refuses to start with only the global
-  `SH_RELAY_TOKEN`. A token stolen from inside a container then lets someone re-register only _that_
+- **Per-sandbox tokens are required** under `multi` (`SH_RELAY_TOKEN_<id>` already exists:
+  `makeDefaultValidateToken`, `packages/sandbox-relay/src/main.ts:268-283`, prefers it over the global
+  token, and R5's `makeExecTokenValidator`, `:78-103`, already refuses an exec token equal to
+  either); the relay refuses to start with only the global `SH_RELAY_TOKEN`. A token stolen from inside a container then lets someone re-register only _that_
   sandbox, whose sessions all belong to the same user, so the theft crosses no user boundary.
 - **The relay enforces ownership on every `Exec`:** it verifies the sandbox grant and routes to a
   container sandbox only if `grant.sub` equals the sandbox's owner; for a microVM sandbox it passes the
@@ -649,19 +672,26 @@ default. So the requirements that §5 applies in both modes are live everywhere 
 `MOCA_TENANCY=multi`. That is deliberate. Under `single` the ambient provider key is the operator's
 own credential and is meant to stay (§5 R2); the leaf job's mounted `llm-credentials` are that case.
 The first deployment that sets `multi` arrives with S2, together with the grants that make a
-credential-free worker usable (§10.3). A misspelled variable name, such as `MOCA_TENANCY_MODE`, is
-a boot failure, the same as a misspelled value. It is not read as `single`.
+credential-free worker usable (§10.3).
+
+A misspelled variable name is a boot failure, the same as a misspelled value, rather than being read
+as `single`. The rule (`isTenancyNearMiss`, `tenancy.ts`) ignores case, separators and whitespace, and
+strips one `MOCA`, `KAGENTI` or `SH` prefix. It then refuses what remains if that is within one edit
+of `TENANCY` or starts with it. That catches `SH_TENANCY`, `MOCA_TENENCY`, `MOCA__TENANCY` and
+`MOCA_TENANCY_MODE`, but not `TENANT`, which is two edits away. So the `MOCA_TENANCY_*` names are
+reserved, and a leftover such as `MOCA_TENANCY_OLD` must be unset. A test runs the rule over every
+identifier in the repository and asserts that none of them is flagged.
 
 ### 10.2 Order
 
-| Slice  | Content                                                                                                | Depends on                   |
-| ------ | ------------------------------------------------------------------------------------------------------ | ---------------------------- |
-| **S1** | Hardening, R1–R8 (§5)                                                                                  | nothing — first              |
-| **S2** | Grants, token endpoint, `moca-egress` inference listener, direct mode retired under `multi`            | #348's Kubernetes-free store |
-| **S3** | Bundle ownership, session binding, in-memory loading, per-session sandbox copy                         | S2 (`cfg` claim)             |
-| **S4** | `moca-egress` egress on the microVM tier, `vmpool` grant binding, the conformance suite (absorbs #277) | S2                           |
-| **S5** | Container tier: owner binding, source-address identity, segmentation                                   | S2; S4's `moca-egress` core  |
-| **S6** | Cortex implements the contract and passes the suite — its own spec, later (§14)                        | S4                           |
+| Slice  | Content                                                                                                       | Depends on                   |
+| ------ | ------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| **S1** | Hardening, R1–R8 (§5)                                                                                         | nothing — first              |
+| **S2** | Grants, token endpoint, `moca-egress` inference listener, direct mode retired under `multi`                   | #348's Kubernetes-free store |
+| **S3** | Bundle ownership, session binding, in-memory loading, per-session sandbox copy                                | S2 (`cfg` claim)             |
+| **S4** | `moca-egress` egress on the microVM tier, `vmpool` grant binding, the conformance suite (absorbs #277)        | S2                           |
+| **S5** | Container tier: owner binding, source-address identity, segmentation                                          | S2; S4's `moca-egress` core  |
+| **S6** | Cortex implements the contract and passes the suite at the release adopted (§2.4) — its own spec, later (§14) | S4                           |
 
 ### 10.3 What this changes in #348
 
@@ -703,9 +733,10 @@ A development identity provider (#348 item 6b) must refuse to start under `multi
 
 ### 12.1 Regression tests for S1
 
-Each requirement R1–R8 is pinned by a named test (§5's "Pinned by" column), plus P5 §5's sentinel and
-ambient-absence cases in S1; the two-tenant interleaved **turn** test lands with S2, where each turn
-carries its own grant for it to assert on.
+Each requirement R1–R8 is pinned by the test files named in §5's "Pinned by" column, plus P5 §5's
+sentinel and ambient-absence cases (`harness/test/model-gateway.test.ts`,
+`packages/knative-server/test/server-process.test.ts`) in S1; the two-tenant interleaved **turn** test
+lands with S2, where each turn carries its own grant for it to assert on.
 
 ### 12.2 Grants
 
@@ -784,6 +815,9 @@ prediction sealed before E8's next rung, since it sits on the hot path.
   Cortex's strengths and the reason S6 exists.
 - **An external authorization server** (D5).
 - **A multi-user mode on the Kubernetes path.** RA1 deprecates it; it keeps `single` behaviour.
+- **Per-subject PVC authorization and subject-scoped workload names** for `/workloads`. Under `multi`
+  a caller-named `workspace.claimName` is refused instead (§4.3). `docs/context-service.md` states the
+  boundary.
 - **Any `pi-fork` change.**
 
 ## 14. Records, amendments, and the Cortex path
@@ -805,10 +839,11 @@ Amendment notes, each a short dated paragraph at the head of the amended spec, p
 | Workflow promotion | §4.4, §4.5      | in-memory loading, no harness-side unpack; per-session sandbox copy, no shared cache in `multi`                      |
 
 **The Cortex path (S6).** cortex#905 is rescoped to the contract in §8 and the suite in §12.3. Cortex
-replaces `moca-egress` when **both** hold: it passes that suite unchanged, and MOCA needs a capability
-only Cortex has. The swap is then a process replacement, because the token endpoint is RFC 8693-shaped
-(§6.3) and audit events follow Z5's shape (§8.5). Switching only to switch would add a hop and a larger
-attack surface for nothing.
+replaces `moca-egress` when **both** hold: it passes that suite unchanged, run against the pinned
+Cortex release being adopted rather than inferred from §2.4's reading at `403d5d2`, and MOCA needs a
+capability only Cortex has. The swap is then a process replacement, because the token endpoint is
+RFC 8693-shaped (§6.3) and audit events follow Z5's shape (§8.5). Switching only to switch would add a
+hop and a larger attack surface for nothing.
 
 ## 15. Configuration surface
 
@@ -849,18 +884,27 @@ Defaults marked as numbers are starting points; E8/E14 may move them.
 
 ## 16. Implementation notes for a fresh session
 
-**Files, by slice** — decided rather than deferred, so a planner does not have to choose:
+**Files, by slice** — S1 as shipped in PR #350, by requirement; S2–S5 decided rather than deferred, so a
+planner does not have to choose:
 
-| Slice | Paths                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| S1    | `packages/k8s-sandbox/src/extension.ts` (spawn hook; fail closed), `harness/src/run-turn.ts` (loader lockdown; seed removal), a shared scrub module in `packages/knative-server/src/` called by `server.ts` and `worker.ts`, `packages/knative-server/src/server.ts` (`/runs` auth), `packages/sandbox-relay/src/main.ts` (listener split, exec auth), `remote-worker/internal/exec/runner.go` (`cmd.Env`), `deploy/compose/docker-compose.yml`, `deploy/vm/setup-vm.sh` and units                                                                                                                                      |
-| S2    | `packages/control-plane/src/token.ts` (generalized over `typ`/`aud`), new `grants.ts` and `token-endpoint.ts`, `exchange.ts` → turn-grants, `routes.ts`; `packages/knative-server/src/turn-auth.ts` (turn-grants, refresh); `harness/src/run-turn.ts` (`grant` mode, every model API); `remote-worker/internal/grant` (Go verifier); `remote-worker/cmd/moca-egress` + `internal/egress` (inference listener)                                                                                                                                                                                                           |
-| S3    | `packages/control-plane` bundle routes + ACL; `harness/src/config-store.ts` (bounded decompression); a new `harness/src/resource-set.ts` replacing `config-resolver.ts`'s disk unpack; `harness/src/config-overlay.ts` (per-session path); `harness/src/promote-cli.ts` (upload via control plane); `packages/config-bundle/src/lockfile.ts` (relative paths)                                                                                                                                                                                                                                                           |
-| S4    | `proto/sandbox/v1/sandbox.proto` (`Exec.grant = 7`) and generated code; `harness/src/select-sandbox.ts` and the gRPC transport (carry the grant); `remote-worker/internal/vmpool` (grant binding, socket creation, `SCM_RIGHTS`); new `proto/egress/v1/control.proto`; `remote-worker/internal/egress` (forward proxy, interception, policy); the **public** `remote-worker/egress/conformance` package and `remote-worker/cmd/moca-egress-conformance` (§12.3); `remote-worker/cmd/guest-agent` (P4.1 T2 loopback splice); `deploy/microvm/build-snapshot.sh` (CA certificate, placeholder env, git credential helper) |
-| S5    | `packages/sandbox-relay` (owner map, grant check with the TypeScript verifier shared with the control plane rather than a second copy, `Rebind` to `moca-egress`); `moca-egress` container listener; `deploy/compose`, `deploy/vm` networks and hardening                                                                                                                                                                                                                                                                                                                                                               |
+| Slice   | Paths                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| S1 R1   | `packages/k8s-sandbox/src/sandbox-env.ts` (the allowlist, exported from `index.ts`) applied by `createPodBashOps` in `src/operations.ts` — an allowlist filter, not a fail-closed spawn hook                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| S1 R2   | `harness/src/run-turn.ts` (`applyModelGateway` seeds only the sentinel), `harness/src/ambient-sentinel.ts` (the constant, a `package.json` export); `packages/knative-server/src/server-process.ts` (`prepareServerProcess`: scrub, refusals, private agent directory), `tenancy.ts` (`readTenancy`), called by `startServer` in `server.ts`, the P6 worker in `worker.ts` and the async-run job in `leaf-job.ts`                                                                                                                                                                                                         |
+| S1 R3   | `harness/src/select-sandbox.ts` (`assertServerSandbox`, `SandboxRequiredError`), called from `executeTurn` in `run-turn.ts` and from `realProduceSolve`/`realProduceVerdict` in `run-leaf.ts`; `server.ts` `buildConfig` marks every server turn `serverMode`                                                                                                                                                                                                                                                                                                                                                             |
+| S1 R4   | `harness/src/run-turn.ts` (`turnLoaderInputs`), used by `executeTurn` and both leaf producers in `run-leaf.ts`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| S1 R5   | `packages/sandbox-relay/src/main.ts` (`makeExecTokenValidator`, the `MOCA_RELAY_EXEC_ADDR` split); the worker side in `harness/src/select-sandbox.ts` (`makeRelayExecClient`) and `remote-worker/cmd/exec-driver/{main,plan,drive}.go`; the token in `deploy/knative/relay-deployment.yaml`, `overlays/ocp/patch-relay-token.yaml`, `setup-ocp.sh`, `demo-remote-worker.sh`, `relay-leaf-smoke.sh`, `remote-worker/deploy-incluster.sh` and `run-local.sh`; compose's `install.sh` and `smoke.sh` generate it; `deploy/vm/env/*.env.example` and `setup-vm.sh`'s `ensure_exec_listener` put the exec listener on loopback |
+| S1 R6   | `remote-worker/internal/exec/sandboxenv.go` (`commandEnv`), set as `cmd.Env` in `runner.go`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| S1 R7   | `packages/knative-server/src/server.ts` (`/runs`, `/v1/runs`, `/runs/status`, `/workloads` ownership), `turn-auth.ts` (`authorizeRunRead`, `authenticateSubject`), `context-service.ts` (a workload's `owner`)                                                                                                                                                                                                                                                                                                                                                                                                            |
+| S1 R8   | `deploy/compose/docker-compose.yml` (the two networks, and R5's brain-side exec listener); `deploy/vm/setup-vm.sh` (`ensure_sandbox_network`, `install_sandbox_firewall`) and `systemd/moca-sandbox-firewall.service`                                                                                                                                                                                                                                                                                                                                                                                                     |
+| S1 Docs | `deploy/compose/README.md`, `deploy/vm/README.md`, `deploy/knative/README-worker.md`, `remote-worker/DESIGN.md`, `docs/demos/remote-sandbox-demo.md`                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| S2      | `packages/control-plane/src/token.ts` (generalized over `typ`/`aud`), new `grants.ts` and `token-endpoint.ts`, `exchange.ts` → turn-grants, `routes.ts`; `packages/knative-server/src/turn-auth.ts` (turn-grants, refresh); `harness/src/run-turn.ts` (`grant` mode, every model API); `remote-worker/internal/grant` (Go verifier); `remote-worker/cmd/moca-egress` + `internal/egress` (inference listener)                                                                                                                                                                                                             |
+| S3      | `packages/control-plane` bundle routes + ACL; `harness/src/config-store.ts` (bounded decompression); a new `harness/src/resource-set.ts` replacing `config-resolver.ts`'s disk unpack; `harness/src/config-overlay.ts` (per-session path); `harness/src/promote-cli.ts` (upload via control plane); `packages/config-bundle/src/lockfile.ts` (relative paths)                                                                                                                                                                                                                                                             |
+| S4      | `proto/sandbox/v1/sandbox.proto` (`Exec.grant = 7`) and generated code; `harness/src/select-sandbox.ts` and the gRPC transport (carry the grant); `remote-worker/internal/vmpool` (grant binding, socket creation, `SCM_RIGHTS`); new `proto/egress/v1/control.proto`; `remote-worker/internal/egress` (forward proxy, interception, policy); the **public** `remote-worker/egress/conformance` package and `remote-worker/cmd/moca-egress-conformance` (§12.3); `remote-worker/cmd/guest-agent` (P4.1 T2 loopback splice); `deploy/microvm/build-snapshot.sh` (CA certificate, placeholder env, git credential helper)   |
+| S5      | `packages/sandbox-relay` (owner map, grant check with the TypeScript verifier shared with the control plane rather than a second copy, `Rebind` to `moca-egress`); `moca-egress` container listener; `deploy/compose`, `deploy/vm` networks and hardening                                                                                                                                                                                                                                                                                                                                                                 |
 
 **No `pi-fork` changes.** Every Pi behaviour this design needs is an existing option (§2.1) or the
-bash tool's `BashSpawnHook`.
+`user_bash` event, which `packages/k8s-sandbox/src/extension.ts` handles with `pi.on('user_bash', …)`.
 
 **House rules that bite here.** A new package needs a `tsconfig.json` with `test` in its include and a
 `typecheck` script, or `harness/test/typecheck-coverage.test.ts` fails. `make lint` skips untracked

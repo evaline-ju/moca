@@ -349,8 +349,10 @@ ensure_exec_listener() {
 # it. --ignore accepts a pre-existing network unconditionally, though, so this also reads back the
 # live subnet/gateway, isolate option and bridge name and fails closed on a mismatch, rather than
 # letting the firewall below install rules for a network that does not have the expected values.
-# isolate=strict needs a netavark that supports it; where it does not, the create or the read-back
-# fails and setup stops here.
+# The read-back proves only what podman STORED. A podman that rejects isolate=strict fails the create
+# here, but one that accepts and stores the option over a netavark too old to enforce it passes every
+# check below. Nothing in setup can detect that; the live verification that isolation is enforced ran
+# on netavark 1.17.2 (MI1 S1, PR #350). Use a netavark at least that recent.
 ensure_sandbox_network() {
   podman network create --ignore --subnet "$MOCA_SANDBOX_SUBNET" --gateway "$MOCA_SANDBOX_GATEWAY" \
     --opt isolate=strict --interface-name "$MOCA_SANDBOX_BRIDGE" moca-sandbox

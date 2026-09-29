@@ -8,7 +8,9 @@ containers as podman containers alongside them. `setup-vm.sh` is the sibling of
 ## Prerequisites
 
 - A Linux VM with systemd and [podman](https://podman.io/) installed, with a netavark network
-  backend recent enough to support `isolate=strict` (`setup-vm.sh` refuses otherwise)
+  backend that enforces `isolate=strict`. `setup-vm.sh` refuses a podman that rejects the option,
+  but cannot detect one that stores it without enforcing it. Isolation was verified live on
+  netavark 1.17.2.
 - `nft` (nftables), which loads the sandbox network's firewall
 - Node.js 22+ and pnpm 9+ on the VM (the supervisor and relay run directly via
   `node --import tsx`, not containerized)
