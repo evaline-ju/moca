@@ -32,6 +32,14 @@ containers as podman containers alongside them. `setup-vm.sh` is the sibling of
   it does **not** run the build itself, since it can take minutes and does not belong inside a
   bring-up script.
 
+## Upgrading an existing VM
+
+**Re-run `setup-vm.sh` after pulling; do not just restart the relay.** Since MI1 S1 the relay
+refuses to boot without `MOCA_RELAY_EXEC_TOKEN`, which `git pull && systemctl restart
+sh-relay.service` never creates. `sudo ./deploy/vm/setup-vm.sh` generates it, migrates `relay.env`
+and `supervisor.env` together to the loopback exec listener, installs the sandbox network and
+firewall, and restarts what it owns (step 3 below).
+
 ## Bring it up
 
 ```bash
@@ -73,13 +81,14 @@ Across those two runs, the script does the following, in this order:
 4. Installs `systemd/sh-supervisor.service` and `systemd/sh-relay.service` into
    `/etc/systemd/system`, reloads the daemon, and enables `podman-restart.service` so the
    containers below come back after a reboot (see "Reboots" below).
-5. Creates a dedicated `moca-sandbox` podman network (fixed subnet `10.89.40.0/24`, gateway
+5. Starts a Redis container on podman's **default** network (published on `127.0.0.1:6379`), which
+   `isolate=strict` below keeps unreachable from sandboxes.
+6. Creates a dedicated `moca-sandbox` podman network (fixed subnet `10.89.40.0/24`, gateway
    `10.89.40.1`, `isolate=strict` so it exchanges no traffic with any other podman network) and
-   installs an nftables table that confines it — see "Sandbox container networking and the relay
+   installs an nftables table that confines it, then starts `SH_SANDBOX_COUNT` (default 2) sandbox
+   containers on that network, wired to reach the relay and to authenticate to it. The firewall is
+   in place before the first sandbox starts. See "Sandbox container networking and the relay
    token" below.
-6. Starts a Redis container and `SH_SANDBOX_COUNT` (default 2) sandbox containers via podman,
-   each on that network, wired to reach the relay and to authenticate to it (see "Sandbox
-   container networking and the relay token" below).
 7. Enables **and restarts** `sh-relay.service`, but only **enables** `sh-supervisor.service` — it
    is deliberately not started yet (see below).
 
@@ -189,8 +198,10 @@ internet access from a sandbox) is untouched in this round — that is MI1 S5's 
 not this one. The rules match the bridge a packet arrives on — `MOCA_SANDBOX_BRIDGE`, default
 `moca-sandbox0`, pinned when the network is created and checked on every run — not only its source
 address: netavark leaves IPv6 enabled on the bridge and in every container, so link-local IPv6
-reaches the host even though `moca-sandbox` has only an IPv4 subnet. The two accepts are IPv4 from
-the sandbox subnet; everything else arriving on the bridge, IPv6 included, is dropped.
+reaches the host even though `moca-sandbox` has only an IPv4 subnet. Three rules accept: replies on
+connections that are already established (`ct state established,related`, on that bridge only), and
+new IPv4 connections from the sandbox subnet to the relay's attach port and to DNS. Everything else
+arriving on the bridge, IPv6 included, is dropped.
 
 `SandboxExec` is not served on the `moca-sandbox` network at all: the relay binds it on loopback
 (`MOCA_RELAY_EXEC_ADDR=127.0.0.1:9444`), and the exec token (`MOCA_RELAY_EXEC_TOKEN`, held only by
@@ -279,6 +290,12 @@ If an operator needs to change either of these, set them directly in
 reads at startup) — just be aware that adding an uncommented `SH_ADMIN_PORT` line there will
 change what `deploy/vm/tests/setup-vm.test.sh` expects if the test is ever extended to check
 for it.
+
+**`SANDBOX_IMAGE`** (default `ghcr.io/rossoctl/serverless-harness-remote-worker:latest`) is the
+image `setup-vm.sh` runs sandbox containers from. It is a variable for the script, not an env-file
+setting: `sudo SANDBOX_IMAGE=<image> ./deploy/vm/setup-vm.sh`. The same name means the
+Kubernetes sandbox pod image to `setup-k8s.sh`, and compose spells this concept
+`SH_SANDBOX_IMAGE`, so do not export one value for all three.
 
 ## What round one does not claim
 

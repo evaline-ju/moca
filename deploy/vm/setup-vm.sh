@@ -391,13 +391,18 @@ ensure_sandbox_network() {
 # sandbox subnet. The rules match the bridge a packet arrives on, not only its source address:
 # netavark leaves IPv6 enabled on the bridge and in every container, so link-local IPv6 reaches the
 # host even though the network has no IPv6 subnet, and everything on the bridge that is not one of
-# the two IPv4 accepts -- IPv6 included -- is dropped. Forwarded (internet) traffic is
+# the three accepts (established/related replies, and the two IPv4 ones) -- IPv6 included -- is
+# dropped. Forwarded (internet) traffic is
 # untouched in S1; MI1 S5 routes it through moca-egress. The declare/delete/redeclare idiom makes
 # `nft -f` replace the table atomically, so a re-run never stacks duplicate rules. The checked-in
 # unit carries an @SH_ENV_DIR@ placeholder rather than a literal path -- SH_ENV_DIR is itself
-# overridable, so this renders the placeholder into the real value before installing the unit.
+# overridable, so this renders the placeholder into the real value before installing the unit. The
+# same for @NFT@: require_cmds accepts nft anywhere on PATH, so the unit runs the nft this script
+# ran, not a hardcoded /usr/sbin/nft that dies 203/EXEC on a distro shipping it in /usr/bin.
 install_sandbox_firewall() {
-  local attach nft="$SH_ENV_DIR/moca-sandbox.nft" tmp_unit
+  local attach nft="$SH_ENV_DIR/moca-sandbox.nft" tmp_unit nft_bin
+  nft_bin="$(command -v nft)"
+  [[ "$nft_bin" == /* ]] || { echo "nft resolves to '$nft_bin', not an absolute path the unit can run" >&2; return 1; }
   attach="$(sandbox_relay_addr)"
   attach="${attach##*:}"
   cat >"$nft" <<NFT
@@ -416,7 +421,8 @@ table inet moca_sandbox {
 NFT
   nft -f "$nft"
   tmp_unit="$(mktemp)"
-  sed "s|@SH_ENV_DIR@|$SH_ENV_DIR|g" "$SCRIPT_DIR/systemd/moca-sandbox-firewall.service" >"$tmp_unit"
+  sed -e "s|@SH_ENV_DIR@|$SH_ENV_DIR|g" -e "s|@NFT@|$nft_bin|g" \
+    "$SCRIPT_DIR/systemd/moca-sandbox-firewall.service" >"$tmp_unit"
   install -m 0644 "$tmp_unit" "$SH_UNIT_DIR/moca-sandbox-firewall.service"
   rm -f "$tmp_unit"
   systemctl daemon-reload

@@ -497,9 +497,10 @@ grep -q '9443' "$NFT" &&
     "SH_SANDBOX_RELAY_ADDR overrides the port: $(cat "$NFT")"
 pass "install_sandbox_firewall follows SH_SANDBOX_RELAY_ADDR's port when it overrides relay_port()"
 
-grep -q '^ExecStart=/usr/sbin/nft -f @SH_ENV_DIR@/moca-sandbox\.nft$' "$VM_DIR/systemd/moca-sandbox-firewall.service" ||
-  fail "the checked-in unit must use the @SH_ENV_DIR@ placeholder (a literal path breaks when" \
-    "SH_ENV_DIR is customized): $(grep '^ExecStart=' "$VM_DIR/systemd/moca-sandbox-firewall.service")"
+grep -q '^ExecStart=@NFT@ -f @SH_ENV_DIR@/moca-sandbox\.nft$' "$VM_DIR/systemd/moca-sandbox-firewall.service" ||
+  fail "the checked-in unit must use the @NFT@ and @SH_ENV_DIR@ placeholders (a literal path breaks" \
+    "when nft is not in /usr/sbin or SH_ENV_DIR is customized):" \
+    "$(grep '^ExecStart=' "$VM_DIR/systemd/moca-sandbox-firewall.service")"
 grep -q '^Before=.*sh-relay.service' "$VM_DIR/systemd/moca-sandbox-firewall.service" ||
   fail "the firewall must be in place before the relay (and so before any sandbox) starts"
 grep -q '^RequiredBy=.*sh-relay.service' "$VM_DIR/systemd/moca-sandbox-firewall.service" ||
@@ -513,9 +514,11 @@ pass "moca-sandbox-firewall.service is ordered before, and required by, the rela
 INSTALLED_FIREWALL_UNIT="$SH_UNIT_DIR/moca-sandbox-firewall.service"
 [[ -f "$INSTALLED_FIREWALL_UNIT" ]] ||
   fail "install_sandbox_firewall must install the firewall unit into $SH_UNIT_DIR"
-grep -qF "ExecStart=/usr/sbin/nft -f $SH_ENV_DIR/moca-sandbox.nft" "$INSTALLED_FIREWALL_UNIT" ||
-  fail "the installed unit must have @SH_ENV_DIR@ substituted with the real SH_ENV_DIR" \
-    "($SH_ENV_DIR): $(cat "$INSTALLED_FIREWALL_UNIT")"
+grep -qF "ExecStart=$(command -v nft) -f $SH_ENV_DIR/moca-sandbox.nft" "$INSTALLED_FIREWALL_UNIT" ||
+  fail "the installed unit must run the nft on PATH, with @SH_ENV_DIR@ substituted with the real" \
+    "SH_ENV_DIR ($SH_ENV_DIR): $(cat "$INSTALLED_FIREWALL_UNIT")"
+grep -q '@NFT@' "$INSTALLED_FIREWALL_UNIT" &&
+  fail "the installed unit must not still contain the @NFT@ placeholder: $(cat "$INSTALLED_FIREWALL_UNIT")"
 grep -q '@SH_ENV_DIR@' "$INSTALLED_FIREWALL_UNIT" &&
   fail "the installed unit must not still contain the @SH_ENV_DIR@ placeholder: $(cat "$INSTALLED_FIREWALL_UNIT")"
 pass "install_sandbox_firewall renders @SH_ENV_DIR@ into the real SH_ENV_DIR when installing the unit"
