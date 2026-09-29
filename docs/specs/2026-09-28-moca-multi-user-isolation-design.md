@@ -18,7 +18,7 @@ Builds on: [P6](2026-09-08-p6-vm-process-manager-design.md) ·
 [RA1](2026-09-24-ra1-density-cutover-and-repo-rearchitecture-design.md).
 Amends: P4.1 §12.2 (proxy choice), P5 §3.2 (subject-derived placeholder), MU1 §5.3 (credential
 exchange), the promotion design §4.4–§4.5 (harness-side unpack, shared sandbox cache). See §14.
-Decision record: ADR-0036 (to be written with the S2 slice, §14).
+Decision record: ADR-0037 (to be written with the S2 slice, §14).
 Naming: new components and settings use the **MOCA** name from day one (`moca-egress`,
 `MOCA_*`); existing `SH_*` names are left for RA1 Phase 1's rename.
 
@@ -788,7 +788,7 @@ prediction sealed before E8's next rung, since it sits on the hot path.
 
 ## 14. Records, amendments, and the Cortex path
 
-**ADR-0036** — _Session grants and `moca-egress`: connection-bound credential injection on the density
+**ADR-0037** — _Session grants and `moca-egress`: connection-bound credential injection on the density
 substrate_ — records D2, D4, D5 and D7, written with S2. It supersedes P4.1 §12.2's presumption that a
 thin shim in front of AuthBridge is the answer: §12.2 said a proxy of our own "only wins if Z5's
 semantics turn out not to fit a shared, non-Kubernetes proxy at all — which would be a finding about
