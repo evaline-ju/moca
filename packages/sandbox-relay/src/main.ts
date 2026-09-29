@@ -71,8 +71,9 @@ export interface RelayServerDeps extends RelayDeps {
 /**
  * The SandboxExec caller check. FAIL-CLOSED: with no MOCA_RELAY_EXEC_TOKEN there is no valid caller,
  * so building the validator throws and the relay does not boot. The token is the WORKERS' credential
- * and deliberately distinct from every sandbox's SH_RELAY_TOKEN[_<id>]: a sandbox that can attach
- * must not thereby be able to run commands in other sandboxes. Constant-time, length-checked first.
+ * and must be distinct from every sandbox's SH_RELAY_TOKEN[_<id>] (spec R5): a relay configured with
+ * an exec token equal to any of them also refuses to boot, and the error names the variables, never
+ * the value. Constant-time, length-checked first.
  */
 export function makeExecTokenValidator(
   env: NodeJS.ProcessEnv,
@@ -81,6 +82,16 @@ export function makeExecTokenValidator(
   if (!expected) {
     throw new Error(
       'MOCA_RELAY_EXEC_TOKEN is required: the relay refuses unauthenticated SandboxExec',
+    );
+  }
+  const clashes = Object.keys(env)
+    .filter(
+      (k) => (k === 'SH_RELAY_TOKEN' || k.startsWith('SH_RELAY_TOKEN_')) && env[k] === expected,
+    )
+    .sort();
+  if (clashes.length > 0) {
+    throw new Error(
+      `MOCA_RELAY_EXEC_TOKEN must differ from every sandbox token, but equals ${clashes.join(', ')}`,
     );
   }
   const want = Buffer.from(expected);

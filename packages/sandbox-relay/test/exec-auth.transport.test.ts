@@ -139,6 +139,47 @@ describe('makeExecTokenValidator', () => {
     );
   });
 
+  it('refuses to build when the exec token equals SH_RELAY_TOKEN, naming the variables but not the value', () => {
+    const shared = 'shared-value-1234'; // notsecret
+    let err: unknown;
+    try {
+      makeExecTokenValidator({ MOCA_RELAY_EXEC_TOKEN: shared, SH_RELAY_TOKEN: shared });
+    } catch (e) {
+      err = e;
+    }
+    expect((err as Error).message).toMatch(/MOCA_RELAY_EXEC_TOKEN/);
+    expect((err as Error).message).toMatch(/SH_RELAY_TOKEN\b/);
+    expect((err as Error).message).not.toContain(shared);
+  });
+
+  it('refuses to build when the exec token equals a per-sandbox SH_RELAY_TOKEN_<id>', () => {
+    const shared = 'shared-value-5678'; // notsecret
+    let err: unknown;
+    try {
+      makeExecTokenValidator({
+        MOCA_RELAY_EXEC_TOKEN: shared,
+        SH_RELAY_TOKEN: 'sandbox-global', // notsecret
+        SH_RELAY_TOKEN_sbx1: 'sandbox-one', // notsecret
+        SH_RELAY_TOKEN_sbx2: shared,
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect((err as Error).message).toMatch(/SH_RELAY_TOKEN_sbx2/);
+    expect((err as Error).message).not.toMatch(/SH_RELAY_TOKEN_sbx1/);
+    expect((err as Error).message).not.toContain(shared);
+  });
+
+  it('builds when the exec token is distinct from every sandbox token', () => {
+    const v = makeExecTokenValidator({
+      MOCA_RELAY_EXEC_TOKEN: 'exec-only', // notsecret
+      SH_RELAY_TOKEN: 'sandbox-global', // notsecret
+      SH_RELAY_TOKEN_sbx1: 'sandbox-one', // notsecret
+    });
+    expect(v('exec-only')).toBe(true);
+    expect(v('sandbox-global')).toBe(false);
+  });
+
   it('accepts exactly the configured token', () => {
     const v = makeExecTokenValidator({ MOCA_RELAY_EXEC_TOKEN: 'abc123' }); // notsecret
     expect(v('abc123')).toBe(true);
