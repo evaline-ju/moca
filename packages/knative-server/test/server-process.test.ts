@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { AMBIENT_KEY_SENTINEL } from '@sh/harness/ambient-sentinel';
 import { isTenancyNearMiss, readTenancy } from '../src/tenancy.js';
@@ -165,6 +166,41 @@ describe('prepareServerProcess', () => {
     expect(() => prepareServerProcess({ SH_SESSION_TOKEN_PUBLIC_KEYS: 'garbage' })).toThrow(
       /SH_SESSION_TOKEN_PUBLIC_KEYS/,
     );
+  });
+
+  it("scrubAmbientCredentials removes every credential pi's provider lookup reads (drift guard)", () => {
+    // Every environment name pi-ai's env-api-keys.ts mentions, read from its source, so a provider
+    // pi adds later is planted here without this test changing. Only project/location settings,
+    // which authenticate nothing, may survive.
+    const src = readFileSync(
+      fileURLToPath(new URL('../../../pi-fork/packages/ai/src/env-api-keys.ts', import.meta.url)),
+      'utf8',
+    );
+    const names = new Set(
+      [...src.matchAll(/"([A-Z][A-Z0-9_]{2,})"|process\.env\.([A-Z][A-Z0-9_]+)/g)].map(
+        (m) => m[1] ?? m[2],
+      ),
+    );
+    // Sensitivity: the extraction must see pi's known lookups, or this checks nothing.
+    for (const known of [
+      'GEMINI_API_KEY',
+      'AWS_SECRET_ACCESS_KEY',
+      'HF_TOKEN',
+      'ANTHROPIC_OAUTH_TOKEN',
+    ])
+      expect(names, known).toContain(known);
+    const env: NodeJS.ProcessEnv = { PATH: '/usr/bin', REDIS_URL: 'redis://r:6379' };
+    for (const n of names) env[n] = 'planted';
+    scrubAmbientCredentials(env);
+    const NOT_CREDENTIALS = ['GOOGLE_CLOUD_PROJECT', 'GCLOUD_PROJECT', 'GOOGLE_CLOUD_LOCATION'];
+    const survivors = Object.keys(env).filter(
+      (k) => env[k] === 'planted' && !NOT_CREDENTIALS.includes(k),
+    );
+    expect(survivors).toEqual([]);
+    expect(env.ANTHROPIC_API_KEY).toBe(AMBIENT_KEY_SENTINEL);
+    // Unrelated settings are untouched.
+    expect(env.PATH).toBe('/usr/bin');
+    expect(env.REDIS_URL).toBe('redis://r:6379');
   });
 
   it('scrubAmbientCredentials is idempotent', () => {
