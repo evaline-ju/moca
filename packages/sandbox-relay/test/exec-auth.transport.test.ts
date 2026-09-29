@@ -1,6 +1,19 @@
-import { Metadata, ServerCredentials, credentials, status } from '@grpc/grpc-js';
+import {
+  Metadata,
+  ServerCredentials,
+  credentials,
+  makeGenericClientConstructor,
+  status,
+  type Client,
+  type ClientDuplexStream,
+} from '@grpc/grpc-js';
 import { afterEach, describe, expect, it } from 'vitest';
-import { SandboxExecClient, SandboxWorkerService } from '@sh/k8s-sandbox';
+import {
+  SandboxExecClient,
+  SandboxWorkerService,
+  type ServerFrame,
+  type WorkerFrame,
+} from '@sh/k8s-sandbox';
 import type { RecordStore } from '@sh/harness';
 import { buildServer, makeExecTokenValidator, startRelay } from '../src/main.js';
 
@@ -63,6 +76,41 @@ function abortCode(addr: string, token?: string): Promise<number> {
   ).finally(() => client.close());
 }
 
+const WorkerClient = makeGenericClientConstructor(SandboxWorkerService, 'SandboxWorker');
+
+/**
+ * Terminal code of an Attach stream opened against `addr` (a Hello is sent, then we wait). A stream
+ * still open after 3s -- the listener serves Attach and parked the session -- resolves to -1.
+ */
+function attachCode(addr: string): Promise<number> {
+  const client = new WorkerClient(addr, credentials.createInsecure()) as unknown as Client & {
+    attach: () => ClientDuplexStream<WorkerFrame, ServerFrame>;
+  };
+  const stream = client.attach();
+  stream.write({
+    hello: {
+      sandboxId: 'sbx-x',
+      labels: {},
+      capabilities: [],
+      image: '',
+      arch: 'amd64',
+      capacityMax: 1,
+      trust: 'trusted',
+    },
+  } as WorkerFrame);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return new Promise<number>((resolve) => {
+    timer = setTimeout(() => resolve(-1), 3000);
+    stream.on('data', () => {});
+    stream.on('error', (err: { code: number }) => resolve(err.code));
+    stream.on('status', (s: { code: number }) => resolve(s.code));
+  }).finally(() => {
+    clearTimeout(timer);
+    stream.cancel();
+    client.close();
+  });
+}
+
 describe('SandboxExec requires the worker credential (MI1 R5)', () => {
   it('refuses an Exec with no token', async () => {
     expect(await execCode(await bindOne())).toBe(status.UNAUTHENTICATED);
@@ -109,7 +157,7 @@ describe('startRelay with MOCA_RELAY_EXEC_ADDR serves the two services apart', (
     const execOnExecPort = await execCode(`127.0.0.1:${relay.execPort}`, 'right-token');
     expect(execOnExecPort).not.toBe(status.UNIMPLEMENTED);
     expect(execOnExecPort).not.toBe(status.UNAUTHENTICATED);
-    expect(SandboxWorkerService).toBeDefined(); // Attach is exercised by relay-attach.test.ts
+    expect(await attachCode(`127.0.0.1:${relay.execPort}`)).toBe(status.UNIMPLEMENTED);
   });
 
   it('without an exec address, one listener serves both (the Kubernetes shape)', async () => {
