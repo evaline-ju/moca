@@ -22,6 +22,21 @@ Decision record: ADR-0036 (to be written with the S2 slice, §14).
 Naming: new components and settings use the **MOCA** name from day one (`moca-egress`,
 `MOCA_*`); existing `SH_*` names are left for RA1 Phase 1's rename.
 
+> **Amendment, 2026-09-28 — S1 planned against the code.** Seven requirements were sharpened, none
+> reversed: R1 filters at `createPodBashOps`, the one point both bash paths cross; R2 seeds a constant
+> sentinel and scrubs fully only under `multi`, so a single-tenant operator key keeps working; R4 uses
+> Pi's `projectTrusted: false` rather than moving `cwd`, which is also the sandbox path mapping's head;
+> R5's separate listener is opt-in (`MOCA_RELAY_EXEC_ADDR`), on by default in compose and `deploy/vm`,
+> with the token required everywhere; R6 excludes the worker's own settings instead of allowlisting,
+> because commands need the image's own `ENV`; R7 also authorizes `/runs/status` and refuses
+> asynchronous runs under `SH_REQUIRE_AUTH` until MU2; R8 keeps sandbox internet egress until S5.
+> Execution added four more: R3's refusal and R4's lockdown apply at every leaf that builds
+> tools or a loader (`/turn`, solve and verdict); R6 also excludes `RELAY_TLS` and
+> `WORKER_MAX_CONCURRENT`; R7 refuses a caller-supplied `tenant` on an authenticated request
+> (`400 tenant_not_allowed`); R8's firewall unit is required by the relay and by
+> `podman-restart`, so a failed load keeps sandboxes down, and setup refuses a pre-existing
+> sandbox network on another subnet.
+
 > **The one-sentence thesis.** Multiplexing breaks Z1's "one session = one pod = one identity" at the
 > worker, so everything the worker used to _assert_ — subject, bundle, workspace, placeholder — becomes
 > something the trusted tier can _verify_: a short-lived grant the control plane signs, the worker
@@ -203,16 +218,16 @@ apply in **both** tenancy modes, because each closes a defect rather than adding
 detailed findings are tracked privately under coordinated disclosure; this section states only the
 required behaviour and the test that pins it.
 
-| #   | Requirement                                                                                                                                                                                                                                                                                                                                                                     | Pinned by                                                                                         |
-| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| R1  | The sandbox receives an **explicit environment allowlist**, never the worker's process environment. The allowlist holds no secret, so what `createPodBashOps`'s `env` prefix carries on the command line is inert by construction. The bash tool's environment is set through Pi's `BashSpawnHook` (`BashToolOptions.spawnHook`) in `k8sSandboxExtension` — no `pi-fork` change | a planted secret-shaped variable never appears in any `Exec.command`, on both transports          |
-| R2  | P5 §3.2 steps 1–3 land as a **shared function** that `startServer()` and the P6 worker entry point both call: scrub + sentinel, the `ANTHROPIC_API_KEY` seed deleted                                                                                                                                                                                                            | P5 §5's table, run at the worker level                                                            |
-| R3  | In server and worker mode, a turn with **no resolvable sandbox fails** rather than running tools in the worker. Local tools remain only in the CLI (`harness/src/cli.ts`), or behind an explicit `SH_LOCAL_TOOLS=1` that `multi` refuses                                                                                                                                        | no sandbox → the turn fails and no local tool is registered                                       |
-| R4  | The resource loader is locked down in server and worker mode: `noExtensions: true`; `PI_CODING_AGENT_DIR` pinned to an empty read-only directory and `cwd` to a directory with no `.pi`, so `SYSTEM.md`/`APPEND_SYSTEM.md` discovery finds nothing and Pi's default system prompt stands; per-worker private scratch space                                                      | an `extensions/x.ts` or `SYSTEM.md` planted in the agent directory or `<cwd>/.pi` is never loaded |
-| R5  | The relay serves `Attach` and `SandboxExec` on **separate listeners**; `SandboxExec` is reachable only by workers and requires a worker credential (`MOCA_RELAY_EXEC_TOKEN`) distinct from every sandbox token                                                                                                                                                                  | `SandboxExec` without the token, or from the sandbox network, is refused                          |
-| R6  | `remote-worker` runs commands with an **explicit `cmd.Env`** allowlist                                                                                                                                                                                                                                                                                                          | a command's environment never contains the worker's token                                         |
-| R7  | `POST /runs` and `/v1/runs` require a session token whenever `SH_REQUIRE_AUTH=true`, exactly as `/turn` does                                                                                                                                                                                                                                                                    | `/runs` without a token under `SH_REQUIRE_AUTH=true` → `401`                                      |
-| R8  | Sandboxes and the services they must not reach are on **separate networks** (§9.4) in compose and `deploy/vm`                                                                                                                                                                                                                                                                   | from a sandbox, Redis, the control plane and relay `SandboxExec` are unreachable                  |
+| #   | Requirement                                                                                                                                                                                                                                                                                                                                                         | Pinned by                                                                                                                                                |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R1  | The sandbox receives an **explicit environment allowlist** (`LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`), never the worker's process environment. It is applied in `createPodBashOps`, which both the `bash` tool and the `user_bash` hook reach — no `pi-fork` change                                                                                                       | a planted secret-shaped variable never appears in any `Exec.command`, through the real bash tool                                                         |
+| R2  | `applyModelGateway` seeds `ANTHROPIC_API_KEY` only with the constant sentinel, never a caller's token. A shared `prepareServerProcess()` runs in `startServer()` and the P6 worker; under `multi` it performs P5's full scrub and refuses `SH_LOCAL_TOOLS=1` and `SH_REQUIRE_AUTH` other than `true`. Under `single` an operator's own ambient key is left in place | a token-less call after an authenticated one sees only the sentinel; the multi scrub deletes the OAuth token, which outranks the sentinel                |
+| R3  | In server and worker mode, a turn with **no resolvable sandbox fails** rather than running tools in the worker. Local tools remain only in the CLI (`harness/src/cli.ts`), or behind an explicit `SH_LOCAL_TOOLS=1` that `multi` refuses                                                                                                                            | no sandbox → the turn fails and no local tool is registered                                                                                              |
+| R4  | In server and worker mode: `noExtensions: true`, `noContextFiles: true`, the project untrusted (`projectTrusted: false`, so no project settings, `SYSTEM.md` or `APPEND_SYSTEM.md`), and `PI_CODING_AGENT_DIR` pointed at a fresh private per-process directory                                                                                                     | planted project `SYSTEM.md`, `APPEND_SYSTEM.md`, `AGENTS.md` and extension file are not loaded by the real Pi loader, and are loaded outside server mode |
+| R5  | `SandboxExec` and `Abort` require a worker credential (`MOCA_RELAY_EXEC_TOKEN`), distinct from every sandbox token, on every deployment; the relay refuses to boot without it. `MOCA_RELAY_EXEC_ADDR` serves `SandboxExec` on its own listener (compose: the relay's brain-network address; `deploy/vm`: loopback)                                                  | an Exec or Abort without the token is refused; on a split relay the attach listener does not serve Exec                                                  |
+| R6  | `remote-worker` runs commands with an **explicit `cmd.Env`**: the container's environment minus the worker's own settings (`SANDBOX_TOKEN`, `RELAY_ADDR`, `SANDBOX_ID`, `SANDBOX_IMAGE`, `SANDBOX_TRUST`, `RELAY_TLS`, `WORKER_MAX_CONCURRENT`, `SANDBOX_TOKEN_*`, `SH_*`, `MOCA_*`)                                                                                | a grandchild of a command sees none of them, and still sees the image's own environment                                                                  |
+| R7  | Under `SH_REQUIRE_AUTH=true`, `POST /runs` and `/v1/runs` require a session token naming the run's session and execute on the exchanged credential; `GET /runs/status` is authorized by session; asynchronous runs are refused (`501`) until MU2's owned runs; a caller-supplied `tenant` on an authenticated request is refused                                    | no token → `401`; another session's token → `400 session_mismatch`; async → `501`; authenticated request with `tenant` → `400 tenant_not_allowed`        |
+| R8  | Compose puts sandboxes on `moca-sandbox` and Redis and the supervisor on `moca-brain`, with only the relay on both. `deploy/vm` runs sandboxes on a dedicated podman network whose traffic to the host is dropped except the relay's attach port and DNS. Outbound internet is unchanged until S5                                                                   | the compose topology test; the nftables table rendered and loaded by a oneshot unit ordered before, and required by, the relay and `podman-restart`      |
 
 R6 is honest about its limit: commands still run as the same Unix user as `remote-worker`, so its
 token remains readable through `/proc`. §9.2's per-sandbox tokens are what make that exposure cross no
@@ -396,9 +411,9 @@ them.
 4. In server and worker mode the loader options are fixed, not configurable: `noExtensions`,
    `noSkills`, `noPromptTemplates`, `noContextFiles`; `skillsOverride`, `promptsOverride` and
    `agentsFilesOverride` supplied from the `ResourceSet`; `SettingsManager.inMemory()`;
-   `PI_CODING_AGENT_DIR` and `cwd` as R4 pins them, so no `SYSTEM.md` or `APPEND_SYSTEM.md` is
-   discovered. The test asserts the assembled system prompt equals the one an empty agent directory
-   produces, plus the bundle's own fragments.
+   the project untrusted and `PI_CODING_AGENT_DIR` private, as R4 sets them, so no `SYSTEM.md` or
+   `APPEND_SYSTEM.md` is discovered. The test asserts the assembled system prompt equals the one an
+   empty agent directory produces, plus the bundle's own fragments.
 5. Each `Skill`'s `filePath`/`baseDir` names **that session's** sandbox path (§7.4). `/skill:<name>`
    expansion reads `skill.filePath` from the worker's disk
    (`pi-fork/packages/coding-agent/src/core/agent-session.ts:1184`), so it is disabled in server mode
@@ -677,8 +692,9 @@ A development identity provider (#348 item 6b) must refuse to start under `multi
 
 ### 12.1 Regression tests for S1, each failing on `main` today
 
-One named test per requirement R1–R8 (§5's "Pinned by" column), plus P5 §5's full table run at the
-**worker** level, where S turns of different subjects share a process (P6 §7).
+One named test per requirement R1–R8 (§5's "Pinned by" column), plus P5 §5's sentinel and
+ambient-absence cases in S1; the two-tenant interleaved **turn** test lands with S2, where each turn
+carries its own grant for it to assert on.
 
 ### 12.2 Grants
 
@@ -788,27 +804,33 @@ attack surface for nothing.
 New settings use the `MOCA_` prefix (see the header's naming note). Secrets are **files**, never
 environment variables (§6.7).
 
-| Setting                                | Read by                                | Default                    | Meaning                                                       |
-| -------------------------------------- | -------------------------------------- | -------------------------- | ------------------------------------------------------------- |
-| `MOCA_TENANCY`                         | every component                        | `single`                   | `single` \| `multi` (§10.1)                                   |
-| `MOCA_GRANT_SIGNING_KEY` _(file)_      | control plane                          | —, required under `multi`  | grant key ring, newest first                                  |
-| `MOCA_GRANT_PUBLIC_KEYS`               | `moca-egress`, `microvm-worker`, relay | —, required under `multi`  | `kid:base64-DER`, comma-separated                             |
-| `MOCA_GRANT_TTL_S`                     | control plane                          | `300`                      | grant lifetime (§6.2)                                         |
-| `MOCA_TURN_MAX_S`                      | control plane                          | `1800`                     | `turn_exp` cap; should match the worker's own turn deadline   |
-| `MOCA_TOKEN_TTL_S`                     | control plane                          | `60`                       | upper bound on the token endpoint's `expires_in` (§6.3)       |
-| `MOCA_EGRESS_CP_TOKEN` _(file)_        | control plane, `moca-egress`           | —, required under `multi`  | `moca-egress`'s credential for `/internal/token`              |
-| `MOCA_EGRESS_ALLOW`                    | `moca-egress`                          | —, required                | destination host allowlist (Z5 E4)                            |
-| `MOCA_EGRESS_INSPECT`                  | `moca-egress`                          | empty                      | extra hosts to intercept for audit detail (§8.5)              |
-| `MOCA_EGRESS_UPSTREAM_CA` _(file)_     | `moca-egress`                          | system roots only          | additional upstream trust, e.g. an internal CA                |
-| `MOCA_EGRESS_CA` _(file)_              | `moca-egress`                          | —, required                | interception CA key and certificate                           |
-| `MOCA_EGRESS_INFERENCE_ADDR`           | `moca-egress`                          | `127.0.0.1:3129`           | inference listener (§8.6)                                     |
-| `MOCA_EGRESS_MAX_CONNS_PER_VM`         | `moca-egress`                          | `32`                       | per-VM (or per-container) concurrent connections              |
-| `MOCA_EGRESS_MAX_REQUESTS_PER_SESSION` | `moca-egress`                          | `10000`                    | Z5's hard per-session cap                                     |
-| `MOCA_RELAY_EXEC_TOKEN` _(file)_       | relay, workers                         | —, required                | worker credential for `SandboxExec` (R5)                      |
-| `MOCA_SANDBOXES_FILE`                  | relay, `moca-egress`                   | `/etc/moca/sandboxes.json` | container sandbox id → owner → address (§9.2)                 |
-| `MOCA_BUNDLE_MAX_BYTES`                | control plane, worker                  | `8388608`                  | compressed bundle cap (§7.3)                                  |
-| `MOCA_BUNDLE_CACHE_BYTES`              | worker                                 | `134217728`                | per-worker `ResourceSet` LRU bound                            |
-| `SH_LOCAL_TOOLS`                       | worker                                 | unset                      | development opt-in to local tools; refused under `multi` (R3) |
+| Setting                                | Read by                                | Default                    | Meaning                                                                                          |
+| -------------------------------------- | -------------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------ |
+| `MOCA_TENANCY`                         | every component                        | `single`                   | `single` \| `multi` (§10.1)                                                                      |
+| `MOCA_GRANT_SIGNING_KEY` _(file)_      | control plane                          | —, required under `multi`  | grant key ring, newest first                                                                     |
+| `MOCA_GRANT_PUBLIC_KEYS`               | `moca-egress`, `microvm-worker`, relay | —, required under `multi`  | `kid:base64-DER`, comma-separated                                                                |
+| `MOCA_GRANT_TTL_S`                     | control plane                          | `300`                      | grant lifetime (§6.2)                                                                            |
+| `MOCA_TURN_MAX_S`                      | control plane                          | `1800`                     | `turn_exp` cap; should match the worker's own turn deadline                                      |
+| `MOCA_TOKEN_TTL_S`                     | control plane                          | `60`                       | upper bound on the token endpoint's `expires_in` (§6.3)                                          |
+| `MOCA_EGRESS_CP_TOKEN` _(file)_        | control plane, `moca-egress`           | —, required under `multi`  | `moca-egress`'s credential for `/internal/token`                                                 |
+| `MOCA_EGRESS_ALLOW`                    | `moca-egress`                          | —, required                | destination host allowlist (Z5 E4)                                                               |
+| `MOCA_EGRESS_INSPECT`                  | `moca-egress`                          | empty                      | extra hosts to intercept for audit detail (§8.5)                                                 |
+| `MOCA_EGRESS_UPSTREAM_CA` _(file)_     | `moca-egress`                          | system roots only          | additional upstream trust, e.g. an internal CA                                                   |
+| `MOCA_EGRESS_CA` _(file)_              | `moca-egress`                          | —, required                | interception CA key and certificate                                                              |
+| `MOCA_EGRESS_INFERENCE_ADDR`           | `moca-egress`                          | `127.0.0.1:3129`           | inference listener (§8.6)                                                                        |
+| `MOCA_EGRESS_MAX_CONNS_PER_VM`         | `moca-egress`                          | `32`                       | per-VM (or per-container) concurrent connections                                                 |
+| `MOCA_EGRESS_MAX_REQUESTS_PER_SESSION` | `moca-egress`                          | `10000`                    | Z5's hard per-session cap                                                                        |
+| `MOCA_RELAY_EXEC_TOKEN`                | relay, workers                         | —, required                | worker credential for `SandboxExec` (R5); an environment variable in S1, a file per §6.7 from S2 |
+| `MOCA_RELAY_EXEC_ADDR`                 | relay                                  | unset ⇒ one listener       | binds `SandboxExec` on its own listener, split from attach (R5)                                  |
+| `MOCA_RELAY_EXEC_PORT`                 | compose                                | `9444`                     | exec listener port, brain-side only                                                              |
+| `MOCA_BRAIN_SUBNET`                    | compose                                | `172.31.250.0/24`          | `moca-brain` network subnet (R8)                                                                 |
+| `MOCA_RELAY_BRAIN_IP`                  | compose                                | `172.31.250.10`            | relay's address on `moca-brain`, where `MOCA_RELAY_EXEC_ADDR` binds                              |
+| `MOCA_SANDBOX_SUBNET`                  | `deploy/vm`                            | `10.89.40.0/24`            | dedicated podman network subnet for sandbox containers (R8)                                      |
+| `MOCA_SANDBOX_GATEWAY`                 | `deploy/vm`                            | `10.89.40.1`               | gateway on that subnet; `host.containers.internal` inside a sandbox                              |
+| `MOCA_SANDBOXES_FILE`                  | relay, `moca-egress`                   | `/etc/moca/sandboxes.json` | container sandbox id → owner → address (§9.2)                                                    |
+| `MOCA_BUNDLE_MAX_BYTES`                | control plane, worker                  | `8388608`                  | compressed bundle cap (§7.3)                                                                     |
+| `MOCA_BUNDLE_CACHE_BYTES`              | worker                                 | `134217728`                | per-worker `ResourceSet` LRU bound                                                               |
+| `SH_LOCAL_TOOLS`                       | worker                                 | unset                      | development opt-in to local tools; refused under `multi` (R3)                                    |
 
 Defaults marked as numbers are starting points; E8/E14 may move them.
 
