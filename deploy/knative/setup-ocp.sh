@@ -428,7 +428,11 @@ if $KUBECTL get secret sh-relay-token -n "$NAMESPACE" &>/dev/null; then
   # the overlay's patch also now sources from it (patch-relay-token.yaml). Add the missing key
   # without touching SH_RELAY_TOKEN -- same never-rotate rule, applied per-key instead of
   # per-Secret so an old Secret does not need re-creating to pick up a new field.
-  if [ -z "$($KUBECTL get secret sh-relay-token -n "$NAMESPACE" -o jsonpath='{.data.MOCA_RELAY_EXEC_TOKEN}')" ]; then
+  # The read's status first: inside `[ -z "$(...)" ]` a failed get reads as "key absent", and
+  # would add -- i.e. rotate -- an exec token a running harness already holds.
+  current_exec="$($KUBECTL get secret sh-relay-token -n "$NAMESPACE" -o jsonpath='{.data.MOCA_RELAY_EXEC_TOKEN}')" ||
+    die "could not read sh-relay-token to check for MOCA_RELAY_EXEC_TOKEN; not generating a new one"
+  if [ -z "$current_exec" ]; then
     if $DRY_RUN; then
       log_info "[dry-run] would add MOCA_RELAY_EXEC_TOKEN to sh-relay-token (value redacted)"
     else

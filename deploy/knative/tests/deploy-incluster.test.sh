@@ -31,7 +31,8 @@ case "$1 $2" in
   [ -d "$SECRET_DIR" ] || exit 1
   for a in "$@"; do
     case "$a" in
-    jsonpath=*) key="${a#jsonpath=\{.data.}"; key="${key%\}}"
+    jsonpath=*) [ -n "${FAIL_JSONPATH_GET:-}" ] && { echo 'error: You must be logged in to the server' >&2; exit 1; }
+      key="${a#jsonpath=\{.data.}"; key="${key%\}}"
       [ -f "$SECRET_DIR/$key" ] && base64 <"$SECRET_DIR/$key" | tr -d '\n'
       ;;
     esac
@@ -133,6 +134,15 @@ check "worker-deployment.yaml does not reference MOCA_RELAY_EXEC_TOKEN" \
 exec_tok="$(key MOCA_RELAY_EXEC_TOKEN)"
 check "the exec token never appears in the script's output" \
   "$([ -n "$exec_tok" ] && ! grep -qF -- "$exec_tok" "$TMP/out.txt" && echo yes || echo no)" "yes"
+
+echo "case 5: a failed read of the exec key is not mistaken for an absent one"
+rm -rf "$SECRET_DIR"; mkdir -p "$SECRET_DIR"
+printf '%s' old-sandbox-token >"$SECRET_DIR/SH_RELAY_TOKEN"
+printf '%s' existing-exec-token >"$SECRET_DIR/MOCA_RELAY_EXEC_TOKEN"
+rc=0; run SANDBOX_TOKEN=tok-under-test FAIL_JSONPATH_GET=1 || rc=$?
+check "the script stops" "$([ "$rc" != 0 ] && echo yes || echo no)" "yes"
+check "the existing exec token is not rotated" "$(key MOCA_RELAY_EXEC_TOKEN)" "existing-exec-token"
+check "it says why" "$(grep -c "could not read sh-relay-token" "$TMP/out.txt")" "1"
 
 echo
 echo "Total failures: $FAILS"

@@ -36,7 +36,13 @@ else
 fi
 # The exec token is generated once and never rotated by a re-run: the harness reads it from this
 # Secret, so rotating it here would leave a running harness presenting the old value.
-if [ -z "$(oc get secret "$SECRET_NAME" -n "$NS" -o "jsonpath={.data.$EXEC_KEY}")" ]; then
+# The read's own status is checked first: inside `[ -z "$(...)" ]` a failed get (an API error, an
+# expired login) reads as "key absent", and would rotate the token this branch exists to keep.
+if ! current_exec="$(oc get secret "$SECRET_NAME" -n "$NS" -o "jsonpath={.data.$EXEC_KEY}")"; then
+  echo "could not read $SECRET_NAME to check for $EXEC_KEY; not generating a new one" >&2
+  exit 1
+fi
+if [ -z "$current_exec" ]; then
   exec_token="$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
   [ -n "$exec_token" ] || { echo "could not generate $EXEC_KEY from /dev/urandom" >&2; exit 1; }
   oc patch secret "$SECRET_NAME" -n "$NS" --type=merge \
