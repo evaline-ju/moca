@@ -163,4 +163,21 @@ describe('applyModelGateway', () => {
       expect(process.env.ANTHROPIC_API_KEY).toBe('sk-deployment'); // notsecret
     });
   });
+
+  describe('a non-Anthropic model (PR #350 review)', () => {
+    const openaiModel = { id: 'gpt-x', api: 'openai-completions', headers: {} } as never;
+
+    it('refuses a per-caller credential rather than dropping it for the shared one', () => {
+      expect(() =>
+        applyModelGateway(openaiModel, {
+          upstreamCredential: { mode: 'direct', value: 'sk-caller' }, // notsecret
+        }),
+      ).toThrow(/per-caller upstream credential cannot be applied to a 'openai-completions' model/);
+    });
+
+    it('still returns the model untouched when no caller credential is in play', () => {
+      process.env.ANTHROPIC_BASE_URL = 'https://env-gw/v1';
+      expect(applyModelGateway(openaiModel, {})).toBe(openaiModel);
+    });
+  });
 });

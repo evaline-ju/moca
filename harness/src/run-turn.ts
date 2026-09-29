@@ -503,7 +503,17 @@ export function applyModelGateway<M extends { headers?: Record<string, unknown> 
   // models carry their own baseUrl/headers/auth from synthesizeOpenAICompletionsModel — leave
   // them untouched (else we'd clobber baseUrl with ANTHROPIC_BASE_URL and inject a wrong Bearer).
   const api = (baseModel as { api?: string }).api;
-  if (api && api !== 'anthropic-messages') return baseModel;
+  if (api && api !== 'anthropic-messages') {
+    // A caller's own credential can only be applied on this path. Returning the model unchanged
+    // would discard it silently and send the turn on the shared operator credential instead --
+    // spending one principal's turn on another's key (MI1 §5 R2). Fail the turn rather than that.
+    if (config?.upstreamCredential) {
+      throw new Error(
+        `a per-caller upstream credential cannot be applied to a '${api}' model: only anthropic-messages models carry it`,
+      );
+    }
+    return baseModel;
+  }
   // `||` (not `??`) so an empty-string config value falls back to the env var rather than
   // suppressing it — "" is a "not set" sentinel here, not a meaningful credential.
   const authToken =
