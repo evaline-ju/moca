@@ -1,3 +1,5 @@
+import { SandboxExecService } from '@sh/k8s-sandbox';
+import { Server, ServerCredentials, type ServerWritableStream } from '@grpc/grpc-js';
 import { describe, it, expect, vi } from 'vitest';
 import {
   orderByLoad,
@@ -330,11 +332,30 @@ describe('selectPoolSandbox: the real defaultExecClient (MI1 R5)', () => {
     expect((err as Error).message).toMatch(/MOCA_RELAY_EXEC_TOKEN is not set/);
   });
 
-  it('builds a real relay exec client once MOCA_RELAY_EXEC_TOKEN is set, without dialing a relay', async () => {
+  it('builds a real relay exec client once MOCA_RELAY_EXEC_TOKEN is set, and it sends that token', async () => {
+    // A fake SandboxExec server records the bearer the built client presents: the client is the one
+    // defaultExecClient constructed from the environment, not one this test made (PR #350 review).
+    let seen: unknown;
+    const server = new Server();
+    server.addService(SandboxExecService, {
+      exec: (call: ServerWritableStream<unknown, unknown>) => {
+        seen = call.metadata.get('authorization')[0];
+        call.end();
+      },
+      abort: (_call: unknown, cb: (e: null, r: object) => void) => cb(null, {}),
+    });
+    const port = await new Promise<number>((resolve, reject) =>
+      server.bindAsync('127.0.0.1:0', ServerCredentials.createInsecure(), (e, p) =>
+        e ? reject(e) : resolve(p),
+      ),
+    );
     const lease = fakeLease({ 'sbx-remote-1': 0 }, opts.cap);
     let capturedClient: ExecClientLike | undefined;
     const sel = await selectPoolSandbox(
-      env({ MOCA_RELAY_EXEC_TOKEN: 'worker-tok' /* notsecret */ }),
+      env({
+        MOCA_RELAY_EXEC_TOKEN: 'worker-tok' /* notsecret */,
+        SH_RELAY_ADDR: `127.0.0.1:${port}`,
+      }),
       '/head',
       'run-1',
       opts,
@@ -356,7 +377,29 @@ describe('selectPoolSandbox: the real defaultExecClient (MI1 R5)', () => {
     );
     expect(sel?.transport).toBeDefined();
     expect(capturedClient).toBeDefined();
-    expect(typeof (capturedClient as unknown as { exec?: unknown })?.exec).toBe('function');
+    const client = capturedClient as unknown as {
+      exec: (req: unknown) => NodeJS.EventEmitter;
+      close: () => void;
+    };
+    await new Promise<void>((resolve) => {
+      const call = client.exec({
+        sandboxId: 'sbx-remote-1',
+        exec: {
+          reqId: 1,
+          command: 'true',
+          stdin: new Uint8Array(),
+          timeoutS: 5,
+          streaming: true,
+          workspaceKey: '',
+        },
+      });
+      call.on('data', () => {});
+      call.on('end', () => resolve());
+      call.on('error', () => resolve());
+    });
+    client.close();
+    server.forceShutdown();
+    expect(seen).toBe('Bearer worker-tok');
   });
 });
 

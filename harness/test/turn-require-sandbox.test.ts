@@ -63,7 +63,7 @@ describe('a server-mode turn with no resolvable sandbox (MI1 R3)', () => {
     expect(createAgentSession).not.toHaveBeenCalled();
   });
 
-  it('the error carries its name marker, which turnErrorStatus matches on', async () => {
+  it('the error carries its name marker, so a caller can tell it from any other turn failure', async () => {
     const err = await executeTurn({
       prompt: 'hi',
       sessionId: 's1',
