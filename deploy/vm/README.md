@@ -232,6 +232,14 @@ If a sandbox container cannot attach on a real VM, `SH_SANDBOX_RELAY_ADDR` (or, 
 cannot resolve `host.containers.internal`, the VM's actual gateway or bridge IP) is the override to
 reach for first; `sudo nft list table inet moca_sandbox` shows the loaded rules.
 
+**Cloud instance metadata is still reachable from sandboxes.** Because forwarded traffic is
+untouched, a sandbox can reach `169.254.169.254`. On a cloud VM that can expose the instance's own
+role credentials, which belong to the host, not to any session. Until S5 filters egress, close it at
+the platform. On EC2, require IMDSv2 with a hop limit of 1 (`aws ec2 modify-instance-metadata-options
+--http-tokens required --http-put-response-hop-limit 1`): a forwarded container request then cannot
+obtain a token. On other clouds, use the equivalent, or drop `169.254.0.0/16` from `moca-sandbox0`
+in your own forward-hook table.
+
 ## Reboots
 
 Both units are `WantedBy=multi-user.target`, so systemd brings the relay and the supervisor back
