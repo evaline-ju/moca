@@ -40,6 +40,14 @@ export {
   type RunKubectl,
 } from './kubectl.js';
 export { K8sSecretStore, secretNameFor, subjectHash } from './k8s-secret-store.js';
+export { FileCredentialStore } from './file-store.js';
+export {
+  VaultCredentialStore,
+  vaultTokenSource,
+  type VaultFetch,
+  type VaultStoreOptions,
+} from './vault-store.js';
+export { formatEnvLines, generateMu1Secrets } from './genkeys.js';
 export {
   AUDIT_STREAM,
   DEFAULT_PAGE_SIZE,
@@ -78,4 +86,12 @@ export {
   type ExchangeResponse,
 } from './exchange.js';
 export { buildHandler, startControlPlane } from './server.js';
-export { configFromEnv, depsFromEnv, portFromEnv, verifyKeysFromEnv } from './main.js';
+export {
+  CREDENTIAL_STORES,
+  configFromEnv,
+  credentialStoreFromEnv,
+  depsFromEnv,
+  portFromEnv,
+  verifyKeysFromEnv,
+  type CredentialStoreKind,
+} from './main.js';
