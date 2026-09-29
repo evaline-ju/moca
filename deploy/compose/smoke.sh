@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Live smoke for the compose trial (#342): brings the stack up in a throwaway project, proves the
 # supervisor has a healthy worker pool, that the sandbox attached through the relay into Redis, and
-# that a real /turn runs a command in that sandbox and persists its session -- then tears it all
-# down. Needs Docker (or podman's docker CLI) with Compose, and a model credential.
+# that a real /turn runs a command in that sandbox and persists its session. Then, with the MU1
+# control plane on (#348): that discovery advertises the harness, that an AUTHENTICATED /v1/turn
+# streams over SSE on a caller's own stored credential, and that the credential survives
+# `docker compose down && up` -- then tears it all down. Needs Docker (or podman's docker CLI) with
+# Compose, and a model credential.
 #
 #   COMPOSE_LIVE_SMOKE=1 ANTHROPIC_API_KEY=... ./deploy/compose/smoke.sh
 #
@@ -11,6 +14,7 @@
 #   SH_COMPOSE_BUILD=1     Build both images from this checkout (docker build) and run those instead
 #                          of the published ones. Needs pi-fork populated.
 #   SH_PORT                Host port for the supervisor (default 18080, to stay off a real 8080).
+#   SH_CP_PORT             Host port for the control plane (default 18090, to stay off a real 8090).
 #   KEEP=1                 Leave the stack running afterwards, for debugging.
 #   Model settings (ANTHROPIC_*, OPENAI_*, SH_MODEL*) are copied into the project's .env.
 set -euo pipefail
@@ -23,6 +27,7 @@ fi
 COMPOSE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJ="$(mktemp -d)"
 SH_PORT="${SH_PORT:-18080}"
+SH_CP_PORT="${SH_CP_PORT:-18090}"
 PASS=0
 FAIL=0
 ok() {
@@ -55,6 +60,8 @@ if [[ "${SH_COMPOSE_BUILD:-}" == 1 ]]; then
   docker build --load -q -t dev.local/remote-worker:compose -f "$REPO_ROOT/remote-worker/Dockerfile" "$REPO_ROOT"
   IMAGE_ENV=(SH_HARNESS_IMAGE=dev.local/serverless-harness:compose SH_SANDBOX_IMAGE=dev.local/remote-worker:compose)
 fi
+HARNESS_IMAGE=ghcr.io/rossoctl/serverless-harness:latest
+[[ "${SH_COMPOSE_BUILD:-}" != 1 ]] || HARNESS_IMAGE=dev.local/serverless-harness:compose
 # A unique project name, so a smoke run never adopts or tears down someone's real trial stack.
 dc() { "${COMPOSE[@]}" -p "sh-smoke-$$" --project-directory "$PROJ" "${FILES[@]}" "$@"; }
 
@@ -78,6 +85,14 @@ trap teardown EXIT
     echo 'SH_TURNS_PER_WORKER=2'
     echo 'SH_WORKERS=2'
     echo "SH_PORT=$SH_PORT"
+    echo "SH_CP_PORT=$SH_CP_PORT"
+    # The control plane, as install.sh turns it on. The client id is never exercised: this smoke
+    # stands in for the device-flow login by minting an api token with the control plane's own key.
+    echo 'COMPOSE_PROFILES=control-plane'
+    echo 'SH_GITHUB_CLIENT_ID=Iv1.compose-smoke-unused'
+    # Generated exactly as install.sh does, by the image's own key generator.
+    docker run --rm --network none --user 1000:1000 -w /app/packages/control-plane "$HARNESS_IMAGE" \
+      node --import tsx src/genkeys.ts
     printf '%s\n' ${IMAGE_ENV[@]+"${IMAGE_ENV[@]}"}
     for var in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL OPENAI_API_KEY OPENAI_BASE_URL \
       SH_MODEL SH_MODEL_PROVIDER SH_MODEL_API SH_MODEL_BASE_URL SH_MODEL_AUTH SH_MODEL_CUSTOM; do
@@ -86,7 +101,8 @@ trap teardown EXIT
   } >"$PROJ/.env"
 )
 
-echo "bringing the stack up (project sh-smoke-$$, supervisor on 127.0.0.1:$SH_PORT)"
+grep -q '^SH_CREDENTIAL_KEK=' "$PROJ/.env" || { echo "FAIL: the key generator produced nothing" >&2; exit 1; }
+echo "bringing the stack up (project sh-smoke-$$, supervisor on 127.0.0.1:$SH_PORT, control plane on 127.0.0.1:$SH_CP_PORT)"
 dc up -d
 
 # $1 seconds, polling a command until it succeeds.
@@ -138,6 +154,91 @@ if [[ -n "$SESSION_ID" ]] && [[ -n "$(dc exec -T redis redis-cli --scan --patter
   ok
 else
   ko "no session:$SESSION_ID* key in Redis"
+fi
+
+CP="http://127.0.0.1:$SH_CP_PORT"
+cp_ready() { curl -sf "$CP/readyz" >/dev/null; }
+
+claim 5 "the control plane is ready and advertises the harness at 127.0.0.1:$SH_PORT"
+if wait_for 90 cp_ready; then
+  ADVERTISED="$(curl -s "$CP/v1/discovery" | jq -r '.harnessUrl // empty' 2>/dev/null || true)"
+  if [[ "$ADVERTISED" == "http://127.0.0.1:$SH_PORT" ]]; then
+    ok "harnessUrl=$ADVERTISED"
+  else
+    ko "discovery advertises '$ADVERTISED', expected http://127.0.0.1:$SH_PORT"
+  fi
+else
+  ko "control plane /readyz never answered on $CP"
+fi
+
+claim 6 "an authenticated POST /v1/turn streams a reply over SSE, on the caller's own stored credential"
+# The api token a device-flow login would return, minted with the control plane's own signing key
+# INSIDE its container (the key never leaves it). Headers go through files so no bearer reaches an argv.
+API_HDR="$PROJ/api.hdr"
+TURN_HDR="$PROJ/turn.hdr"
+(
+  umask 077
+  printf 'Authorization: Bearer %s\n' "$(dc exec -T control-plane node --import tsx --input-type=module -e \
+    "import { makeSigner } from './src/token.ts';
+     const s = makeSigner(process.env.SH_SESSION_TOKEN_PRIVATE_KEY);
+     process.stdout.write(s.mint({ sub: 'smoke:1', tenant: 'smoke:1', roles: [], scope: ['api'], ttlSeconds: 900 }));" \
+    2>/dev/null)" >"$API_HDR"
+)
+# The caller's inference credential: a Bearer for the gateway this smoke was given (MU1 delivers an
+# inference credential as `Authorization: Bearer`, spec §6.2).
+INFERENCE_TOKEN="${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-}}"
+ENDPOINT="${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
+HOST="$(sed -E 's#^[a-z]+://([^/:]+).*#\1#' <<<"$ENDPOINT")"
+CRED_BODY="$(SMOKE_TOKEN="$INFERENCE_TOKEN" jq -nc --arg ep "$ENDPOINT" --arg host "$HOST" \
+  '{kind: "bearer", consumer: "inference", destination: {hosts: [$host]}, endpoint: $ep, secret: {token: env.SMOKE_TOKEN}}')"
+PUT_STATUS="$(curl -s -o "$PROJ/put.json" -w '%{http_code}' -X PUT -H @"$API_HDR" -H 'Content-Type: application/json' \
+  --data-binary @- "$CP/v1/credentials/smoke-inference" <<<"$CRED_BODY" || true)"
+# One authenticated turn: a new session on the stored credential, its session token, and an SSE
+# /v1/turn with it. The turn only succeeds if the exchange DECRYPTS the credential and the gateway
+# accepts it -- which is what makes it, unlike `GET /v1/credentials` (list never decrypts), proof
+# that the stored secret is intact.
+authed_turn() {
+  local tag="$1" session sid done_sid sse="$PROJ/turn-$1.sse"
+  session="$(curl -s -X POST -H @"$API_HDR" -H 'Content-Type: application/json' -d '{}' "$CP/v1/sessions" || true)"
+  sid="$(jq -r '.sessionId // empty' <<<"$session" 2>/dev/null || true)"
+  if [[ -z "$sid" ]]; then
+    ko "POST /v1/sessions returned no session: ${session:0:300}"
+    return
+  fi
+  (
+    umask 077
+    printf 'Authorization: Bearer %s\n' "$(jq -r '.token // empty' <<<"$session" 2>/dev/null || true)" >"$TURN_HDR"
+  )
+  curl -sN --max-time 180 -H @"$TURN_HDR" -H 'Accept: text/event-stream' -H 'Content-Type: application/json' \
+    -D "$PROJ/turn-$tag.headers" -d "$(jq -nc --arg s "$sid" '{sessionId: $s, prompt: "Reply with exactly the word: pong"}')" \
+    "http://127.0.0.1:$SH_PORT/v1/turn" >"$sse" || true
+  done_sid="$(sed -n 's/^data: //p' "$sse" | jq -r 'select(.type == "done") | .sessionId' 2>/dev/null | head -1)"
+  if ! grep -qi '^content-type: text/event-stream' "$PROJ/turn-$tag.headers"; then
+    ko "not an SSE response: $(head -c 400 "$sse")"
+  elif grep -q '^event: text' "$sse" && [[ "$done_sid" == "$sid" ]]; then
+    ok "session $sid streamed $(grep -c '^event: text' "$sse") text frame(s) and a done frame"
+  else
+    ko "expected text frames and a done frame for $sid: $(head -c 600 "$sse")"
+  fi
+}
+
+if [[ -z "$INFERENCE_TOKEN" ]]; then
+  ko "no ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY to store as the caller's credential"
+elif [[ "$PUT_STATUS" != 2* ]]; then
+  ko "PUT /v1/credentials/smoke-inference answered $PUT_STATUS: $(head -c 300 "$PROJ/put.json")"
+else
+  authed_turn before
+fi
+
+claim 7 "a stored credential survives docker compose down && up, and still DECRYPTS for a turn"
+# Redis has no volume, so every session is gone after the restart; the credential, on its own
+# volume, is not. The api token still verifies: the signing key lives in .env.
+dc down >/dev/null 2>&1
+dc up -d >/dev/null 2>&1
+if wait_for 90 cp_ready && wait_for 120 metrics && wait_for 90 sandbox_attached; then
+  authed_turn after
+else
+  ko "the stack did not come back after down && up"
 fi
 
 printf '\n=== Results: %s passed, %s failed ===\n' "$PASS" "$FAIL"

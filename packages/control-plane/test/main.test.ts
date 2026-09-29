@@ -1,8 +1,20 @@
 import { generateKeyPairSync } from 'node:crypto';
 import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { configFromEnv, portFromEnv, verifyKeysFromEnv } from '../src/main.js';
-import { keyIdFor, publicKeyToBase64 } from '../src/token.js';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { FileCredentialStore } from '../src/file-store.js';
+import { formatEnvLines, generateMu1Secrets } from '../src/genkeys.js';
+import { K8sSecretStore } from '../src/k8s-secret-store.js';
+import {
+  configFromEnv,
+  credentialStoreFromEnv,
+  portFromEnv,
+  verifyKeysFromEnv,
+} from '../src/main.js';
+import { keyIdFor, makeSigner, parseKeyset, publicKeyToBase64, verifyToken } from '../src/token.js';
+import { VaultCredentialStore } from '../src/vault-store.js';
 
 const { privateKey, publicKey } = generateKeyPairSync('ed25519');
 const PRIVATE_PEM = privateKey.export({ format: 'pem', type: 'pkcs8' }).toString();
@@ -125,5 +137,107 @@ describe('fail-fast on missing configuration', () => {
       // every turn with a healthy-looking pod.
       expect(() => configFromEnv(env), missing).toThrow(new RegExp(missing));
     }
+  });
+});
+
+describe('credentialStoreFromEnv (SH_CREDENTIAL_STORE)', () => {
+  const dir = () => mkdtempSync(join(tmpdir(), 'cp-main-store-'));
+
+  it('defaults to the Kubernetes store, so an existing deployment needs no new setting', () => {
+    expect(credentialStoreFromEnv(baseEnv)).toBeInstanceOf(K8sSecretStore);
+    expect(
+      credentialStoreFromEnv({ ...baseEnv, SH_CREDENTIAL_STORE: 'kubernetes' }),
+    ).toBeInstanceOf(K8sSecretStore);
+  });
+
+  it('selects the file store, which needs SH_CREDENTIAL_DIR', () => {
+    expect(
+      credentialStoreFromEnv({ ...baseEnv, SH_CREDENTIAL_STORE: 'file', SH_CREDENTIAL_DIR: dir() }),
+    ).toBeInstanceOf(FileCredentialStore);
+    expect(() => credentialStoreFromEnv({ ...baseEnv, SH_CREDENTIAL_STORE: 'file' })).toThrow(
+      /SH_CREDENTIAL_DIR is required/,
+    );
+  });
+
+  it('selects the Vault store, which needs VAULT_ADDR and a token', () => {
+    const token = 'hvs.x'; // notsecret
+    const vault = { ...baseEnv, SH_CREDENTIAL_STORE: 'vault', VAULT_ADDR: 'https://vault:8200' };
+    expect(credentialStoreFromEnv({ ...vault, VAULT_TOKEN: token })).toBeInstanceOf(
+      VaultCredentialStore,
+    );
+    expect(() => credentialStoreFromEnv(vault)).toThrow(/VAULT_TOKEN/);
+    expect(() => credentialStoreFromEnv({ ...vault, VAULT_ADDR: '', VAULT_TOKEN: token })).toThrow(
+      /VAULT_ADDR is required/,
+    );
+  });
+
+  it('refuses an unknown store rather than falling back to the default', () => {
+    for (const bad of ['vualt', 'k8s', 'File', 'redis']) {
+      expect(() => credentialStoreFromEnv({ ...baseEnv, SH_CREDENTIAL_STORE: bad }), bad).toThrow(
+        /SH_CREDENTIAL_STORE must be one of kubernetes, file, vault/,
+      );
+    }
+  });
+
+  it('refuses every store without a usable KEK', () => {
+    const env: NodeJS.ProcessEnv = {
+      ...baseEnv,
+      SH_CREDENTIAL_STORE: 'file',
+      SH_CREDENTIAL_DIR: dir(),
+    };
+    delete env.SH_CREDENTIAL_KEK;
+    expect(() => credentialStoreFromEnv(env)).toThrow(/SH_CREDENTIAL_KEK/);
+  });
+});
+
+describe('the signing key as one line of base64 PKCS#8 DER (env-file form)', () => {
+  it('builds the same signer as the PEM, so either form can be deployed', () => {
+    const der = (privateKey.export({ format: 'der', type: 'pkcs8' }) as Buffer).toString('base64');
+    expect(makeSigner(der).kid).toBe(makeSigner(PRIVATE_PEM).kid);
+    expect(makeSigner(der).kid).toBe(keyIdFor(publicKey));
+  });
+
+  it('still refuses a public key or garbage in the one-line form', () => {
+    const spki = publicKeyToBase64(publicKey);
+    expect(() => makeSigner(spki)).toThrow(/not a usable private key/);
+    expect(() => makeSigner('not-base64-der')).toThrow(/not a usable private key/);
+  });
+});
+
+describe('generateMu1Secrets (install.sh`s key generator)', () => {
+  it('emits exactly the four secrets, each in the form its consumer parses', () => {
+    const s = generateMu1Secrets();
+    expect(Object.keys(s).sort()).toEqual([
+      'SH_CREDENTIAL_KEK',
+      'SH_EXCHANGE_TOKEN',
+      'SH_SESSION_TOKEN_PRIVATE_KEY',
+      'SH_SESSION_TOKEN_PUBLIC_KEYS',
+    ]);
+    // A control plane boots on them (with a client id, which is the operator's input) ...
+    const env = { ...s, SH_GITHUB_CLIENT_ID: 'Iv1.fake' } as NodeJS.ProcessEnv; // notsecret
+    expect(() => configFromEnv(env)).not.toThrow();
+    // ... and the harness's published keyset verifies what that control plane mints.
+    const signer = makeSigner(s.SH_SESSION_TOKEN_PRIVATE_KEY!);
+    const token = signer.mint({
+      sub: 'github:1',
+      tenant: 't',
+      roles: [],
+      scope: ['api'],
+      ttlSeconds: 60,
+    });
+    expect(verifyToken(token, parseKeyset(s.SH_SESSION_TOKEN_PUBLIC_KEYS)).sub).toBe('github:1');
+    expect(s.SH_EXCHANGE_TOKEN).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('is single-line per secret, so each is one env-file assignment', () => {
+    const lines = formatEnvLines(generateMu1Secrets()).split('\n').filter(Boolean);
+    expect(lines).toHaveLength(4);
+    for (const l of lines) expect(l).toMatch(/^SH_[A-Z_]+=[^\s]+$/);
+  });
+
+  it('is fresh every run', () => {
+    const a = generateMu1Secrets();
+    const b = generateMu1Secrets();
+    for (const k of Object.keys(a)) expect(a[k], k).not.toBe(b[k]);
   });
 });

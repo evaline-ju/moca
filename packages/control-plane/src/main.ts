@@ -3,6 +3,8 @@ import { fileURLToPath } from 'node:url';
 import type { KeyObject } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
 import { keksFromBase64 } from './envelope.js';
+import type { CredentialStore } from './credential-store.js';
+import { FileCredentialStore } from './file-store.js';
 import { adminSubjectsFromEnv, GithubOAuthProvider } from './identity.js';
 import { K8sSecretStore } from './k8s-secret-store.js';
 import { defaultRunKubectl } from './kubectl.js';
@@ -10,6 +12,7 @@ import { OwnershipIndex, type CpRedisLike } from './ownership.js';
 import { startControlPlane } from './server.js';
 import type { CpConfig, CpDeps } from './handlers.js';
 import { keyIdFor, makeSigner, parseKeyset, publicKeyFromBase64 } from './token.js';
+import { VaultCredentialStore, vaultTokenSource } from './vault-store.js';
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
   const v = env[name];
@@ -82,6 +85,52 @@ export function verifyKeysFromEnv(
   return keys;
 }
 
+export const CREDENTIAL_STORES = ['kubernetes', 'file', 'vault'] as const;
+export type CredentialStoreKind = (typeof CREDENTIAL_STORES)[number];
+
+/**
+ * `SH_CREDENTIAL_STORE`: where credentials live, behind the one CredentialStore interface (spec §6.6).
+ *
+ *   kubernetes (default) -- per-user Secrets via kubectl (k8s-secret-store.ts). Unchanged, so every
+ *                           existing Kubernetes deployment keeps its store without a new setting.
+ *   file                 -- one file per subject under SH_CREDENTIAL_DIR (file-store.ts). For a
+ *                           single-host trial -- the Docker Compose stack -- on a named volume.
+ *   vault                -- HashiCorp Vault KV v2 (vault-store.ts). For a VM deployment with no
+ *                           Kubernetes: test, staging, production.
+ *
+ * All three seal under the same SH_CREDENTIAL_KEK ring. An unknown value fails STARTUP rather than
+ * falling back to the default: a typo'd `vualt` silently writing Secrets through a kubectl that is not
+ * there would 503 every credential call from a healthy-looking process.
+ */
+export function credentialStoreFromEnv(env: NodeJS.ProcessEnv): CredentialStore {
+  const kind = env.SH_CREDENTIAL_STORE || 'kubernetes';
+  if (!(CREDENTIAL_STORES as readonly string[]).includes(kind)) {
+    throw new Error(
+      `SH_CREDENTIAL_STORE must be one of ${CREDENTIAL_STORES.join(', ')}, got "${kind}"`,
+    );
+  }
+  const keks = keksFromBase64(env.SH_CREDENTIAL_KEK);
+  switch (kind as CredentialStoreKind) {
+    case 'file':
+      return new FileCredentialStore({ dir: required(env, 'SH_CREDENTIAL_DIR'), keks });
+    case 'vault':
+      return new VaultCredentialStore({
+        addr: required(env, 'VAULT_ADDR'),
+        token: vaultTokenSource(env),
+        namespace: env.VAULT_NAMESPACE,
+        mount: env.SH_VAULT_KV_MOUNT || 'secret',
+        prefix: env.SH_VAULT_PATH || 'moca/credentials',
+        keks,
+      });
+    case 'kubernetes':
+      return new K8sSecretStore({
+        namespace: env.SH_CREDENTIAL_NAMESPACE ?? 'sh-credentials',
+        keks,
+        run: defaultRunKubectl,
+      });
+  }
+}
+
 export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
   const config = configFromEnv(env);
   const signer = makeSigner(env.SH_SESSION_TOKEN_PRIVATE_KEY!);
@@ -91,11 +140,7 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
   void client.connect().catch((err) => console.error('[control-plane] redis connect failed', err));
   return {
     index: new OwnershipIndex(client as unknown as CpRedisLike),
-    credentials: new K8sSecretStore({
-      namespace: env.SH_CREDENTIAL_NAMESPACE ?? 'sh-credentials',
-      keks: keksFromBase64(env.SH_CREDENTIAL_KEK),
-      run: defaultRunKubectl,
-    }),
+    credentials: credentialStoreFromEnv(env),
     identity: new GithubOAuthProvider({
       clientId: env.SH_GITHUB_CLIENT_ID!,
       adminSubjects: adminSubjectsFromEnv(env.SH_ADMIN_SUBJECTS),

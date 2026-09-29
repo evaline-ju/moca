@@ -171,4 +171,21 @@ describe('terminalFrame selection & parity', () => {
     const r: TurnResult = { sessionId: 's3', response: 'partial', stopReason: 'max_tokens' };
     expect(terminalFrame(r)).toEqual({ type: 'done', sessionId: 's3', stopReason: 'max_tokens' });
   });
+
+  // executeTurn copies the last message's stopReason, which is PI's normalized vocabulary
+  // (pi-fork packages/ai/src/types.ts: "stop" | "length" | "toolUse" | "error" | "aborted"), not the
+  // Anthropic wire's end_turn/max_tokens. Every fixture above invents the wire value, which is how a
+  // real, cleanly finished turn shipped ending in an `error` frame (#348's live smoke caught it).
+  it.each(['stop', 'length'])("pi's clean stop reason '%s' → done", (stopReason) => {
+    const r: TurnResult = { sessionId: 's4', response: 'pong', stopReason };
+    expect(terminalFrame(r)).toEqual({ type: 'done', sessionId: 's4', stopReason });
+  });
+
+  it.each(['error', 'aborted', 'toolUse'])(
+    "pi's stop reason '%s' is not a clean finish → error",
+    (stopReason) => {
+      const r: TurnResult = { sessionId: 's5', response: '', stopReason };
+      expect(terminalFrame(r).type).toBe('error');
+    },
+  );
 });

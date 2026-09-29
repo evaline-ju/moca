@@ -4,6 +4,15 @@ import { readSse, toFrame } from './sse-parser.js';
 import type { HarnessApi, StreamTurnArgs } from './types.js';
 import { trimTrailingSlashes } from './url.js';
 
+/**
+ * A clean finish, as the harness's terminalFrame reads it (harness/src/turn-stream.ts): pi's
+ * normalized reasons (`stop`, `length` -- what a real turn reports) and the Anthropic wire's
+ * (`end_turn`, `max_tokens`). Checking only the wire's made every real clean reply read as an error.
+ * A copy, not an import -- this client takes no workspace dependency, so it never pulls in pi -- held
+ * equal to the harness's set by test/harness.test.ts.
+ */
+export const CLEAN_STOP_REASONS = new Set(['stop', 'length', 'end_turn', 'max_tokens']);
+
 export class HarnessClient implements HarnessApi {
   private readonly base: string;
 
@@ -63,7 +72,7 @@ export class HarnessClient implements HarnessApi {
       };
       if (r.response) yield { type: 'text', delta: r.response };
       const stopReason = r.stopReason ?? 'end_turn';
-      yield r.errorMessage || (stopReason !== 'end_turn' && stopReason !== 'max_tokens')
+      yield r.errorMessage || !CLEAN_STOP_REASONS.has(stopReason)
         ? {
             type: 'error',
             sessionId: r.sessionId ?? sessionId,

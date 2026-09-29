@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { ApiError, TurnCancelledError } from '../src/api/errors.js';
 import type { TurnFrame } from '../src/api/frames.js';
-import { HarnessClient } from '../src/api/harness.js';
+import { readFileSync } from 'node:fs';
+import { CLEAN_STOP_REASONS, HarnessClient } from '../src/api/harness.js';
 import { json, scriptedFetch } from './helpers/fake-fetch.js';
 import { sseResponse, sseText } from './helpers/sse.js';
 
@@ -12,6 +13,23 @@ async function collect(it: AsyncGenerator<TurnFrame>): Promise<TurnFrame[]> {
   for await (const f of it) out.push(f);
   return out;
 }
+
+describe('CLEAN_STOP_REASONS', () => {
+  // The harness's terminalFrame and this client's sync fallback must agree on what a clean finish
+  // is: the two lists drifting from pi's vocabulary is exactly how #348's `error`-on-every-turn bug
+  // shipped. Read from source because mocactl takes no dependency on @sh/harness.
+  it('matches the harness`s set exactly', () => {
+    const src = readFileSync(
+      new URL('../../../harness/src/turn-stream.ts', import.meta.url),
+      'utf8',
+    );
+    const m = /export const CLEAN_STOP_REASONS = new Set\(\[([^\]]*)\]\)/.exec(src);
+    expect(m, 'CLEAN_STOP_REASONS not found in harness/src/turn-stream.ts').not.toBeNull();
+    const harness = [...m![1]!.matchAll(/'([^']+)'/g)].map((x) => x[1]).sort();
+    expect(harness.length).toBeGreaterThan(0);
+    expect([...CLEAN_STOP_REASONS].sort()).toEqual(harness);
+  });
+});
 
 describe('HarnessClient.streamTurn', () => {
   it('posts to /v1/turn with SSE accept and the session token', async () => {
@@ -39,6 +57,39 @@ describe('HarnessClient.streamTurn', () => {
     expect(calls[0].headers.accept).toBe('text/event-stream');
     expect(calls[0].headers.authorization).toBe('Bearer st');
   });
+
+  // The sync body carries executeTurn's stopReason, which is pi's normalized vocabulary ('stop',
+  // 'length'), not the Anthropic wire's end_turn/max_tokens -- the same mismatch that made the
+  // server's own terminalFrame end clean turns in `error` (#348).
+  it.each(['stop', 'length', 'end_turn', 'max_tokens'])(
+    "a sync JSON reply that stopped with '%s' ends in done",
+    async (stopReason) => {
+      const { fetch } = scriptedFetch(json({ sessionId: 's1', response: 'pong', stopReason }));
+      const frames = await collect(
+        new HarnessClient('http://h', fetch).streamTurn({
+          sessionId: 's1',
+          prompt: 'p',
+          token: 't',
+        }),
+      );
+      expect(frames.map((f) => f.type)).toEqual(['text', 'done']);
+    },
+  );
+
+  it.each(['error', 'aborted', 'toolUse'])(
+    "a sync JSON reply that stopped with '%s' ends in error",
+    async (stopReason) => {
+      const { fetch } = scriptedFetch(json({ sessionId: 's1', response: '', stopReason }));
+      const frames = await collect(
+        new HarnessClient('http://h', fetch).streamTurn({
+          sessionId: 's1',
+          prompt: 'p',
+          token: 't',
+        }),
+      );
+      expect(frames.at(-1)?.type).toBe('error');
+    },
+  );
 
   it('stops at the terminal frame even if more bytes follow', async () => {
     const { fetch } = scriptedFetch(

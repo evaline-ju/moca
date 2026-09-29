@@ -1,5 +1,4 @@
-import { createHash } from 'node:crypto';
-import { open, seal, type Opened } from './envelope.js';
+import { seal } from './envelope.js';
 import { CpError } from './errors.js';
 import {
   buildCreateSecretArgs,
@@ -15,6 +14,11 @@ import type {
   CredentialStore,
   StoredCredential,
 } from './credential-store.js';
+import { openOrBlameSubject, subjectHash } from './subject-document.js';
+
+// Re-exported: the hash is also every other store's object-name input (subject-document.ts), and
+// this module was its original home.
+export { subjectHash };
 
 /**
  * Per-user Kubernetes Secrets in a DEDICATED namespace, under envelope encryption (spec §6.5).
@@ -35,10 +39,6 @@ import type {
  * counts (one etcd object each, with watch and informer cost). The recorded direction is an external
  * manager -- Vault, or External Secrets -- behind the same CredentialStore interface (spec §6.6).
  */
-export function subjectHash(subject: string): string {
-  return createHash('sha256').update(subject).digest('hex').slice(0, 16);
-}
-
 export function secretNameFor(subject: string): string {
   return `sh-cred-${subjectHash(subject)}`;
 }
@@ -186,50 +186,15 @@ export class K8sSecretStore implements CredentialStore {
     // value sealed under a retired KEK still opens while that key remains in the ring, which is what
     // makes rotation possible; one sealed under a key that has been dropped throws rather than
     // reading as absent.
-    const opened = this.openOrBlameSubject(subject, name, sealed);
+    // The rotation log line and the subject-hash blame live in subject-document.ts, shared with the
+    // file and Vault stores; `data` is base64 on the wire, so decode before opening.
+    const opened = openOrBlameSubject(
+      this.keks,
+      subject,
+      name,
+      Buffer.from(sealed, 'base64').toString('utf8'),
+    );
     return { descriptor, secret: JSON.parse(opened) as Record<string, string> };
-  }
-
-  /**
-   * `open`, plus the two things an operator needs from it and a caller must never get.
-   *
-   * The rotation procedure's last step -- drop the retired KEK "once nothing is left under it" -- was
-   * a step nobody could decide: `open` computed the ring index and discarded it, nothing counted a
-   * non-primary open, `list()` never touches the KEK, `/v1` has no read-back path to sweep with, and
-   * the audit record carries the decision but not the key. So the only signal that the key had been
-   * dropped too early was the outage that followed. Both halves below exist to fix that:
-   *
-   * - `keyIndex > 0` is logged on EVERY read, deliberately not deduplicated. The terminating condition
-   *   is "no credential has opened under a non-primary key for N days", and a once-per-process log
-   *   would let a long-lived pod satisfy it while credentials were still stale. Silence in steady
-   *   state is what makes it a signal; during a rotation the volume IS the backlog.
-   * - On failure, the log gains the subject hash. `open`'s own message names the credential, but a
-   *   credential name is user-chosen and collides freely across subjects -- `my-anthropic` is the
-   *   obvious pick for everyone -- so without this an operator knew some users were broken and could
-   *   not enumerate which. The hash is already this class's object-name input, so it discloses no
-   *   login, and it reaches no caller: `writeError` reduces a non-CpError to a bare `internal_error`
-   *   with no message at all.
-   */
-  private openOrBlameSubject(subject: string, name: string, sealed: string): string {
-    // Annotated rather than inferred: an unannotated `let` is an evolving `any`, which would let a
-    // wrong shape reach `.plaintext` unchecked.
-    let opened: Opened;
-    try {
-      opened = open(this.keks, subject, name, Buffer.from(sealed, 'base64').toString('utf8'));
-    } catch (err) {
-      throw new Error(
-        `failed to decrypt credential '${name}' for subject ${subjectHash(subject)}`,
-        { cause: err },
-      );
-    }
-    if (opened.keyIndex > 0) {
-      console.warn(
-        `[control-plane] credential opened under NON-PRIMARY KEK ring index ${opened.keyIndex}: ` +
-          `subject=${subjectHash(subject)} credential=${name} -- re-seals on its next PUT; ` +
-          `the retired key cannot be dropped yet`,
-      );
-    }
-    return opened.plaintext;
   }
 
   /** Descriptors only, from annotations -- so this path never touches the KEK (spec §6.2). */

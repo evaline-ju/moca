@@ -133,9 +133,12 @@ export function parseKeyset(raw: string | undefined): Map<string, KeyObject> {
 }
 
 /**
- * Build a minting signer from a PKCS#8 PEM private key. Refuses a public key: the data plane holds
- * only public halves, and "the harness cannot mint" must be a property of this API rather than of
- * its callers' discipline (spec §8.1, token-forgery row).
+ * Build a minting signer from a PKCS#8 private key: PEM, or the same DER as one line of base64. The
+ * one-line form exists for env files (a compose `.env`, a systemd EnvironmentFile), where a
+ * multi-line PEM value is not portable; it is the private-key twin of `SH_SESSION_TOKEN_PUBLIC_KEYS`'s
+ * base64 SPKI. Refuses a public key: the data plane holds only public halves, and "the harness cannot
+ * mint" must be a property of this API rather than of its callers' discipline (spec §8.1,
+ * token-forgery row).
  */
 export function makeSigner(privateKeyPem: string): {
   kid: string;
@@ -144,7 +147,13 @@ export function makeSigner(privateKeyPem: string): {
 } {
   let key: KeyObject;
   try {
-    key = createPrivateKey(privateKeyPem);
+    key = privateKeyPem.includes('-----BEGIN')
+      ? createPrivateKey(privateKeyPem)
+      : createPrivateKey({
+          key: Buffer.from(privateKeyPem.trim(), 'base64'),
+          format: 'der',
+          type: 'pkcs8',
+        });
   } catch (err) {
     throw new Error(`SH_SESSION_TOKEN_PRIVATE_KEY is not a usable private key: ${String(err)}`);
   }

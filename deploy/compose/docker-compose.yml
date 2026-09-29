@@ -7,6 +7,11 @@
 # mirrors deploy/vm/env/*.env.example var-for-var; only the addressing differs, because the peers
 # here are compose service names, not 127.0.0.1. deploy/compose/tests/compose.test.sh holds both
 # of those to account.
+#
+# The MU1 control plane (#348) -- login, sessions, credentials, session tokens; what mocactl talks
+# to -- is the `control-plane` PROFILE, because it cannot start without a GitHub OAuth client id
+# (SH_GITHUB_CLIENT_ID) and a stack without one must still come up. install.sh sets
+# COMPOSE_PROFILES=control-plane in .env when it is given a client id.
 name: serverless-harness
 
 services:
@@ -85,12 +90,69 @@ services:
       SH_MODEL_BASE_URL:
       SH_MODEL_AUTH:
       SH_MODEL_CUSTOM:
+      # MU1 caller authentication (#348). The supervisor verifies session tokens locally against the
+      # control plane's PUBLIC keys and swaps them for the caller's credential over the exchange hop.
+      # A present-but-invalid token is refused even with SH_REQUIRE_AUTH=false (turn-auth.ts), so
+      # these must match the control plane's, which install.sh guarantees by generating both halves
+      # together (only once the control plane is enabled). The keyset and exchange token pass
+      # through only when .env sets them; SH_CONTROL_PLANE_URL is always the service address.
+      # Without the control-plane profile all of it is inert: nothing can mint a token.
+      SH_SESSION_TOKEN_PUBLIC_KEYS:
+      SH_CONTROL_PLANE_URL: http://control-plane:8080
+      SH_EXCHANGE_TOKEN:
+      # `false` keeps plain `curl /turn` working for a trial; `true` makes every turn need a token.
+      SH_REQUIRE_AUTH: ${SH_REQUIRE_AUTH:-false}
     ports:
       # Loopback only. The admin /metrics listener (SH_ADMIN_PORT, 8081) is unauthenticated and
       # stays unpublished; reach it with `docker compose exec supervisor`.
       - 127.0.0.1:${SH_PORT:-8080}:8080
     networks: [moca-brain]
     depends_on: [redis, sandbox-relay]
+    restart: unless-stopped
+
+  # The MU1 control plane: what `mocactl --control-plane-url http://127.0.0.1:8090` talks to. It is
+  # the only service holding the signing key and the credential KEK; the supervisor gets public
+  # halves and the exchange token only. Credentials are the file store on a named volume, so they
+  # survive `docker compose down` (though not `down -v`); for a VM deployment use Vault instead
+  # (SH_CREDENTIAL_STORE=vault, packages/control-plane/src/vault-store.ts).
+  #
+  # Its secrets are NOT `:?`-required here: Compose interpolates `:?` for every service, profile
+  # active or not, so a required one would stop the stack from starting without this profile. The
+  # control plane itself refuses to boot on any missing one, naming it (`docker compose logs
+  # control-plane`).
+  control-plane:
+    image: ${SH_HARNESS_IMAGE:-ghcr.io/rossoctl/serverless-harness:latest}
+    profiles: [control-plane]
+    working_dir: /app/packages/control-plane
+    command: [node, --import, tsx, src/main.ts]
+    user: '1000:1000'
+    environment:
+      SH_CONTROL_PLANE_PORT: '8080'
+      REDIS_URL: redis://redis:6379
+      SH_CREDENTIAL_STORE: file
+      SH_CREDENTIAL_DIR: /var/lib/moca/credentials
+      SH_SESSION_TOKEN_PRIVATE_KEY:
+      SH_CREDENTIAL_KEK:
+      SH_EXCHANGE_TOKEN:
+      SH_GITHUB_CLIENT_ID:
+      SH_ADMIN_SUBJECTS:
+      # The harness as the USER reaches it, advertised by GET /v1/discovery, so mocactl needs only
+      # this service's URL. Tracks SH_PORT, the supervisor's published port.
+      SH_PUBLIC_HARNESS_URL: http://127.0.0.1:${SH_PORT:-8080}
+      # Operator-key fallback: OFF unless .env sets SH_ALLOW_OPERATOR_FALLBACK=true, and when on,
+      # every user without their own inference credential spends the operator's key (spec §6.4).
+      SH_ALLOW_OPERATOR_FALLBACK:
+      SH_OPERATOR_INFERENCE_TOKEN:
+      SH_DEFAULT_INFERENCE_ENDPOINT:
+      SH_API_TOKEN_TTL_SECONDS:
+      SH_SESSION_TOKEN_TTL_SECONDS:
+    volumes:
+      - moca-credentials:/var/lib/moca/credentials
+    ports:
+      # Loopback only, like the supervisor.
+      - 127.0.0.1:${SH_CP_PORT:-8090}:8080
+    networks: [moca-brain]
+    depends_on: [redis]
     restart: unless-stopped
 
   # One remote-worker sandbox dialing out to the relay, like each of setup-vm.sh's sh-sandbox-N.
@@ -106,9 +168,14 @@ services:
     depends_on: [sandbox-relay]
     restart: unless-stopped
 
+volumes:
+  # The control plane's credential store. Envelope-encrypted under SH_CREDENTIAL_KEK, so a copy of
+  # the volume without .env yields ciphertext.
+  moca-credentials: {}
+
 networks:
-  # The brain side: supervisor + workers, Redis, the relay's SandboxExec listener (and, with #348, the
-  # control plane). Sandboxes are never attached here (MI1 §5 R8). A fixed subnet so the relay's exec
+  # The brain side: supervisor + workers, Redis, the relay's SandboxExec listener and the control
+  # plane. Sandboxes are never attached here (MI1 §5 R8). A fixed subnet so the relay's exec
   # listener can bind this side's address alone.
   moca-brain:
     ipam:
