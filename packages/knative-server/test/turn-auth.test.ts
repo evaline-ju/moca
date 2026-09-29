@@ -221,7 +221,7 @@ describe('the one rule /turn enforces', () => {
   });
 });
 
-describe('authorizeRunRead (fix round 1, Important 1)', () => {
+describe('authorizeRunRead (MI1 R7)', () => {
   const codeOfSync = (fn: () => unknown): string => {
     try {
       fn();

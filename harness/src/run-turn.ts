@@ -511,9 +511,9 @@ export function applyModelGateway<M extends { headers?: Record<string, unknown> 
     config?.anthropicAuthToken ||
     process.env.ANTHROPIC_AUTH_TOKEN;
   // Pi resolves the request key BY PROVIDER NAME, so ANTHROPIC_API_KEY must exist whenever a Bearer
-  // token is in play. It is seeded with a constant that names no one — never with the caller's
-  // token, which would make the first caller's credential process-wide (MI1 §5 R2). The Bearer
-  // header below carries the real token and `x-api-key: null` strips the sentinel.
+  // token is in play. It is seeded with a constant that names no one, never with the caller's
+  // token: no caller's credential becomes process-wide (MI1 §5 R2). The Bearer header below carries
+  // the real token and `x-api-key: null` strips the sentinel.
   if (authToken && !process.env.ANTHROPIC_API_KEY) {
     process.env.ANTHROPIC_API_KEY = AMBIENT_KEY_SENTINEL;
   }

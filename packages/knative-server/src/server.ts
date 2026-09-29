@@ -660,11 +660,9 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
     (url.startsWith('/runs/status') || url.startsWith('/run-leaf/status'))
   ) {
     if (url.startsWith('/run-leaf/status')) warnDeprecatedRoute('/run-leaf/status');
-    // Fix round 1, Important 2: the authorization check can throw something other than a CpError
-    // (writeAuthError rethrows those), and this route previously ran that check synchronously
-    // inside handler() itself rather than inside an async function whose promise is caught -- an
-    // uncaught throw there would escape as an unhandled exception. Every sibling route runs its
-    // auth inside a `.catch()`-guarded async function; this one now does too.
+    // The authorization check runs inside an async function whose promise is caught, like every
+    // sibling route's: a throw that is not a CpError (writeAuthError rethrows those) becomes a 500
+    // for this request rather than an unhandled exception.
     const statusRoute = async () => {
       const statusUrl = new URL(url, 'http://localhost');
       const sessionId = statusUrl.searchParams.get('sessionId');
@@ -676,11 +674,8 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
           writeAuthError(res, err, sessionId);
           return;
         }
-        // Fix round 1, Important 1: leafSessionId() keys the store by `<tenant>/<sessionId>` when
-        // tenant is present, but authorizeRunRead checks only the bare sessionId against the
-        // token -- so a valid token for sid-1 could otherwise read another tenant's key by adding
-        // ?tenant=. Refuse it once the caller has actually authenticated; unauthenticated callers
-        // keep today's tenant behaviour (SH_REQUIRE_AUTH off).
+        // An authenticated read may not name a tenant: the session token alone scopes it (MI1 R7).
+        // Unauthenticated callers (SH_REQUIRE_AUTH off, no token) keep the tenant parameter.
         if (authenticated && statusUrl.searchParams.has('tenant')) {
           res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'tenant_not_allowed' }));
           return;
@@ -722,11 +717,8 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
         return;
       }
 
-      // Fix round 1, Important 1: leafSessionId() keys the store by `<tenant>/<sessionId>` when
-      // tenant is present, but the token names only sid-1 -- so an authenticated caller could
-      // otherwise write into another tenant's key by naming it in the body. Refuse it once the
-      // caller has actually authenticated; an unauthenticated caller (SH_REQUIRE_AUTH off, no
-      // token) keeps today's tenant behaviour exactly.
+      // An authenticated request may not name a tenant: the session token alone scopes the run
+      // (MI1 R7). An unauthenticated caller (SH_REQUIRE_AUTH off, no token) keeps the tenant field.
       if (auth && parsed && parsed.tenant !== undefined) {
         res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'tenant_not_allowed' }));
         return;

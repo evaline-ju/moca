@@ -213,10 +213,9 @@ Each is enforced at a named point and pinned by a named test (§12).
 
 ## 5. Slice S1 — worker and sandbox-tier hardening (prerequisites)
 
-These are requirements on today's code, independent of grants, that every later slice assumes. They
-apply in **both** tenancy modes, because each closes a defect rather than adding a feature. Their
-detailed findings are tracked privately under coordinated disclosure; this section states only the
-required behaviour and the test that pins it.
+S1 hardens the worker and sandbox tiers as they stand, independently of grants, and every later slice
+assumes it. Its requirements apply in **both** tenancy modes: each is a hardening, not a feature. This
+section states the required behaviour and the test that pins it.
 
 | #   | Requirement                                                                                                                                                                                                                                                                                                                                                                                                             | Pinned by                                                                                                                                                                                                                                                      |
 | --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -516,9 +515,9 @@ the snapshot (P4 §5.2).
      `403 destination_denied` naming the host — never a timeout (P4.1 §8).
    - `moca-egress` resolves the name **once**, checks the resulting address, and dials **that
      address**. Loopback, link-local (including `169.254.169.254`), private and unique-local ranges,
-     and the host's own addresses are refused with `403 destination_private`. Without this a guest
-     could reach host services — Redis on `127.0.0.1:6379`, the control plane — through the proxy;
-     resolving once and dialing the checked address defeats DNS rebinding.
+     and the host's own addresses are refused with `403 destination_private`, so no host service —
+     Redis on `127.0.0.1:6379`, the control plane — is reachable through the proxy; resolving once and
+     dialing the checked address keeps DNS rebinding from changing the destination after the check.
    - A plain-HTTP (absolute-form) request is subject to the same allowlist and address checks against
      its URL's host, and **never receives a credential**: a host that has one is refused over plain
      HTTP (`403 plaintext_credential`) rather than sent a secret in the clear.
@@ -619,9 +618,10 @@ crosses no user boundary, and it is the honest consequence of D6.
 | `moca-brain`   | supervisor and workers, Redis, control plane, relay `SandboxExec` listener, `moca-egress` inference listener | yes — the control plane (OAuth) and `moca-egress` (upstreams)                                            |
 | `moca-sandbox` | sandbox containers, relay `Attach` listener, `moca-egress` container-egress listener                         | **none** (compose `internal: true`, podman `--internal`); sandboxes reach out only through `moca-egress` |
 
-On `deploy/vm`, sandbox containers drop `--add-host host.containers.internal:host-gateway`, which today
-exposes every host port to them, and join a dedicated podman network; an nftables rule admits the
-sandbox subnet only to the relay's `Attach` port and `moca-egress`'s egress port. Container hardening:
+On `deploy/vm`, sandbox containers join a dedicated podman network, isolated from every other podman
+network, and resolve `host.containers.internal` to that network's gateway rather than to podman's
+`host-gateway`; an nftables rule admits the sandbox subnet to the host only on the relay's `Attach`
+port and `moca-egress`'s egress port. Container hardening:
 `cap_drop: ALL`, `no-new-privileges`, a read-only root filesystem with tmpfs `/tmp`, the workspace
 volume, a pids limit, a non-root user.
 
@@ -690,9 +690,9 @@ A development identity provider (#348 item 6b) must refuse to start under `multi
 
 ## 12. Testing & verification gate
 
-### 12.1 Regression tests for S1, each failing on `main` today
+### 12.1 Regression tests for S1
 
-One named test per requirement R1–R8 (§5's "Pinned by" column), plus P5 §5's sentinel and
+Each requirement R1–R8 is pinned by a named test (§5's "Pinned by" column), plus P5 §5's sentinel and
 ambient-absence cases in S1; the two-tenant interleaved **turn** test lands with S2, where each turn
 carries its own grant for it to assert on.
 
@@ -846,10 +846,6 @@ Defaults marked as numbers are starting points; E8/E14 may move them.
 | S3    | `packages/control-plane` bundle routes + ACL; `harness/src/config-store.ts` (bounded decompression); a new `harness/src/resource-set.ts` replacing `config-resolver.ts`'s disk unpack; `harness/src/config-overlay.ts` (per-session path); `harness/src/promote-cli.ts` (upload via control plane); `packages/config-bundle/src/lockfile.ts` (relative paths)                                                                                                                                                                                                                                                           |
 | S4    | `proto/sandbox/v1/sandbox.proto` (`Exec.grant = 7`) and generated code; `harness/src/select-sandbox.ts` and the gRPC transport (carry the grant); `remote-worker/internal/vmpool` (grant binding, socket creation, `SCM_RIGHTS`); new `proto/egress/v1/control.proto`; `remote-worker/internal/egress` (forward proxy, interception, policy); the **public** `remote-worker/egress/conformance` package and `remote-worker/cmd/moca-egress-conformance` (§12.3); `remote-worker/cmd/guest-agent` (P4.1 T2 loopback splice); `deploy/microvm/build-snapshot.sh` (CA certificate, placeholder env, git credential helper) |
 | S5    | `packages/sandbox-relay` (owner map, grant check with the TypeScript verifier shared with the control plane rather than a second copy, `Rebind` to `moca-egress`); `moca-egress` container listener; `deploy/compose`, `deploy/vm` networks and hardening                                                                                                                                                                                                                                                                                                                                                               |
-
-**Disclosure.** §5's requirements correspond to findings handled under coordinated disclosure. Keep
-this document's S1 detail at the level of requirements — no reproduction steps — until those fixes
-merge and the advisories are published.
 
 **No `pi-fork` changes.** Every Pi behaviour this design needs is an existing option (§2.1) or the
 bash tool's `BashSpawnHook`.

@@ -241,9 +241,9 @@ export async function resolveTurnAuth(
  * since a status read spends nothing upstream. A valid token for another session is refused.
  *
  * Returns whether the caller authenticated: `true` when a token was presented and verified, `false`
- * when none was presented and none was required. The caller uses this to decide whether a
- * caller-supplied `tenant` must be refused (fix round 1, Important 1) — that decision does not belong
- * here, because this function's job is `sessionId` authorization, not key-derivation shape.
+ * when none was presented and none was required. The caller uses this to refuse a caller-supplied
+ * `tenant` on an authenticated read — that decision does not belong here, because this function's
+ * job is `sessionId` authorization, not key-derivation shape.
  */
 export function authorizeRunRead(
   headers: Record<string, string | string[] | undefined>,

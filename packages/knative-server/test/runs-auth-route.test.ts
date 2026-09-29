@@ -150,7 +150,7 @@ describe('POST /runs under SH_REQUIRE_AUTH=true (MI1 R7)', () => {
     expect(r.json.error).toBe('async_runs_unavailable');
   });
 
-  it('refuses a caller-supplied tenant on an authenticated run (fix round 1, Important 1)', async () => {
+  it('refuses a caller-supplied tenant on an authenticated run: the token alone scopes it', async () => {
     const r = await call(
       'POST',
       '/runs',
@@ -183,7 +183,7 @@ describe('GET /runs/status under SH_REQUIRE_AUTH=true (MI1 R7)', () => {
     expect(r.status).toBe(200);
   });
 
-  it('refuses a caller-supplied tenant on an authenticated status read (fix round 1, Important 1)', async () => {
+  it('refuses a caller-supplied tenant on an authenticated status read: the token alone scopes it', async () => {
     const r = await call(
       'GET',
       '/runs/status?sessionId=sid-1&tenant=other',
@@ -222,7 +222,7 @@ describe('without SH_REQUIRE_AUTH, /runs behaves as today', () => {
     expect(runLeaf).not.toHaveBeenCalled();
   });
 
-  it('still allows a caller-supplied tenant on an unauthenticated run (fix round 1, Important 1)', async () => {
+  it('still accepts a caller-supplied tenant on an unauthenticated run', async () => {
     const r = await call('POST', '/runs', envelope('sid-9', { tenant: 'acme' }));
     expect(r.status).toBeLessThan(300);
     expect(runLeaf).toHaveBeenCalledTimes(1);

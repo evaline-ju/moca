@@ -127,9 +127,9 @@ describe('applyModelGateway', () => {
     });
 
     it("never writes the subject's own credential into the environment (MI1 R2)", () => {
-      // This used to pin a write-once seed of the SUBJECT'S token: in a fresh process with no
-      // ANTHROPIC_API_KEY, the first authenticated turn made that subject's key process-wide. The
-      // environment now only ever receives a constant that names no one.
+      // In a fresh process with no ANTHROPIC_API_KEY, an authenticated turn's credential travels
+      // only in its own request's Bearer header; the environment only ever receives a constant
+      // that names no one.
       expect(process.env.ANTHROPIC_API_KEY).toBeUndefined();
       const m = applyModelGateway(baseModel, {
         anthropicBaseUrl: 'https://gw.example/v1',

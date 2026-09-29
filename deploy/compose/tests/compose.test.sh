@@ -131,7 +131,7 @@ pass "the sandbox dials the relay with the relay's token and an explicit SANDBOX
 [[ "$(svc_env supervisor MOCA_RELAY_EXEC_TOKEN)" == exec-under-test ]] ||
   fail "the supervisor does not receive MOCA_RELAY_EXEC_TOKEN; every exec would be refused"
 [[ "$(svc_env sandbox MOCA_RELAY_EXEC_TOKEN)" == '<absent>' ]] ||
-  fail "a sandbox received MOCA_RELAY_EXEC_TOKEN: it could then run commands in other sandboxes"
+  fail "a sandbox received MOCA_RELAY_EXEC_TOKEN: only the relay and the supervisor may hold it"
 render no-exec 'SH_RELAY_TOKEN=tok' 'SH_TURNS_PER_WORKER=3' >/dev/null &&
   fail "compose accepted an .env with no MOCA_RELAY_EXEC_TOKEN"
 grep -q MOCA_RELAY_EXEC_TOKEN "$TMP/no-exec/err" || fail "the refusal must name MOCA_RELAY_EXEC_TOKEN"
