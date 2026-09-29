@@ -1,6 +1,7 @@
 #!/bin/sh
 # Dev-machine trial bootstrap (#342): fetches deploy/compose/docker-compose.yml, writes a .env
-# next to it (generating SH_RELAY_TOKEN when none is supplied) and runs `docker compose up -d`.
+# next to it (generating SH_RELAY_TOKEN when none is supplied, and the MU1 control plane's secrets,
+# #348) and runs `docker compose up -d`.
 #
 #   curl -fsSL https://raw.githubusercontent.com/rossoctl/serverless-harness/main/deploy/compose/install.sh | sh
 #
@@ -14,6 +15,9 @@
 #   SH_COMPOSE_BASE_URL  Where to fetch docker-compose.yml from (default: this repo's main branch)
 #   SH_RELAY_TOKEN       The relay's shared secret; generated (32 random bytes, hex) if unset
 #   SH_TURNS_PER_WORKER  Per-worker in-flight turn cap (default 4 -- a trial value, not an E8 result)
+#   SH_GITHUB_CLIENT_ID  A GitHub OAuth app's client id, device flow enabled: turns on the control
+#                        plane (the `control-plane` profile) that mocactl logs in through
+#   SH_HARNESS_IMAGE     The harness image; also runs the key generator (default: the published one)
 #   ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL, OPENAI_API_KEY, OPENAI_BASE_URL,
 #   SH_MODEL, SH_MODEL_PROVIDER, SH_MODEL_API, SH_MODEL_BASE_URL, SH_MODEL_AUTH, SH_MODEL_CUSTOM
 #                        Model settings copied into .env when set (a turn needs a model)
@@ -22,6 +26,7 @@ set -eu
 : "${SH_COMPOSE_DIR:=$HOME/.serverless-harness}"
 : "${SH_COMPOSE_BASE_URL:=https://raw.githubusercontent.com/rossoctl/serverless-harness/main/deploy/compose}"
 
+DEFAULT_HARNESS_IMAGE='ghcr.io/rossoctl/serverless-harness:latest'
 MODEL_VARS='ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL OPENAI_API_KEY OPENAI_BASE_URL
 SH_MODEL SH_MODEL_PROVIDER SH_MODEL_API SH_MODEL_BASE_URL SH_MODEL_AUTH SH_MODEL_CUSTOM'
 
@@ -88,6 +93,12 @@ write_env_file() {
       printf 'SH_TURNS_PER_WORKER=%s\n' "${SH_TURNS_PER_WORKER:-4}"
       printf '# SH_WORKERS defaults to the CPUs this container may use; set it to pin W.\n'
       printf '#SH_WORKERS=2\n'
+      printf '# The MU1 control plane (mocactl login, sessions, credentials) is the control-plane\n'
+      printf '# profile; install.sh turns it on when given SH_GITHUB_CLIENT_ID. Operator-key fallback:\n'
+      printf '# OFF by default. Turned on, EVERY user without their own credential spends this key.\n'
+      printf '#SH_ALLOW_OPERATOR_FALLBACK=true\n'
+      printf '#SH_OPERATOR_INFERENCE_TOKEN=\n'
+      printf '#SH_DEFAULT_INFERENCE_ENDPOINT=https://api.anthropic.com\n'
       printf '# Model settings (a turn needs one). Only variables that were set are listed.\n'
       for var in $MODEL_VARS; do
         eval "is_set=\${$var+x}"
@@ -135,18 +146,116 @@ ensure_exec_token() {
   )
 }
 
+# Appends one KEY=VALUE line to .env, under umask 077. The value only ever travels through this
+# shell's variables and a builtin printf -- never an argv (/proc/<pid>/cmdline is world-readable).
+append_env() {
+  (
+    umask 077
+    end_with_newline "$SH_COMPOSE_DIR/.env"
+    printf '%s=%s\n' "$1" "$2" >>"$SH_COMPOSE_DIR/.env"
+  )
+}
+
+# KEY's value in the key generator's output ($GENERATED), checked against an extended regex so a
+# truncated or garbled line can never be written into .env as a secret.
+generated_value() {
+  v="$(printf '%s\n' "$GENERATED" | sed -n "s/^$1=//p" | tail -1)"
+  printf '%s\n' "$v" | grep -Eq "^$2\$" ||
+    die "the key generator produced no usable $1 (image: $harness_image)"
+  printf '%s' "$v"
+}
+
+# The four MU1 secrets (#348): the control plane's ed25519 signing key and credential KEK, the
+# supervisor's copy of the public key, and the exchange token both hold. Generated inside the harness
+# image (packages/control-plane/src/genkeys.ts) so the host needs no openssl, and only for what .env
+# lacks -- a re-run never replaces one: a new KEK would make every stored credential undecryptable,
+# and a new signing key would invalidate every live session token.
+ensure_mu1_secrets() {
+  env_file="$SH_COMPOSE_DIR/.env"
+  have_priv="$(env_file_value SH_SESSION_TOKEN_PRIVATE_KEY "$env_file")"
+  have_pub="$(env_file_value SH_SESSION_TOKEN_PUBLIC_KEYS "$env_file")"
+  have_kek="$(env_file_value SH_CREDENTIAL_KEK "$env_file")"
+  have_xchg="$(env_file_value SH_EXCHANGE_TOKEN "$env_file")"
+  # The two halves of the signing key are one secret: generating the missing half would pair it with
+  # the wrong key and every session token would fail to verify.
+  if { [ -n "$have_priv" ] && [ -z "$have_pub" ]; } || { [ -z "$have_priv" ] && [ -n "$have_pub" ]; }; then
+    die "$env_file has only one of SH_SESSION_TOKEN_PRIVATE_KEY and SH_SESSION_TOKEN_PUBLIC_KEYS." \
+      "They are one keypair: remove both lines to generate a fresh pair, or restore the missing one."
+  fi
+  if [ -n "$have_priv" ] && [ -n "$have_kek" ] && [ -n "$have_xchg" ]; then
+    return 0
+  fi
+  command -v docker >/dev/null 2>&1 ||
+    die "needs the docker CLI to generate the control plane's keys inside the harness image"
+  harness_image="${SH_HARNESS_IMAGE:-$(env_file_value SH_HARNESS_IMAGE "$env_file")}"
+  harness_image="${harness_image:-$DEFAULT_HARNESS_IMAGE}"
+  log "generating control-plane keys (in $harness_image)"
+  # No network, the image's own uid, and the secrets on stdout only.
+  GENERATED="$(docker run --rm --network none --user 1000:1000 -w /app/packages/control-plane \
+    "$harness_image" node --import tsx src/genkeys.ts)" ||
+    die "could not run the key generator in $harness_image"
+  # Every value is extracted and checked BEFORE the first append, so a garbled generator can never
+  # leave .env holding half a set.
+  [ -n "$have_priv" ] || {
+    priv="$(generated_value SH_SESSION_TOKEN_PRIVATE_KEY '[A-Za-z0-9+/]+=*')" || exit 1
+    pub="$(generated_value SH_SESSION_TOKEN_PUBLIC_KEYS '[0-9a-f]{16}:[A-Za-z0-9+/]+=*')" || exit 1
+  }
+  [ -n "$have_kek" ] || { kek="$(generated_value SH_CREDENTIAL_KEK '[A-Za-z0-9+/]{43}=')" || exit 1; }
+  [ -n "$have_xchg" ] || { xchg="$(generated_value SH_EXCHANGE_TOKEN '[0-9a-f]{64}')" || exit 1; }
+  if [ -z "$have_priv" ]; then
+    log "adding SH_SESSION_TOKEN_PRIVATE_KEY and SH_SESSION_TOKEN_PUBLIC_KEYS to $env_file"
+    append_env SH_SESSION_TOKEN_PRIVATE_KEY "$priv"
+    append_env SH_SESSION_TOKEN_PUBLIC_KEYS "$pub"
+  fi
+  if [ -z "$have_kek" ]; then
+    log "adding SH_CREDENTIAL_KEK to $env_file"
+    append_env SH_CREDENTIAL_KEK "$kek"
+  fi
+  if [ -z "$have_xchg" ]; then
+    log "adding SH_EXCHANGE_TOKEN to $env_file"
+    append_env SH_EXCHANGE_TOKEN "$xchg"
+  fi
+  GENERATED=''
+}
+
+# The control plane needs a GitHub OAuth app (device flow ENABLED -- it is off by default) for login.
+# Given one, record it and turn on the control-plane profile; an existing COMPOSE_PROFILES line is the
+# operator's and is left alone.
+ensure_control_plane_profile() {
+  env_file="$SH_COMPOSE_DIR/.env"
+  if [ -n "${SH_GITHUB_CLIENT_ID:-}" ] && [ -z "$(env_file_value SH_GITHUB_CLIENT_ID "$env_file")" ]; then
+    log "adding SH_GITHUB_CLIENT_ID to $env_file"
+    append_env SH_GITHUB_CLIENT_ID "$SH_GITHUB_CLIENT_ID"
+  fi
+  CONTROL_PLANE=''
+  [ -n "$(env_file_value SH_GITHUB_CLIENT_ID "$env_file")" ] || return 0
+  CONTROL_PLANE=1
+  if ! grep -Eq '^COMPOSE_PROFILES=' "$env_file"; then
+    log "enabling the control-plane profile in $env_file"
+    append_env COMPOSE_PROFILES control-plane
+  fi
+}
+
 main() {
   detect_compose
   fetch_compose_file
   write_env_file
   require_relay_token
   ensure_exec_token
+  ensure_mu1_secrets
+  ensure_control_plane_profile
   log "starting the stack ($COMPOSE up -d)"
   # Compose reads .env from the project directory, so the token reaches the containers from that
   # file and never from this command line.
   cd "$SH_COMPOSE_DIR"
   $COMPOSE up -d
   log "done. Supervisor: http://127.0.0.1:8080  (logs: cd $SH_COMPOSE_DIR && $COMPOSE logs -f)"
+  if [ -n "$CONTROL_PLANE" ]; then
+    log "control plane: http://127.0.0.1:8090  (mocactl --control-plane-url http://127.0.0.1:8090 login)"
+  else
+    log "no control plane (mocactl needs one): re-run with SH_GITHUB_CLIENT_ID set to a GitHub OAuth" \
+      "app's client id, device flow enabled"
+  fi
 }
 
 main "$@"

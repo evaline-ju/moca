@@ -46,6 +46,12 @@ RUN apk add --no-cache kubectl cairo pango libjpeg-turbo giflib librsvg pixman
 WORKDIR /app
 COPY --from=builder /app ./
 ENV NODE_ENV=production
+# The file credential store's directory (SH_CREDENTIAL_STORE=file, deploy/compose). Created here,
+# owned by the uid every compose service runs as, because a fresh named volume mounted over it
+# copies this ownership -- a path the image lacks would be created root-owned and unwritable.
+RUN mkdir -p /var/lib/moca/credentials && \
+    chown 1000:1000 /var/lib/moca/credentials && \
+    chmod 0700 /var/lib/moca/credentials
 EXPOSE 8080
 WORKDIR /app/packages/knative-server
 CMD ["node", "--import", "tsx", "src/server.ts"]

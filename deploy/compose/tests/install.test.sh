@@ -53,12 +53,30 @@ MOCK
 
 # docker: records argv and the working directory (compose reads .env from the project dir).
 # MOCK_NO_COMPOSE_PLUGIN=1 makes `docker compose` behave like a docker without the v2 plugin.
+# `docker run ... genkeys.ts` stands in for the control plane's key generator: fresh random values in
+# genkeys.ts's output shapes (control-plane/test/main.test.ts pins those against the real code), or
+# a garbled line under MOCK_GENKEYS_BAD=1.
 cat >"$TMP/bin/docker" <<'MOCK'
 #!/bin/sh
 printf 'docker %s [cwd=%s]\n' "$*" "$PWD" >>"$MOCK_LOG"
 if [ "${1-}" = compose ] && [ -n "${MOCK_NO_COMPOSE_PLUGIN-}" ]; then
   echo "docker: 'compose' is not a docker command." >&2
   exit 1
+fi
+if [ "${1-}" = run ]; then
+  case "$*" in *genkeys.ts*) ;; *) exit 0 ;; esac
+  hex() { od -An -tx1 -N"$1" /dev/urandom | tr -d ' \n'; }
+  if [ -n "${MOCK_GENKEYS_BAD-}" ]; then
+    printf 'SH_SESSION_TOKEN_PRIVATE_KEY=MC4C%s\n' "$(hex 16)"
+    printf 'SH_SESSION_TOKEN_PUBLIC_KEYS=%s:MCow\n' "$(hex 8)"
+    printf 'SH_CREDENTIAL_KEK=not a key\n'
+    printf 'SH_EXCHANGE_TOKEN=%s\n' "$(hex 32)"
+    exit 0
+  fi
+  printf 'SH_SESSION_TOKEN_PRIVATE_KEY=MC4CAQAwBQYDK2VwBCIEI%s\n' "$(hex 22)"
+  printf 'SH_SESSION_TOKEN_PUBLIC_KEYS=%s:MCowBQYDK2VwAyEA%s\n' "$(hex 8)" "$(hex 22)"
+  printf 'SH_CREDENTIAL_KEK=%s=\n' "$(hex 22 | cut -c1-43)"
+  printf 'SH_EXCHANGE_TOKEN=%s\n' "$(hex 32)"
 fi
 exit 0
 MOCK
@@ -77,7 +95,8 @@ tail() { PATH=/usr/bin:/bin command tail "$@"; }
 cut() { PATH=/usr/bin:/bin command cut "$@"; }
 # A developer's own shell may carry these; the script must not pick them up by accident.
 unset SH_RELAY_TOKEN SH_TURNS_PER_WORKER ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL \
-  OPENAI_API_KEY SH_MODEL MOCK_NO_COMPOSE_PLUGIN 2>/dev/null || true
+  OPENAI_API_KEY SH_MODEL MOCK_NO_COMPOSE_PLUGIN MOCK_GENKEYS_BAD SH_GITHUB_CLIENT_ID SH_HARNESS_IMAGE \
+  COMPOSE_PROFILES 2>/dev/null || true
 export SH_COMPOSE_BASE_URL="https://example.invalid/deploy/compose"
 
 # Runs install.sh exactly as the README's one-liner does: the script body on sh's stdin, so
@@ -224,3 +243,109 @@ grep -qi 'docker' "$TMP/err" || fail "the refusal must name docker: $(cat "$TMP/
 mv "$TMP/bin/docker.off" "$TMP/bin/docker"
 mv "$TMP/bin/docker-compose.off" "$TMP/bin/docker-compose"
 pass "no docker on PATH: refuses before writing anything"
+
+# --- 8. the MU1 control plane's secrets (#348) ---------------------------------------------------
+MU1_KEYS='SH_SESSION_TOKEN_PRIVATE_KEY SH_SESSION_TOKEN_PUBLIC_KEYS SH_CREDENTIAL_KEK SH_EXCHANGE_TOKEN'
+genkeys_runs() { grep -c '^docker run .*genkeys\.ts' "$MOCK_LOG" || true; }
+
+export SH_COMPOSE_DIR="$TMP/eight"
+run_install || fail "fresh install exited non-zero"
+ENV8="$SH_COMPOSE_DIR/.env"
+[[ "$(env_value SH_SESSION_TOKEN_PRIVATE_KEY "$ENV8")" =~ ^[A-Za-z0-9+/]+=*$ ]] ||
+  fail "no one-line SH_SESSION_TOKEN_PRIVATE_KEY in .env"
+[[ "$(env_value SH_SESSION_TOKEN_PUBLIC_KEYS "$ENV8")" =~ ^[0-9a-f]{16}:[A-Za-z0-9+/]+=*$ ]] ||
+  fail "SH_SESSION_TOKEN_PUBLIC_KEYS is not <kid>:<base64 SPKI>"
+[[ "$(env_value SH_CREDENTIAL_KEK "$ENV8")" =~ ^[A-Za-z0-9+/]{43}=$ ]] ||
+  fail "SH_CREDENTIAL_KEK is not 32 bytes of base64"
+[[ "$(env_value SH_EXCHANGE_TOKEN "$ENV8")" =~ ^[0-9a-f]{64}$ ]] || fail "SH_EXCHANGE_TOKEN is not 32 bytes of hex"
+[[ "$(mode_of "$ENV8")" == 600 ]] || fail ".env must stay mode 600 once it holds the signing key"
+for k in $MU1_KEYS; do assert_not_in_argv "$(env_value "$k" "$ENV8")"; done
+grep -qE '^docker run --rm --network none --user 1000:1000 -w /app/packages/control-plane ghcr\.io/rossoctl/serverless-harness:latest node --import tsx src/genkeys\.ts' \
+  "$MOCK_LOG" || fail "the key generator must run offline in the harness image: $(grep '^docker run' "$MOCK_LOG")"
+pass "a fresh install generates the four MU1 secrets in the harness image, offline, never in argv"
+
+before="$(grep -E '^SH_(SESSION_TOKEN|CREDENTIAL_KEK|EXCHANGE_TOKEN)' "$ENV8")"
+run_install || fail "re-run exited non-zero"
+[[ "$(grep -E '^SH_(SESSION_TOKEN|CREDENTIAL_KEK|EXCHANGE_TOKEN)' "$ENV8")" == "$before" ]] ||
+  fail "a re-run changed an MU1 secret: a new KEK strands every stored credential"
+[[ "$(genkeys_runs)" == 0 ]] || fail "a re-run with every secret present still ran the key generator"
+pass "a re-run keeps every MU1 secret and does not run the generator"
+
+# Upgrading a pre-#348 .env: the missing secrets are added, an existing one is kept.
+# 43 base64 chars + '=' (32 bytes), by the builtin printf: this test's PATH has no seq.
+KEEP_KEK="$(printf '%043d=' 0)"
+[[ "$KEEP_KEK" =~ ^0{43}=$ ]] || fail "test setup: KEEP_KEK is '$KEEP_KEK'"
+printf 'SH_RELAY_TOKEN=keep-me\nSH_TURNS_PER_WORKER=4\nMOCA_RELAY_EXEC_TOKEN=x\nSH_CREDENTIAL_KEK=%s\n' \
+  "$KEEP_KEK" >"$ENV8"
+run_install || fail "upgrade re-run exited non-zero"
+[[ "$(env_value SH_CREDENTIAL_KEK "$ENV8")" == "$KEEP_KEK" ]] ||
+  fail "the upgrade replaced an existing SH_CREDENTIAL_KEK"
+[[ "$(grep -c '^SH_CREDENTIAL_KEK=' "$ENV8")" == 1 ]] || fail "the upgrade appended a second SH_CREDENTIAL_KEK"
+for k in SH_SESSION_TOKEN_PRIVATE_KEY SH_SESSION_TOKEN_PUBLIC_KEYS SH_EXCHANGE_TOKEN; do
+  [[ -n "$(env_value "$k" "$ENV8")" ]] || fail "the upgrade did not add $k"
+done
+pass "an existing .env gains only the MU1 secrets it lacks"
+
+# Half a keypair is refused: generating the other half would pair it with the wrong key.
+printf 'SH_RELAY_TOKEN=keep-me\nSH_TURNS_PER_WORKER=4\nSH_SESSION_TOKEN_PUBLIC_KEYS=0123456789abcdef:AAAA\n' >"$ENV8"
+if run_install 2>"$TMP/err"; then fail "install succeeded with only the public half of the signing key"; fi
+grep -q SH_SESSION_TOKEN_PRIVATE_KEY "$TMP/err" || fail "the refusal must name the missing half: $(cat "$TMP/err")"
+if grep -q ' up ' "$MOCK_LOG"; then fail "containers were started despite the half keypair"; fi
+[[ -z "$(env_value SH_SESSION_TOKEN_PRIVATE_KEY "$ENV8")" ]] || fail "a private key was invented for an existing public key"
+pass "half a signing keypair fails closed, starting nothing"
+
+# A garbled generator writes NOTHING -- not even the values that did parse.
+export SH_COMPOSE_DIR="$TMP/eight-bad"
+if MOCK_GENKEYS_BAD=1 run_install 2>"$TMP/err"; then fail "install accepted a garbled key generator"; fi
+grep -q SH_CREDENTIAL_KEK "$TMP/err" || fail "the refusal must name the bad value: $(cat "$TMP/err")"
+if grep -qE '^SH_(SESSION_TOKEN|CREDENTIAL_KEK|EXCHANGE_TOKEN)' "$SH_COMPOSE_DIR/.env"; then
+  fail "a garbled generator left MU1 secrets in .env: $(grep -E '^SH_(SESSION|CREDENTIAL|EXCHANGE)' "$SH_COMPOSE_DIR/.env" | cut -d= -f1)"
+fi
+if grep -q ' up ' "$MOCK_LOG"; then fail "containers were started after a garbled key generator"; fi
+pass "a garbled key generator is refused before anything is written"
+
+# SH_HARNESS_IMAGE picks the image the generator runs in, as it picks the one compose runs.
+export SH_COMPOSE_DIR="$TMP/eight-img"
+SH_HARNESS_IMAGE=dev.local/harness:test run_install || fail "install with SH_HARNESS_IMAGE exited non-zero"
+grep -qE '^docker run .* dev\.local/harness:test node ' "$MOCK_LOG" ||
+  fail "SH_HARNESS_IMAGE did not reach the key generator: $(grep '^docker run' "$MOCK_LOG")"
+pass "SH_HARNESS_IMAGE picks the key generator's image"
+
+# --- 9. SH_GITHUB_CLIENT_ID turns the control plane on ---------------------------------------------
+export SH_COMPOSE_DIR="$TMP/nine"
+run_install >"$TMP/out" || fail "install without a client id exited non-zero"
+if grep -qE '^(COMPOSE_PROFILES|SH_GITHUB_CLIENT_ID)=' "$SH_COMPOSE_DIR/.env"; then
+  fail "without SH_GITHUB_CLIENT_ID the control-plane profile must stay off"
+fi
+grep -q 'SH_GITHUB_CLIENT_ID' "$TMP/out" || fail "an install without a control plane must say how to add one"
+SH_GITHUB_CLIENT_ID=Iv1.fabricated run_install >"$TMP/out" || fail "install with a client id exited non-zero"
+[[ "$(env_value SH_GITHUB_CLIENT_ID "$SH_COMPOSE_DIR/.env")" == Iv1.fabricated ]] ||
+  fail "SH_GITHUB_CLIENT_ID was not recorded in .env"
+[[ "$(env_value COMPOSE_PROFILES "$SH_COMPOSE_DIR/.env")" == control-plane ]] ||
+  fail "a client id must turn on COMPOSE_PROFILES=control-plane"
+grep -q '127.0.0.1:8090' "$TMP/out" || fail "the install must print the control plane's URL"
+run_install >/dev/null || fail "re-run exited non-zero"
+[[ "$(grep -c '^COMPOSE_PROFILES=' "$SH_COMPOSE_DIR/.env")" == 1 ]] || fail "a re-run appended COMPOSE_PROFILES again"
+pass "SH_GITHUB_CLIENT_ID records the client id and turns on the control-plane profile, once"
+
+export SH_COMPOSE_DIR="$TMP/nine-own"
+mkdir -p "$SH_COMPOSE_DIR"
+printf 'SH_RELAY_TOKEN=t\nSH_TURNS_PER_WORKER=4\nCOMPOSE_PROFILES=mine\n' >"$SH_COMPOSE_DIR/.env"
+SH_GITHUB_CLIENT_ID=Iv1.fabricated run_install >/dev/null || fail "install exited non-zero"
+[[ "$(env_value COMPOSE_PROFILES "$SH_COMPOSE_DIR/.env")" == mine ]] ||
+  fail "an operator's own COMPOSE_PROFILES line was rewritten"
+pass "an operator's own COMPOSE_PROFILES is left alone"
+
+# The fallback is opt-in: a fresh .env carries it commented out, never on.
+if grep -qE '^SH_ALLOW_OPERATOR_FALLBACK=' "$TMP/nine/.env"; then fail "install turned the operator-key fallback on"; fi
+grep -qE '^#SH_ALLOW_OPERATOR_FALLBACK=true$' "$TMP/nine/.env" || fail "a fresh .env should show how to opt in to the fallback"
+pass "the operator-key fallback stays off, documented in .env"
+
+# --- 10. only docker-compose, no docker CLI: the generator cannot run, so refuse before up ---------
+export SH_COMPOSE_DIR="$TMP/ten"
+mv "$TMP/bin/docker" "$TMP/bin/docker.off"
+if run_install 2>"$TMP/err"; then fail "install succeeded with no docker CLI to generate keys"; fi
+grep -q 'docker CLI' "$TMP/err" || fail "the refusal must say the docker CLI is needed: $(cat "$TMP/err")"
+if grep -q ' up ' "$MOCK_LOG"; then fail "containers were started with no keys generated"; fi
+mv "$TMP/bin/docker.off" "$TMP/bin/docker"
+pass "without a docker CLI for the key generator, refuses before starting anything"
