@@ -14,22 +14,40 @@ SANDBOX_ID="${SANDBOX_ID:-sbx-worker-1}"
 TOKEN="${SANDBOX_TOKEN:-dev-token}"
 IMAGE="${IMAGE:-image-registry.openshift-image-registry.svc:5000/$NS/remote-worker:latest}"
 
-# One Secret, one key, read by both the relay (SH_RELAY_TOKEN) and the worker
-# (SANDBOX_TOKEN, see worker-deployment.yaml). Auth is fail-closed and the two values must be
-# equal, so sourcing both from one key makes that structural.
+# One Secret, two keys. SH_RELAY_TOKEN is read by both the relay and the worker (SANDBOX_TOKEN,
+# see worker-deployment.yaml): auth is fail-closed and the two values must be equal, so sourcing
+# both from one key makes that structural. MOCA_RELAY_EXEC_TOKEN is the harness's SandboxExec
+# credential (MI1 R5): the relay refuses to boot without it, and only the relay and the harness
+# read it -- never the worker, which is a sandbox.
 SECRET_NAME="sh-relay-token"
 SECRET_KEY="SH_RELAY_TOKEN"
+EXEC_KEY="MOCA_RELAY_EXEC_TOKEN"
 
 echo "==> relay token Secret (fail-closed auth)"
-# `create --dry-run=client | apply` so re-running rotates the value instead of failing on a
-# Secret that already exists. The token is still on this process's argv -- visible to `ps` on
-# this machine for the life of the command -- but it no longer lands in either Deployment
-# spec, where it persisted for anyone with read access to the namespace (#173).
-oc create secret generic "$SECRET_NAME" -n "$NS" \
-  --from-literal="$SECRET_KEY=$TOKEN" --dry-run=client -o yaml | oc apply -f - >/dev/null
+# Each key is written on its own, so a re-run never drops a key this step does not manage: a
+# whole-object `apply` of a manifest naming only SH_RELAY_TOKEN would delete the exec key. The
+# token is still on this process's argv -- visible to `ps` on this machine for the life of the
+# command -- but it does not land in either Deployment spec (#173).
+if oc get secret "$SECRET_NAME" -n "$NS" >/dev/null 2>&1; then
+  oc patch secret "$SECRET_NAME" -n "$NS" --type=merge \
+    -p "{\"stringData\":{\"$SECRET_KEY\":\"$TOKEN\"}}" >/dev/null
+else
+  oc create secret generic "$SECRET_NAME" -n "$NS" --from-literal="$SECRET_KEY=$TOKEN" >/dev/null
+fi
+# The exec token is generated once and never rotated by a re-run: the harness reads it from this
+# Secret, so rotating it here would leave a running harness presenting the old value.
+if [ -z "$(oc get secret "$SECRET_NAME" -n "$NS" -o "jsonpath={.data.$EXEC_KEY}")" ]; then
+  exec_token="$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
+  [ -n "$exec_token" ] || { echo "could not generate $EXEC_KEY from /dev/urandom" >&2; exit 1; }
+  oc patch secret "$SECRET_NAME" -n "$NS" --type=merge \
+    -p "{\"stringData\":{\"$EXEC_KEY\":\"$exec_token\"}}" >/dev/null
+  unset exec_token
+  echo "    added $EXEC_KEY to $SECRET_NAME (value not shown)"
+fi
 
 echo "==> point the relay at the Secret"
-# Replaces any literal SH_RELAY_TOKEN a previous run of this script set with a secretKeyRef.
+# Replaces any literal SH_RELAY_TOKEN a previous run of this script set with a secretKeyRef, and
+# gives the relay both keys -- it needs the sandbox token and the exec token.
 oc set env deploy/sandbox-relay --from="secret/$SECRET_NAME" -n "$NS" >/dev/null
 # Then force a new pod. Env from a secretKeyRef is resolved once, at container start, so
 # rewriting the Secret above does NOT reach a running relay -- and on a re-run the `set env`
@@ -62,4 +80,6 @@ for _ in $(seq 1 20); do
 done
 [ -n "${rec:-}" ] || { echo "NOT registered — check: oc logs deploy/remote-worker -n $NS"; exit 1; }
 echo "==> worker log:"; oc logs deploy/remote-worker -n "$NS" --tail=5 2>&1 | sed -E 's/\x1b\[[0-9;]*m//g'
-echo "OK. Drive a leaf: POST a LeafEnvelope to the harness /runs (see DESIGN.md)."
+echo "OK. Enable the remote-sandbox path on the harness -- it reads $EXEC_KEY from $SECRET_NAME"
+echo "    by a single-key secretKeyRef (deploy/knative/README-worker.md, Step 2) -- then drive a"
+echo "    leaf: POST a LeafEnvelope to the harness /runs (see DESIGN.md)."

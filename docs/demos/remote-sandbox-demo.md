@@ -120,11 +120,12 @@ kubectl -n $NS rollout status deploy/sandbox-relay --timeout=90s
 > The relay is the only thing the worker will dial. It is **inert** until both a worker attaches
 > _and_ the harness is switched to the remote path — so nothing is routed anywhere yet.
 
-### 1b. Generate the registration token
+### 1b. Generate the registration token and the exec token
 
 ```bash
 TOKEN=$(openssl rand -hex 16); echo "TOKEN=$TOKEN"
-kubectl set env deploy/sandbox-relay -n $NS "SH_RELAY_TOKEN=$TOKEN"
+EXEC_TOKEN=$(openssl rand -hex 32)
+kubectl set env deploy/sandbox-relay -n $NS "SH_RELAY_TOKEN=$TOKEN" "MOCA_RELAY_EXEC_TOKEN=$EXEC_TOKEN"
 kubectl -n $NS rollout status deploy/sandbox-relay --timeout=90s
 ```
 
@@ -133,11 +134,19 @@ kubectl -n $NS rollout status deploy/sandbox-relay --timeout=90s
 > because that value is a repo constant and therefore public. Patch _before_ waiting on the
 > rollout, so the pod that becomes Ready is already the one holding this token.
 
+> `EXEC_TOKEN` is the other credential: the relay refuses every `SandboxExec` that does not
+> present it as a bearer, and it must differ from every sandbox token. The harness receives it in
+> 2c; the worker you register in 1d never does, because the worker is a sandbox. It is minted per
+> run for the same reason as `TOKEN` — `relay-deployment.yaml`'s `dev-exec-token` is public.
+
 > **Kind only.** This demo applies `relay-deployment.yaml` directly, so `set env` is the right
-> tool here. On an OCP overlay deployment the relay reads `SH_RELAY_TOKEN` from the
-> `sh-relay-token` Secret instead, and `set env` would replace that `secretKeyRef` with a
-> literal — putting the token back into the Deployment spec, which is what #173 removed. There,
-> rotate the Secret and `oc rollout restart deploy/sandbox-relay`.
+> tool here. On an OCP overlay deployment the relay reads `SH_RELAY_TOKEN` and
+> `MOCA_RELAY_EXEC_TOKEN` from the `sh-relay-token` Secret instead, and `set env` would replace
+> those `secretKeyRef`s with literals — putting the tokens back into the Deployment spec, which is
+> what #173 removed. There, patch the one key you are rotating
+> (`oc patch secret sh-relay-token --type=merge -p '{"stringData":{"SH_RELAY_TOKEN":"…"}}'`), then
+> `oc rollout restart deploy/sandbox-relay`, and give the harness the exec token by a
+> `secretKeyRef` to that one key ([README-worker.md, Step 2](../../deploy/knative/README-worker.md)).
 
 ### 1c. Open the tunnel — and prove the relay is really serving
 
@@ -266,14 +275,15 @@ ANTHROPIC_BASE_URL    <secretKeyRef>
 ANTHROPIC_AUTH_TOKEN  <secretKeyRef>
 ```
 
-Now upsert the three remote-path vars **by name**, preserving everything else:
+Now upsert the four remote-path vars **by name**, preserving everything else:
 
 ```bash
-NEWENV=$(jq -c '
-  map(select(.name | IN("SH_REMOTE_SANDBOX","SH_RELAY_ADDR","KAGENTI_SANDBOX_POOL_SELECTOR") | not))
+NEWENV=$(jq -c --arg exec "$EXEC_TOKEN" '
+  map(select(.name | IN("SH_REMOTE_SANDBOX","SH_RELAY_ADDR","KAGENTI_SANDBOX_POOL_SELECTOR","MOCA_RELAY_EXEC_TOKEN") | not))
   + [{name:"SH_REMOTE_SANDBOX",value:"1"},
      {name:"SH_RELAY_ADDR",value:"sandbox-relay.default.svc:8443"},
-     {name:"KAGENTI_SANDBOX_POOL_SELECTOR",value:"sh.kagenti.io/sandbox-pool=demo-remote-only"}]
+     {name:"KAGENTI_SANDBOX_POOL_SELECTOR",value:"sh.kagenti.io/sandbox-pool=demo-remote-only"},
+     {name:"MOCA_RELAY_EXEC_TOKEN",value:$exec}]
 ' /tmp/demo-remote/env-snapshot.json)
 
 kubectl patch ksvc $KSVC -n $NS --type=json \
@@ -331,7 +341,7 @@ with `…pool=default`. Watch it leave the middle of the array and return at the
 value — append without the filter and you get two entries of the same name, which is invalid:
 
 ```
-BEFORE (8)                          AFTER (10)
+BEFORE (8)                          AFTER (11)
 0: HOME                             0: HOME
 1: REDIS_URL                        1: REDIS_URL
 2: SH_MODEL                         2: SH_MODEL
@@ -342,6 +352,7 @@ BEFORE (8)                          AFTER (10)
 7: ANTHROPIC_AUTH_TOKEN   <ref>     7: SH_REMOTE_SANDBOX                <- new
                                     8: SH_RELAY_ADDR                    <- new
                                     9: KAGENTI_SANDBOX_POOL_SELECTOR    <- re-added, new value
+                                    10: MOCA_RELAY_EXEC_TOKEN           <- new
 ```
 
 **The property that matters:** untouched entries are passed through as **whole objects**, never
@@ -356,13 +367,14 @@ address elements by _index_, and indices shift as you add and remove. Computing 
 jq and replacing `/spec/template/spec/containers/0/env` once sidesteps that arithmetic and lands
 atomically. `containers/0` is the first (user) container in the revision template.
 
-**And what the three values do:**
+**And what the four values do:**
 
 | Var                                                    | Effect                                                                                              |
 | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
 | `SH_REMOTE_SANDBOX=1`                                  | enables the remote-sandbox code path at all                                                         |
 | `SH_RELAY_ADDR=sandbox-relay.default.svc:8443`         | where the _harness_ dials the relay — in-cluster DNS, the other end of the worker's outbound tunnel |
 | `KAGENTI_SANDBOX_POOL_SELECTOR=…pool=demo-remote-only` | a label no pod carries, so the pod candidate set is empty                                           |
+| `MOCA_RELAY_EXEC_TOKEN=$EXEC_TOKEN`                    | the credential the harness presents on every `SandboxExec`; the relay refuses an Exec without it    |
 
 The third is the load-bearing one for the demo's honesty. The first two alone would leave idle
 Alpine pods in the candidate set, and least-loaded-first could hand the exec to one.

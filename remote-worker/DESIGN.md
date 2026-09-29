@@ -92,9 +92,19 @@ export KUBECONFIG=.kube/config-ykt1
 # 1. Relay token (fail-closed). Global token covers all sandbox ids.
 oc set env deploy/sandbox-relay SH_RELAY_TOKEN=dev-token -n default
 
-# 2. Enable the remote-sandbox path on the harness (rolls a new revision).
-oc set env ksvc/serverless-harness \
-  SH_REMOTE_SANDBOX=1 SH_RELAY_ADDR=sandbox-relay.default.svc:8443 -n default
+# 2. Enable the remote-sandbox path on the harness (rolls a new revision), with the relay's
+#    exec token: the relay refuses every SandboxExec without it (MI1 R5). The harness reads
+#    it by a secretKeyRef to that ONE key of sh-relay-token (setup-ocp.sh creates it), never
+#    the whole Secret. `oc set env` does not work on a Knative Service, so upsert by name:
+NEWENV=$(oc get ksvc serverless-harness -n default -o json | jq -c '
+  (.spec.template.spec.containers[0].env // [])
+  | map(select(.name | IN("SH_REMOTE_SANDBOX", "SH_RELAY_ADDR", "MOCA_RELAY_EXEC_TOKEN") | not))
+  + [{name: "SH_REMOTE_SANDBOX", value: "1"},
+     {name: "SH_RELAY_ADDR", value: "sandbox-relay.default.svc:8443"},
+     {name: "MOCA_RELAY_EXEC_TOKEN",
+      valueFrom: {secretKeyRef: {name: "sh-relay-token", key: "MOCA_RELAY_EXEC_TOKEN"}}}]')
+oc patch ksvc serverless-harness -n default --type=json \
+  -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/env\",\"value\":$NEWENV}]"
 
 # 3. Tunnel the relay to the laptop (leave running).
 oc port-forward svc/sandbox-relay 8443:8443 -n default &
@@ -112,8 +122,11 @@ Verify:
 oc exec deploy/redis -n default -- redis-cli HGETALL sh:sandbox:records
 #   → field "sbx-laptop-1" present
 
-# Drive an exec straight through the relay (separate terminal; reuse the port-forward):
-grpcurl -plaintext -proto proto/sandbox/v1/sandbox.proto \
+# Drive an exec straight through the relay (separate terminal; reuse the port-forward),
+# presenting the exec token as the harness does:
+EXEC_TOKEN=$(oc get secret sh-relay-token -n default \
+  -o jsonpath='{.data.MOCA_RELAY_EXEC_TOKEN}' | base64 -d)
+grpcurl -plaintext -H "authorization: Bearer $EXEC_TOKEN" -proto proto/sandbox/v1/sandbox.proto \
   -d '{"sandbox_id":"sbx-laptop-1","exec":{"req_id":1,"command":"echo hi; echo oops >&2; exit 7","timeout_s":10,"streaming":true}}' \
   localhost:8443 sandbox.v1.SandboxExec/Exec
 #   → Chunk{stdout:"hi\n"}, Chunk{stderr:"oops\n"}, End{exit_code:7}
