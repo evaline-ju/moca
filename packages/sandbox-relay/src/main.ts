@@ -271,14 +271,20 @@ function bind(server: Server, addr: string): Promise<number> {
  * or the global `SH_RELAY_TOKEN`. If neither env var is set for a sandbox,
  * `expected` is `undefined` and every token — including an undefined one from
  * a tokenless worker — is rejected, instead of the two `undefined`s comparing
- * equal.
+ * equal. Constant-time, like the exec token's comparison.
  */
 export function makeDefaultValidateToken(
   env: NodeJS.ProcessEnv,
 ): (token: string | undefined, sandboxId: string) => boolean {
   return (token, sandboxId) => {
     const expected = env[`SH_RELAY_TOKEN_${sandboxId}`] ?? env.SH_RELAY_TOKEN;
-    return expected !== undefined && token === expected;
+    // `!`, not `=== undefined`: an empty SH_RELAY_TOKEN= is a configuration mistake, not a token,
+    // and must not admit a worker presenting an empty one.
+    if (!expected || !token) return false;
+    // Constant-time, length-checked first -- the same comparison as the exec token's.
+    const want = Buffer.from(expected);
+    const got = Buffer.from(token);
+    return got.length === want.length && timingSafeEqual(got, want);
   };
 }
 
