@@ -14,7 +14,9 @@
 #   SH_ENV_DIR        Where the supervisor/relay env files live (default /etc/serverless-harness)
 #   SH_INSTALL_DIR    Where the harness checkout lives on the VM (default /opt/serverless-harness)
 #   SH_SANDBOX_COUNT     Number of sandbox containers to start (default 2)
-#   SANDBOX_IMAGE        Sandbox container image (default ghcr.io/rossoctl/serverless-harness-sandbox:latest)
+#   SANDBOX_IMAGE        Sandbox container image (default
+#                          ghcr.io/rossoctl/serverless-harness-remote-worker:latest, the image
+#                          that attaches to the relay -- compose's sandbox image too)
 #   SH_SANDBOX_RELAY_ADDR  Address each sandbox container uses to dial the relay (default
 #                          host.containers.internal:<SH_RELAY_PORT from relay.env>). Reaching
 #                          the host from inside a container is the part of this script least
@@ -37,7 +39,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${SH_ENV_DIR:=/etc/serverless-harness}"
 : "${SH_INSTALL_DIR:=/opt/serverless-harness}"
 : "${SH_SANDBOX_COUNT:=2}"
-: "${SANDBOX_IMAGE:=ghcr.io/rossoctl/serverless-harness-sandbox:latest}"
+: "${SANDBOX_IMAGE:=ghcr.io/rossoctl/serverless-harness-remote-worker:latest}"
 MOCA_SANDBOX_SUBNET="${MOCA_SANDBOX_SUBNET:-10.89.40.0/24}"
 MOCA_SANDBOX_GATEWAY="${MOCA_SANDBOX_GATEWAY:-10.89.40.1}"
 MOCA_SANDBOX_BRIDGE="${MOCA_SANDBOX_BRIDGE:-moca-sandbox0}"
