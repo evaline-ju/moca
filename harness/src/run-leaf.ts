@@ -410,6 +410,21 @@ async function runPromptLeaf(
     };
   }
 
+  // MI1 §5 R3, here as in every other leaf kind, not left to executeTurn: `deps.executeTurn` replaces
+  // that function, and with it that check. Before the heartbeat, the overlay and the turn, so a
+  // server-mode prompt leaf with no sandbox holds nothing and runs nothing.
+  try {
+    assertServerSandbox(config, selected?.config ?? null);
+  } catch (err) {
+    if (selected) await selected.release();
+    if (selected?.transport) await selected.transport.close();
+    return {
+      status: 'failed',
+      reason: 'error',
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   // The digest whose overlay was ATTEMPTED in the sandbox, so the finally block below knows there is
   // a per-leaf /workspace/leaves/<sid>/.sh-config link to tear down AND a ref on that digest's

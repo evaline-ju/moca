@@ -760,7 +760,10 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
       const statusUrl = new URL(url, 'http://localhost');
       const sessionId = statusUrl.searchParams.get('sessionId');
       // A status read always names its session, and is always authorized before anything is read:
-      // a request without one is refused here rather than left to the handler (MI1 R7).
+      // a request without one is refused here rather than left to the handler (MI1 R7). This order
+      // exists for CodeQL's "user-controlled bypass" check and changes no response: handleLeafStatus
+      // refuses a missing sessionId the same way. So no test can tell the two orders apart -- keep
+      // this one because it makes the authorization unconditional in the code, not only in effect.
       if (!sessionId) {
         res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'sessionId_required' }));
         return;

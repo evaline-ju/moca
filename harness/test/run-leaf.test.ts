@@ -752,6 +752,26 @@ describe('runLeaf — prompt routing', () => {
     expect(r).toEqual({ status: 'aborted' });
   });
 
+  it('refuses a server-mode prompt leaf with no sandbox itself, even with executeTurn injected (MI1 R3)', async () => {
+    // The injected executeTurn replaces the real one's own R3 check, so only the leaf's check can
+    // stop this. It must fail before the turn runs, and give back any lease it took.
+    const lease = {
+      config: null,
+      heartbeat: vi.fn(async () => {}),
+      release: vi.fn(async () => {}),
+    };
+    for (const selected of [null, lease]) {
+      selectPoolSandboxMock.mockReset().mockResolvedValue(selected);
+      const executeTurn = vi.fn();
+      const r = await runLeaf(base, { serverMode: true }, { executeTurn });
+      expect(r).toMatchObject({ status: 'failed', reason: 'error' });
+      expect((r as { message?: string }).message).toMatch(/sandbox/i);
+      expect(executeTurn).not.toHaveBeenCalled();
+    }
+    expect(lease.release).toHaveBeenCalledTimes(1);
+    selectPoolSandboxMock.mockReset();
+  });
+
   it('fails bad_inputs when prompt is missing', async () => {
     const r = await runLeaf({ sessionId: 's', item: base.item, kind: 'prompt' }, undefined, {
       executeTurn: vi.fn(),

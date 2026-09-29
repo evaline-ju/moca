@@ -284,8 +284,8 @@ export class SandboxRequiredError extends Error {
 
 /**
  * Shared MI1 §5 R3 gate: throws {@link SandboxRequiredError} when a server-mode caller has no
- * resolvable sandbox config and has not explicitly opted into local tools. Every leaf kind that can
- * wire up `k8sSandboxExtension` (turns, solve leaves, verdict leaves) must call this — with the
+ * resolvable sandbox config and has not explicitly opted into local tools. Every path that can
+ * wire up `k8sSandboxExtension` (executeTurn, and the converge, solve and prompt leaves) must call this — with the
  * config it received and the sandbox config it resolved — before it builds a resource loader or
  * session, so a null sandbox never reaches the extension.
  */

@@ -409,6 +409,10 @@ fi
 # a worker must present exactly this token, and remote-worker/deploy-incluster.sh reads it
 # back out of this same Secret.
 #
+# Both writes below put the token on this process's argv (`-p` / `--from-literal`), visible to `ps`
+# on this machine for the life of the command -- the same known exposure deploy-incluster.sh notes
+# (#173). It never lands in a Deployment spec.
+#
 # Never overwritten when already present. A re-run of this script must not rotate a token
 # out from under a worker that is already attached with it; that is also why the overlay
 # does not use a kustomize secretGenerator, which would clobber it on every apply.
