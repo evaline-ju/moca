@@ -432,33 +432,42 @@ export async function selectPoolSandbox(
   );
   for (const name of orderByLoad(loads)) {
     if (await lease.acquire(name, opts.cap, holderId, opts.ttlMs)) {
-      const config: K8sSandboxConfig = { pod: name, namespace, context, podCwd, headCwd };
-      const rec = grpcById.get(name);
-      const make = deps.makeTransport ?? GrpcRelayTransport;
-      const transport = rec
-        ? make(
-            name,
-            (deps.makeExecClient ?? ((id: string) => defaultExecClient(id, env)))(name),
-            // The SESSION id becomes the Exec's workspace_key -- never the lease holder id. This is
-            // the ONLY harness change the microVM tier needs, and it is required for correctness
-            // rather than convenience: without it, consecutive leaseholders of one sandbox_id inherit
-            // the previous session's workspace (spec §3.4).
-            //
-            // It has to be the session id specifically, because the key is also what makes a session
-            // CONTINUOUS: `WorkspaceRoot/<workspace_key>` is created on the first Exec for an unseen
-            // key and lives until an idle Reclaim (§4.4), so keying it per turn would open turn 2 of a
-            // session in an empty workspace and give it its own standby VM pool (§4.3) -- continuity
-            // lost and standbys multiplied per turn rather than per session.
-            { workspaceKey: sessionId },
-          )
-        : undefined;
-      return {
-        config,
-        transport,
-        leased: true,
-        heartbeat: () => lease.heartbeat(name, holderId, opts.ttlMs),
-        release: () => lease.release(name, holderId),
-      };
+      // The lease is held from here on: every step after the acquire runs inside this try, so a
+      // throw (an exec client that cannot be built, a transport constructor) releases it before the
+      // original error propagates, rather than holding a slot until the lease TTL expires.
+      try {
+        const config: K8sSandboxConfig = { pod: name, namespace, context, podCwd, headCwd };
+        const rec = grpcById.get(name);
+        const make = deps.makeTransport ?? GrpcRelayTransport;
+        const transport = rec
+          ? make(
+              name,
+              (deps.makeExecClient ?? ((id: string) => defaultExecClient(id, env)))(name),
+              // The SESSION id becomes the Exec's workspace_key -- never the lease holder id. This
+              // is the ONLY harness change the microVM tier needs, and it is required for
+              // correctness rather than convenience: without it, consecutive leaseholders of one
+              // sandbox_id inherit the previous session's workspace (spec §3.4).
+              //
+              // It has to be the session id specifically, because the key is also what makes a
+              // session CONTINUOUS: `WorkspaceRoot/<workspace_key>` is created on the first Exec for
+              // an unseen key and lives until an idle Reclaim (§4.4), so keying it per turn would
+              // open turn 2 of a session in an empty workspace and give it its own standby VM pool
+              // (§4.3) -- continuity lost and standbys multiplied per turn rather than per session.
+              { workspaceKey: sessionId },
+            )
+          : undefined;
+        return {
+          config,
+          transport,
+          leased: true,
+          heartbeat: () => lease.heartbeat(name, holderId, opts.ttlMs),
+          release: () => lease.release(name, holderId),
+        };
+      } catch (err) {
+        // Best effort: a failed release must not replace the error that explains the failure.
+        await lease.release(name, holderId).catch(() => {});
+        throw err;
+      }
     }
   }
   throw new SandboxPoolSaturatedError(selector);

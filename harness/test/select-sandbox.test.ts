@@ -279,6 +279,57 @@ describe('selectPoolSandbox: the real defaultExecClient (MI1 R5)', () => {
     expect(transportBuilt).toBe(false);
   });
 
+  it('releases the lease it acquired when the exec client cannot be built, and surfaces the original error', async () => {
+    const lease = fakeLease({ 'sbx-remote-1': 0 }, opts.cap);
+    const released: Array<[string, string]> = [];
+    lease.release = async (pod, holderId) => {
+      released.push([pod, holderId]);
+    };
+    const err = await selectPoolSandbox(
+      env(),
+      '/head',
+      'run-1',
+      { ...opts, holderId: 'turn-7' },
+      { listPods: async () => [], lease, records: fakeRecords([grpcRec]) },
+    ).catch((e) => e);
+    expect((err as Error).message).toMatch(/MOCA_RELAY_EXEC_TOKEN is not set/);
+    expect(lease.acquired).toEqual(['sbx-remote-1']);
+    expect(released).toEqual([['sbx-remote-1', 'turn-7']]);
+  });
+
+  it('releases the lease when building the transport throws, and surfaces the original error', async () => {
+    const lease = fakeLease({ 'sbx-remote-1': 0 }, opts.cap);
+    const released: string[] = [];
+    lease.release = async (pod) => {
+      released.push(pod);
+    };
+    const boom = new Error('transport construction failed');
+    const err = await selectPoolSandbox(env(), '/head', 'run-1', opts, {
+      listPods: async () => [],
+      lease,
+      records: fakeRecords([grpcRec]),
+      makeExecClient: () => ({}) as ExecClientLike,
+      makeTransport: () => {
+        throw boom;
+      },
+    }).catch((e) => e);
+    expect(err).toBe(boom);
+    expect(released).toEqual(['sbx-remote-1']);
+  });
+
+  it('surfaces the original error even when the release itself fails', async () => {
+    const lease = fakeLease({ 'sbx-remote-1': 0 }, opts.cap);
+    lease.release = async () => {
+      throw new Error('redis down');
+    };
+    const err = await selectPoolSandbox(env(), '/head', 'run-1', opts, {
+      listPods: async () => [],
+      lease,
+      records: fakeRecords([grpcRec]),
+    }).catch((e) => e);
+    expect((err as Error).message).toMatch(/MOCA_RELAY_EXEC_TOKEN is not set/);
+  });
+
   it('builds a real relay exec client once MOCA_RELAY_EXEC_TOKEN is set, without dialing a relay', async () => {
     const lease = fakeLease({ 'sbx-remote-1': 0 }, opts.cap);
     let capturedClient: ExecClientLike | undefined;
