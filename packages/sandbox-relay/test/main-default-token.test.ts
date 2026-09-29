@@ -9,6 +9,15 @@ describe('makeDefaultValidateToken (fail-closed default auth)', () => {
     expect(validate('anything', 'sbx-1')).toBe(false);
   });
 
+  it('an EMPTY configured token admits nothing, not even an empty token', () => {
+    expect(makeDefaultValidateToken({ SH_RELAY_TOKEN: '' })('', 'sbx-1')).toBe(false);
+    expect(makeDefaultValidateToken({ SH_RELAY_TOKEN_sbx1: '' })('', 'sbx1')).toBe(false);
+  });
+
+  it('refuses a same-length wrong token, so the comparison itself is exercised', () => {
+    expect(makeDefaultValidateToken({ SH_RELAY_TOKEN: 'secret' })('secreT', 'sbx-1')).toBe(false);
+  });
+
   it('SH_RELAY_TOKEN set: only an exact match is accepted', () => {
     const validate = makeDefaultValidateToken({ SH_RELAY_TOKEN: 'secret' });
     expect(validate('secret', 'sbx-1')).toBe(true);

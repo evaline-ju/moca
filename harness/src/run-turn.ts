@@ -24,10 +24,12 @@ import {
   selectPoolSandbox,
   SandboxPoolSaturatedError,
   SandboxPoolEmptyError,
+  assertServerSandbox,
   type SelectDeps,
 } from './select-sandbox.js';
 import { checkpointExtension } from './checkpoint-extension.js';
 import { budgetVoterExtension, branchSpend } from './budget-voter.js';
+import { AMBIENT_KEY_SENTINEL } from './ambient-sentinel.js';
 import { toolChoiceExtension } from './tool-choice-extension.js';
 // Type-only import (erased at compile time) so it is safe against the run-leaf↔run-turn value
 // cycle: run-leaf.ts imports values from run-turn.js, but a `import type` adds no runtime edge.
@@ -257,6 +259,13 @@ export interface TurnConfig {
   upstreamCredential?: UpstreamCredential;
   model?: string;
   provider?: string;
+  /**
+   * Set by the server entry points (startServer, the P6 worker). A server-mode turn must run its tools
+   * in a sandbox and uses a locked-down resource loader (MI1 §5 R3, R4). Absent for the CLI.
+   */
+  serverMode?: boolean;
+  /** Server mode only: allow local tools when no sandbox resolves. SH_LOCAL_TOOLS=1; refused under multi tenancy. */
+  allowLocalTools?: boolean;
 }
 
 export interface ModelSelection {
@@ -342,10 +351,11 @@ function synthesizeCustomModel(
     api: 'anthropic-messages',
     // provider MUST be "anthropic" (not a synthetic tag): pi resolves the request API key by
     // provider name — authStorage.getApiKey(provider) maps "anthropic" -> ANTHROPIC_API_KEY
-    // (which applyModelGateway seeds from the auth token), whereas an unknown provider like
-    // "custom" has no env-key mapping and fails with `No API key found for "custom"`. Request
-    // routing is by baseUrl + api, not provider, so tagging it "anthropic" sends traffic to the
-    // custom baseUrl while satisfying the key lookup. Overridable via SH_MODEL_PROVIDER.
+    // (which applyModelGateway seeds only with a constant sentinel when a Bearer token is in
+    // play, never with the token itself), whereas an unknown provider like "custom" has no
+    // env-key mapping and fails with `No API key found for "custom"`. Request routing is by
+    // baseUrl + api, not provider, so tagging it "anthropic" sends traffic to the custom baseUrl
+    // while satisfying the key lookup. Overridable via SH_MODEL_PROVIDER.
     provider: (env.SH_MODEL_PROVIDER ?? 'anthropic') as Model<'anthropic-messages'>['provider'],
     baseUrl,
     reasoning: false,
@@ -388,8 +398,11 @@ function synthesizeOpenAICompletionsModel(
     // Endpoint authenticates via a custom header (already in `headers`) or not at all — strip the
     // SDK's default Authorization Bearer so an unknown/empty Bearer isn't sent. pi's openai client
     // still requires a non-empty api key even when the Bearer is unused, so seed a placeholder.
+    // Read and written on process.env because that is where pi looks. The one recorded exception
+    // to R2's "the multi scrub leaves no OPENAI_API_KEY" (MI1 §5): like ANTHROPIC_API_KEY's
+    // sentinel, the value is a constant that authenticates nothing.
     headers.Authorization = null;
-    if (!env.OPENAI_API_KEY) process.env.OPENAI_API_KEY = 'unused';
+    if (!process.env.OPENAI_API_KEY) process.env.OPENAI_API_KEY = 'unused';
   }
   const model: Model<'openai-completions'> = {
     id: modelId,
@@ -478,7 +491,7 @@ export interface TurnResult {
  *
  * When a gateway base URL or auth token is in play (config or env), rewrite the model to
  * call the gateway with Bearer auth and strip `x-api-key` (the gateway authenticates via
- * Authorization). Also seeds `ANTHROPIC_API_KEY` from the auth token when unset, since some
+ * Authorization). Also seeds `ANTHROPIC_API_KEY` with a constant sentinel when unset, since some
  * pi-ai code paths still read the env var. Returns the base model unchanged when neither a
  * gateway base nor a token is configured (direct-key mode).
  *
@@ -492,19 +505,33 @@ export function applyModelGateway<M extends { headers?: Record<string, unknown> 
   // litellm compat-flag disables) applies ONLY to the Anthropic-messages path. OpenAI-compatible
   // models carry their own baseUrl/headers/auth from synthesizeOpenAICompletionsModel — leave
   // them untouched (else we'd clobber baseUrl with ANTHROPIC_BASE_URL and inject a wrong Bearer).
-  const api = (baseModel as { api?: string }).api;
-  if (api && api !== 'anthropic-messages') return baseModel;
+  // An absent `api` IS the Anthropic path: pi's own Anthropic models and this file's synthesized
+  // one both carry 'anthropic-messages', and the fixtures and callers that omit the field mean it.
+  // Anything else -- including an empty string -- is some other wire protocol.
+  const api = (baseModel as { api?: string }).api ?? 'anthropic-messages';
+  if (api !== 'anthropic-messages') {
+    // A caller's own credential can only be applied on this path. Returning the model unchanged
+    // would discard it silently and send the turn on the shared operator credential instead --
+    // spending one principal's turn on another's key (MI1 §5 R2). Fail the turn rather than that.
+    if (config?.upstreamCredential) {
+      throw new Error(
+        `a per-caller upstream credential cannot be applied to a '${api}' model: only anthropic-messages models carry it`,
+      );
+    }
+    return baseModel;
+  }
   // `||` (not `??`) so an empty-string config value falls back to the env var rather than
   // suppressing it — "" is a "not set" sentinel here, not a meaningful credential.
   const authToken =
     config?.upstreamCredential?.value ||
     config?.anthropicAuthToken ||
     process.env.ANTHROPIC_AUTH_TOKEN;
-  // Intentional process.env mutation: some pi-ai code paths read ANTHROPIC_API_KEY at
-  // invocation time, so seed it from the auth token. This now runs from two call sites
-  // (runTurn and runLeaf via applyModelGateway) — do NOT "clean it up" into a local.
+  // Pi resolves the request key BY PROVIDER NAME, so ANTHROPIC_API_KEY must exist whenever a Bearer
+  // token is in play. It is seeded with a constant that names no one, never with the caller's
+  // token: no caller's credential becomes process-wide (MI1 §5 R2). The Bearer header below carries
+  // the real token and `x-api-key: null` strips the sentinel.
   if (authToken && !process.env.ANTHROPIC_API_KEY) {
-    process.env.ANTHROPIC_API_KEY = authToken;
+    process.env.ANTHROPIC_API_KEY = AMBIENT_KEY_SENTINEL;
   }
   const gatewayBase = config?.anthropicBaseUrl || process.env.ANTHROPIC_BASE_URL;
   if (!gatewayBase && !authToken) return baseModel;
@@ -586,6 +613,50 @@ export function resourceLoaderOptionsFor(
   return { ...base, ...promotedLoaderOptions(promoted) };
 }
 
+/**
+ * Everything the Pi resource loader is built from, in one place so the server-mode lockdown is
+ * assertable (MI1 §5 R4). Outside server mode the result is exactly today's: `SettingsManager.create`
+ * with default options and `resourceLoaderOptionsFor`'s keys.
+ *
+ * In server mode: discovered extension FILES are off (the harness's own extensions arrive as
+ * extensionFactories, which noExtensions does not affect); the project is untrusted, so no project
+ * settings and no <cwd>/.pi/SYSTEM.md or APPEND_SYSTEM.md are read; no ancestor AGENTS.md/CLAUDE.md
+ * walk happens; and no skill, prompt template or theme is discovered from $HOME, the agent directory
+ * or the project. A promoted bundle still supplies its context through agentsFilesOverride and its
+ * skills and prompt templates through additionalSkillPaths/additionalPromptTemplatePaths, which pi
+ * loads even when discovery is off.
+ */
+export function turnLoaderInputs(opts: {
+  config?: TurnConfig;
+  cwd: string;
+  extensionFactories: unknown[];
+  promotedConfig?: PromotedConfig;
+}): { agentDir: string; settingsManager: SettingsManager; loaderOptions: Record<string, unknown> } {
+  const locked = opts.config?.serverMode === true;
+  const agentDir = getAgentDir();
+  const settingsManager = SettingsManager.create(
+    opts.cwd,
+    agentDir,
+    locked ? { projectTrusted: false } : {},
+  );
+  const loaderOptions = {
+    ...resourceLoaderOptionsFor(
+      { cwd: opts.cwd, agentDir, settingsManager, extensionFactories: opts.extensionFactories },
+      opts.promotedConfig,
+    ),
+    ...(locked
+      ? {
+          noExtensions: true,
+          noContextFiles: true,
+          noSkills: true,
+          noPromptTemplates: true,
+          noThemes: true,
+        }
+      : {}),
+  };
+  return { agentDir, settingsManager, loaderOptions };
+}
+
 export interface ExecuteTurnInput {
   prompt: string;
   sessionId?: string;
@@ -626,6 +697,15 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
   // and unwinds through this finally). A leaked lease would hold a pool slot for its full TTL and, at
   // E8's concurrency, starve the pool it is meant to measure.
   const acquired = await acquireTurnSandbox(input.sandbox, process.env, cwd, input.sessionId);
+
+  // A null config would leave Pi's built-in tools running LOCALLY, in this process (MI1 §5 R3). Both
+  // ways a turn gets here — no pool resolved, or a leaf's injected sandbox — meet at this line.
+  try {
+    assertServerSandbox(input.config, acquired.sandbox.config);
+  } catch (err) {
+    await acquired.release();
+    throw err;
+  }
 
   let leaseRenewal: ReturnType<typeof setInterval> | undefined;
   if (acquired.leased) {
@@ -707,9 +787,6 @@ async function executeTurnCore(
   // Opened by executeTurn ahead of the pool acquire, so a missing session 404s before any lease work.
   const { store, backend, sessionManager } = opened;
 
-  const agentDir = getAgentDir();
-  const settingsManager = SettingsManager.create(cwd, agentDir);
-
   const budgetLimit = Number(process.env.SH_BUDGET_TOKENS);
   const budgetMargin = Number(process.env.SH_BUDGET_MARGIN);
   // acquireTurnSandbox (called by executeTurn, which owns the lease lifecycle) hands back exactly
@@ -750,12 +827,13 @@ async function executeTurnCore(
     extensionFactories.push(sseExtension(input.onEvent));
   }
 
-  const resourceLoader = new DefaultResourceLoader(
-    resourceLoaderOptionsFor(
-      { cwd, agentDir, settingsManager, extensionFactories },
-      input.promotedConfig,
-    ) as never,
-  );
+  const { settingsManager, loaderOptions } = turnLoaderInputs({
+    config,
+    cwd,
+    extensionFactories,
+    promotedConfig: input.promotedConfig,
+  });
+  const resourceLoader = new DefaultResourceLoader(loaderOptions as never);
   await resourceLoader.reload();
 
   const { provider, modelId } = input.selection ?? resolveModelSelection(config);

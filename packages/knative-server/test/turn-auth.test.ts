@@ -11,6 +11,7 @@ import { createClient } from 'redis';
 import {
   PASSTHROUGH,
   assertKeysetUsable,
+  authorizeRunRead,
   makeRuntimeReporter,
   resolveTurnAuth,
   runtimeFieldsForTurn,
@@ -217,6 +218,40 @@ describe('the one rule /turn enforces', () => {
     );
     expect(calls).toHaveLength(1);
     expect(calls[0]!.url).toBe('http://cp.default.svc:8080/internal/credentials');
+  });
+});
+
+describe('authorizeRunRead (MI1 R7)', () => {
+  const codeOfSync = (fn: () => unknown): string => {
+    try {
+      fn();
+    } catch (e) {
+      return (e as CpError).code;
+    }
+    throw new Error('expected a throw');
+  };
+
+  it('returns false for an unauthenticated caller when auth is not required', () => {
+    expect(authorizeRunRead({}, 'sid-1', deps({ requireAuth: false }))).toBe(false);
+  });
+
+  it('401 token_required for an unauthenticated caller when auth is required', () => {
+    expect(codeOfSync(() => authorizeRunRead({}, 'sid-1', deps({ requireAuth: true })))).toBe(
+      'token_required',
+    );
+  });
+
+  it('returns true when a valid token names the requested session', () => {
+    const result = authorizeRunRead({ authorization: `Bearer ${sessionToken()}` }, 'sid-1', deps());
+    expect(result).toBe(true);
+  });
+
+  it('400 session_mismatch when a valid token names a different session', () => {
+    expect(
+      codeOfSync(() =>
+        authorizeRunRead({ authorization: `Bearer ${sessionToken()}` }, 'someone-elses', deps()),
+      ),
+    ).toBe('session_mismatch');
   });
 });
 

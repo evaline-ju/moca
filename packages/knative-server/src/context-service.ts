@@ -23,6 +23,12 @@ export interface WorkloadRecord {
     claimName?: string;
     readOnly?: boolean;
   };
+  /**
+   * The authenticated subject that created it, or absent for an unauthenticated create. Set by the
+   * server, never by Context Service: only a caller with the same subject (or, for an unowned
+   * workload, an unauthenticated caller) may read, delete or run on it.
+   */
+  owner?: string;
 }
 
 interface ContextPool {

@@ -15,6 +15,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	pb "github.com/kagenti/serverless-harness/gen/go/sandbox/v1"
@@ -34,10 +35,11 @@ var msFieldShape = regexp.MustCompile(`^[0-9]+\.[0-9]{3}$`)
 // protoimpl.MessageState containing a no-copy guard, so recording them by value trips
 // go vet's copylocks check and the verification step would fail.
 type seenExec struct {
-	reqID        uint64
-	command      string
-	workspaceKey string
-	timeoutS     uint32
+	reqID         uint64
+	command       string
+	workspaceKey  string
+	timeoutS      uint32
+	authorization string
 }
 
 type fakeExec struct {
@@ -54,8 +56,14 @@ type fakeExec struct {
 
 func (f *fakeExec) Exec(req *pb.ExecRequest, stream grpc.ServerStreamingServer[pb.ExecEvent]) error {
 	e := req.GetExec()
+	var auth string
+	if md, ok := metadata.FromIncomingContext(stream.Context()); ok {
+		if v := md.Get("authorization"); len(v) > 0 {
+			auth = v[0]
+		}
+	}
 	f.mu.Lock()
-	f.seen = append(f.seen, seenExec{reqID: e.GetReqId(), command: e.GetCommand(), workspaceKey: e.GetWorkspaceKey(), timeoutS: e.GetTimeoutS()})
+	f.seen = append(f.seen, seenExec{reqID: e.GetReqId(), command: e.GetCommand(), workspaceKey: e.GetWorkspaceKey(), timeoutS: e.GetTimeoutS(), authorization: auth})
 	f.mu.Unlock()
 
 	if f.sendEmptyErr {
@@ -96,6 +104,9 @@ func startFake(t *testing.T, f *fakeExec) string {
 	return lis.Addr().String()
 }
 
+// testExecToken is the worker credential every test plan carries (notsecret).
+const testExecToken = "exec-driver-test-token" // notsecret
+
 // planFor builds a plan pointing at target with c slots, bases 1000000 apart exactly as
 // slot_req_base does.
 func planFor(t *testing.T, target string, c, iters, warmup int, mix []string) *plan {
@@ -109,6 +120,7 @@ func planFor(t *testing.T, target string, c, iters, warmup int, mix []string) *p
 		ExecTimeoutS:  30,
 		CallDeadlineS: 10,
 		Mix:           mix,
+		ExecToken:     testExecToken,
 	}
 	for i := 1; i <= c; i++ {
 		p.Slots = append(p.Slots, slot{
@@ -401,6 +413,55 @@ func TestDriveFailsWhenTheTargetIsUnreachable(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 30*time.Second {
 		t.Fatalf("drive took %s to fail against an unreachable target with no caller-supplied bound: it is hanging instead of using CallDeadlineS to fail fast", elapsed)
+	}
+}
+
+// Every Exec carries the relay's worker credential (MI1 R5): the relay refuses SandboxExec
+// without it, so a driver that omitted it would time a rung of UNAUTHENTICATED refusals.
+func TestDriveSendsTheExecTokenAsABearerOnEveryExec(t *testing.T) {
+	f := &fakeExec{}
+	p := planFor(t, startFake(t, f), 2, 3, 1, []string{"true"})
+	if err := drive(context.Background(), p); err != nil {
+		t.Fatalf("drive: %v", err)
+	}
+	seen := f.snapshot()
+	if len(seen) != 2*4 {
+		t.Fatalf("server saw %d Execs, want 8", len(seen))
+	}
+	for _, s := range seen {
+		if s.authorization != "Bearer "+testExecToken {
+			t.Fatalf("Exec %d carried authorization %q, want the plan's bearer", s.reqID, s.authorization)
+		}
+	}
+}
+
+// With no token there is no rung worth timing, and the refusal happens before any Exec.
+func TestDriveRefusesAPlanWithNoExecToken(t *testing.T) {
+	f := &fakeExec{}
+	p := planFor(t, startFake(t, f), 1, 1, 0, []string{"true"})
+	p.ExecToken = ""
+	err := drive(context.Background(), p)
+	if err == nil || !strings.Contains(err.Error(), "MOCA_RELAY_EXEC_TOKEN") {
+		t.Fatalf("drive with no exec token returned %v, want an error naming MOCA_RELAY_EXEC_TOKEN", err)
+	}
+	if n := len(f.snapshot()); n != 0 {
+		t.Fatalf("server saw %d Execs before the refusal, want 0", n)
+	}
+}
+
+func TestExecTokenFromEnv(t *testing.T) {
+	if _, err := execTokenFromEnv(func(string) string { return "" }); err == nil ||
+		!strings.Contains(err.Error(), "MOCA_RELAY_EXEC_TOKEN") {
+		t.Fatalf("an unset MOCA_RELAY_EXEC_TOKEN returned %v, want an error naming it", err)
+	}
+	got, err := execTokenFromEnv(func(k string) string {
+		if k == "MOCA_RELAY_EXEC_TOKEN" {
+			return "tok"
+		}
+		return ""
+	})
+	if err != nil || got != "tok" {
+		t.Fatalf("execTokenFromEnv = %q, %v; want the variable's value", got, err)
 	}
 }
 

@@ -5,9 +5,9 @@ import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { handler } from './server.js';
 // Boot-time validation of the sandbox-discovery enum; see its use below.
 import { resolveDiscoverySource } from '@sh/harness/select-sandbox';
-// Boot-time validation of the token keyset -- #249's fix, which this path has to call itself
-// because it never goes through startServer. See its use below.
-import { assertKeysetUsable } from './turn-auth.js';
+// Shared boot preparation (keyset validation, tenancy, ambient-credential scrub) -- this path has to
+// call it itself because it never goes through startServer. See its use below.
+import { prepareServerProcess } from './server-process.js';
 
 /**
  * Worker → supervisor. Four rows: the first three are exactly P6 §3.9's; the fourth, `stats`,
@@ -271,14 +271,18 @@ if (isMainModule) {
   // static property of the unit file, and discovering it on the first turn wastes a whole bring-up.
   //
   // The keyset is the other half of the same argument, and it needs an explicit call here rather
-  // than inheriting one: `startServer` runs `assertKeysetUsable(process.env)` "before anything
+  // than inheriting one: `startServer` runs `prepareServerProcess(process.env)` "before anything
   // binds" (server.ts:657), and this path deliberately bypasses `startServer` altogether -- bare
   // `createServer(handler)`, never `listen()`. So under the supervisor a malformed
   // SH_SESSION_TOKEN_PUBLIC_KEYS stopped being a boot failure: every worker reported `ready`,
   // served GET /health, and 503'd every authenticated /turn. Citing #249's fix as this block's own
   // precedent while not calling it left the regression it closed open on exactly this deployment.
+  //
+  // MI1 §5 R2: prepareServerProcess is the SAME function startServer calls, so both entry points
+  // validate tenancy and scrub ambient credentials identically -- there is no separate worker-only
+  // boot path for that check to drift from.
   try {
-    assertKeysetUsable(process.env);
+    prepareServerProcess(process.env);
     resolveDiscoverySource(process.env, process.env.SH_REMOTE_SANDBOX === '1');
   } catch (err) {
     console.error(String(err instanceof Error ? err.message : err));

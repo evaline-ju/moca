@@ -86,6 +86,11 @@ func (a *Agent) ShellPID() int {
 // The three pipes are created here rather than per command, because creating them per
 // command is the fork this whole design removes.
 func (a *Agent) forkShell() error {
+	// No explicit cmd.Env, unlike internal/exec's runner (MI1 §5 R6), and deliberately so: the
+	// guest agent is the VM's own init-time process and holds no credential or worker setting,
+	// and Request carries no environment across the vsock (protocol.go). The guard is absent
+	// because there is nothing to strip, not because it lives elsewhere. If Request or the
+	// agent's own environment ever gains a secret, commands here need R6's filter.
 	cmd := exec.Command(a.opts.Shell)
 	cmd.Dir = a.opts.WorkDir
 	in, err := cmd.StdinPipe()
@@ -421,6 +426,7 @@ func parkedShellLine(path, nonce string) string {
 
 // runFreshChild is the stdin path: a real bash -c child whose stdin is fed and closed.
 func (a *Agent) runFreshChild(req Request, stdin []byte, w *frameWriter) (End, error) {
+	// Inherits the agent's environment on purpose; see forkShell for why R6's filter is absent here.
 	cmd := exec.Command(a.opts.Shell, "-c", req.Command)
 	cmd.Dir = a.opts.WorkDir
 	cmd.Stdout = w.stdoutWriter()

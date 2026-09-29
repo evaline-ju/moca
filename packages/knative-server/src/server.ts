@@ -27,13 +27,16 @@ import {
 } from './context-service.js';
 import { CpError, statusFor } from '@sh/control-plane';
 import {
-  assertKeysetUsable,
+  authenticateSubject,
+  authorizeRunRead,
   resolveTurnAuth,
   runtimeFieldsForTurn,
   turnAuthDepsFromEnv,
   type TurnAuth,
   type TurnAuthDeps,
 } from './turn-auth.js';
+import { prepareServerProcess } from './server-process.js';
+import { readTenancy } from './tenancy.js';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
@@ -78,13 +81,18 @@ const isSaturated = (r: LeafResult): boolean => r.status === 'failed' && r.reaso
  * identity for an authenticated turn (MU1 spec §3.4). When it is absent, this is byte-for-byte
  * today's behaviour, which is what keeps the 14 unauthenticated deploy scripts working (§4.3.1).
  */
-function buildConfig(auth?: TurnAuth | null): TurnConfig {
+export function buildConfig(auth?: TurnAuth | null): TurnConfig {
+  // Every config built here is for a SERVER turn: tools must run in a sandbox and the loader is
+  // locked down (MI1 §5 R3/R4). SH_LOCAL_TOOLS=1 is a single-tenant development opt-in;
+  // prepareServerProcess refuses it under MOCA_TENANCY=multi at boot.
+  const server = { serverMode: true, allowLocalTools: process.env.SH_LOCAL_TOOLS === '1' };
   if (auth) {
     return {
       redisUrl: process.env.REDIS_URL,
       cwd: process.env.HARNESS_CWD || process.cwd(),
       anthropicBaseUrl: auth.anthropicBaseUrl,
       upstreamCredential: auth.credential,
+      ...server,
     };
   }
   return {
@@ -92,6 +100,7 @@ function buildConfig(auth?: TurnAuth | null): TurnConfig {
     cwd: process.env.HARNESS_CWD || process.cwd(),
     anthropicBaseUrl: process.env.ANTHROPIC_BASE_URL,
     anthropicAuthToken: process.env.ANTHROPIC_AUTH_TOKEN,
+    ...server,
   };
 }
 
@@ -405,6 +414,11 @@ function getResultStore(): RedisResultStore {
 
 const workloadKey = (id: string) => `sh:workload:${id}`;
 
+const withOwner = (record: WorkloadRecord, subject: string | null): WorkloadRecord => {
+  const { owner: _ignored, ...rest } = record;
+  return subject === null ? rest : { ...rest, owner: subject };
+};
+
 async function saveWorkload(record: WorkloadRecord): Promise<void> {
   await getResultStore().set(workloadKey(record.workloadId), JSON.stringify(record));
 }
@@ -430,17 +444,74 @@ function contextServiceFailure(operation: string, err: unknown, res: ServerRespo
   res.writeHead(502, JSON_HEADERS).end(JSON.stringify({ error: 'context_service_error' }));
 }
 
-async function resolveRunWorkload(body: any, res: ServerResponse): Promise<any | null> {
+/**
+ * A workload belongs to the subject that created it. A caller may read or run on one only with the
+ * same subject — an unowned workload (created unauthenticated) only without one. A mismatch reads as
+ * `workload_not_found` there. Names are still one namespace, though: re-creating another subject's
+ * live name answers `409`, and deleting an unowned one answers `204`, so a name's existence is
+ * probeable — only its contents and its pool are not.
+ */
+const ownedBy = (record: WorkloadRecord, subject: string | null): boolean =>
+  (record.owner ?? null) === subject;
+
+/**
+ * Who may DELETE a workload: its owner, and ANY caller for an unowned one. A record written before
+ * workloads had owners carries none, and under SH_REQUIRE_AUTH=true no caller is unauthenticated --
+ * so without this it could be neither read, deleted nor re-created, and its pool and volume would
+ * leak with no API path to reclaim them. Deleting is the only thing a non-owner may do: an unowned
+ * workload was reachable by every caller before, so reclaiming it grants nothing new, while
+ * reading or running on it would.
+ */
+const mayDelete = (record: WorkloadRecord, subject: string | null): boolean =>
+  record.owner === undefined || ownedBy(record, subject);
+
+/**
+ * Context Service's reply names the pool it acted on. Every lookup here keys on the ID the caller
+ * asked for, so a reply naming a different pool is refused rather than stored under its own name --
+ * the ownership checks and the store must agree on which record they mean.
+ */
+function sameWorkload(record: WorkloadRecord, workloadId: string): WorkloadRecord {
+  if (record.workloadId !== workloadId) {
+    throw new Error(`Context Service answered for '${record.workloadId}', not '${workloadId}'`);
+  }
+  return record;
+}
+
+/**
+ * The one place a run acquires a sandbox pool selector. `/runs` strips any caller-supplied selector
+ * as internal routing state, so this lookup must not re-admit another subject's pool: the workload
+ * has to be owned by the run's caller (MI1 R7).
+ */
+async function resolveRunWorkload(
+  body: any,
+  subject: string | null,
+  res: ServerResponse,
+): Promise<any | null> {
   if (!body?.workloadId) return body;
   const record = await findWorkload(body.workloadId);
-  if (!record || record.status === 'deleted') {
+  if (!record || record.status === 'deleted' || !ownedBy(record, subject)) {
     res.writeHead(404, JSON_HEADERS).end(JSON.stringify({ error: 'workload_not_found' }));
     return null;
   }
   return { ...body, sandboxPoolSelector: record.sandboxSelector };
 }
 
+/**
+ * Authenticate a `/workloads` request, writing the refusal itself. Resolves to the caller's subject,
+ * `null` for an allowed unauthenticated caller, or `undefined` when the request was refused.
+ */
+function workloadCaller(req: IncomingMessage, res: ServerResponse): string | null | undefined {
+  try {
+    return authenticateSubject(req.headers, turnAuthDeps());
+  } catch (err) {
+    writeAuthError(res, err);
+    return undefined;
+  }
+}
+
 async function handleCreateWorkload(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const subject = workloadCaller(req, res);
+  if (subject === undefined) return;
   if (!requireContextService(res)) return;
   let spec: WorkloadRequest;
   try {
@@ -454,8 +525,33 @@ async function handleCreateWorkload(req: IncomingMessage, res: ServerResponse): 
     res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'workload_name_invalid' }));
     return;
   }
+  // A caller-named claim is any PVC in the namespace: owning the workload says nothing about owning
+  // the volume, and nothing here or in Context Service authorizes one against the other. So it is
+  // refused wherever callers are told apart -- any authenticated caller (which is every caller under
+  // SH_REQUIRE_AUTH=true), and always under multi tenancy -- until claims are scoped to their
+  // subject (MI1 §4.3, §13). Only the anonymous caller of an unauthenticated deployment, which
+  // distinguishes no one, may still name one.
+  if (
+    spec.workspace?.claimName !== undefined &&
+    (subject !== null || readTenancy(process.env) === 'multi')
+  ) {
+    res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'claim_name_not_allowed' }));
+    return;
+  }
+  // A live workload of another subject's cannot be claimed by re-creating its name. Check-then-act:
+  // two subjects creating one NEW name at the same moment can both pass this, and the later
+  // saveWorkload's owner wins. Accepted for S1 -- the window is one Context Service round trip, and
+  // the store offers no set-if-absent -- and tracked in rossoctl/moca#356.
+  const existing = await findWorkload(workloadId);
+  if (existing && existing.status !== 'deleted' && !ownedBy(existing, subject)) {
+    res.writeHead(409, JSON_HEADERS).end(JSON.stringify({ error: 'workload_name_taken' }));
+    return;
+  }
   try {
-    const record = await createWorkload(workloadId, spec);
+    const record = withOwner(
+      sameWorkload(await createWorkload(workloadId, spec), workloadId),
+      subject,
+    );
     await saveWorkload(record);
     res.writeHead(201, JSON_HEADERS).end(JSON.stringify(record));
   } catch (err) {
@@ -463,14 +559,22 @@ async function handleCreateWorkload(req: IncomingMessage, res: ServerResponse): 
   }
 }
 
-async function handleGetWorkload(id: string, res: ServerResponse): Promise<void> {
+async function handleGetWorkload(
+  req: IncomingMessage,
+  id: string,
+  res: ServerResponse,
+): Promise<void> {
+  const subject = workloadCaller(req, res);
+  if (subject === undefined) return;
   if (!requireContextService(res)) return;
-  if (!(await findWorkload(id))) {
+  const stored = await findWorkload(id);
+  if (!stored || !ownedBy(stored, subject)) {
     res.writeHead(404, JSON_HEADERS).end(JSON.stringify({ error: 'workload_not_found' }));
     return;
   }
   try {
-    const record = await getWorkload(id);
+    // Context Service knows nothing of owners: carry the stored one over the refreshed record.
+    const record = withOwner(sameWorkload(await getWorkload(id), id), subject);
     await saveWorkload(record);
     res.writeHead(200, JSON_HEADERS).end(JSON.stringify(record));
   } catch (err) {
@@ -478,10 +582,16 @@ async function handleGetWorkload(id: string, res: ServerResponse): Promise<void>
   }
 }
 
-async function handleDeleteWorkload(id: string, res: ServerResponse): Promise<void> {
+async function handleDeleteWorkload(
+  req: IncomingMessage,
+  id: string,
+  res: ServerResponse,
+): Promise<void> {
+  const subject = workloadCaller(req, res);
+  if (subject === undefined) return;
   if (!requireContextService(res)) return;
   const record = await findWorkload(id);
-  if (!record || record.status === 'deleted') {
+  if (!record || record.status === 'deleted' || !mayDelete(record, subject)) {
     res.writeHead(404, JSON_HEADERS).end(JSON.stringify({ error: 'workload_not_found' }));
     return;
   }
@@ -500,7 +610,8 @@ async function handleEnqueueLeafParsed(body: any, res: ServerResponse): Promise<
     return;
   }
   if (rejectInvalidConfigRef(body, res)) return;
-  body = await resolveRunWorkload(body, res);
+  // Only an unauthenticated caller reaches the queue (an authenticated async run is a 501).
+  body = await resolveRunWorkload(body, null, res);
   if (!body) return;
   const q = getQueue();
   await q.ensureGroup();
@@ -510,13 +621,18 @@ async function handleEnqueueLeafParsed(body: any, res: ServerResponse): Promise<
     .end(JSON.stringify({ status: 'accepted', sessionId: body.sessionId }));
 }
 
-async function handleRunLeafParsed(body: any, _raw: string, res: ServerResponse): Promise<void> {
+async function handleRunLeafParsed(
+  body: any,
+  _raw: string,
+  res: ServerResponse,
+  auth: TurnAuth | null = null,
+): Promise<void> {
   if (!isRunEnvelope(body)) {
     res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'envelope_invalid' }));
     return;
   }
   if (rejectInvalidConfigRef(body, res)) return;
-  body = await resolveRunWorkload(body, res);
+  body = await resolveRunWorkload(body, auth?.subject ?? null, res);
   if (!body) return;
 
   // Spec §4.3: on pool saturation the sync path bounded-waits with backoff, then 503 Retry-After.
@@ -526,11 +642,11 @@ async function handleRunLeafParsed(body: any, _raw: string, res: ServerResponse)
   const cfg = saturationWaitConfig();
   const deadline = Date.now() + cfg.waitMs;
   let delay = cfg.backoffMs;
-  let result = await runLeaf(body, buildConfig());
+  let result = await runLeaf(body, buildConfig(auth));
   while (isSaturated(result) && Date.now() < deadline) {
     await sleep(Math.min(delay, Math.max(0, deadline - Date.now())));
     delay = Math.min(delay * 2, cfg.maxBackoffMs);
-    result = await runLeaf(body, buildConfig());
+    result = await runLeaf(body, buildConfig(auth));
   }
 
   if (isSaturated(result)) {
@@ -628,14 +744,14 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
 
   const workloadMatch = url.match(/^\/workloads\/([^/?]+)$/);
   if (workloadMatch && req.method === 'GET') {
-    handleGetWorkload(decodeURIComponent(workloadMatch[1]), res).catch((err) => {
+    handleGetWorkload(req, decodeURIComponent(workloadMatch[1]), res).catch((err) => {
       if (!res.headersSent)
         res.writeHead(500, JSON_HEADERS).end(JSON.stringify({ error: String(err) }));
     });
     return;
   }
   if (workloadMatch && req.method === 'DELETE') {
-    handleDeleteWorkload(decodeURIComponent(workloadMatch[1]), res).catch((err) => {
+    handleDeleteWorkload(req, decodeURIComponent(workloadMatch[1]), res).catch((err) => {
       if (!res.headersSent)
         res.writeHead(500, JSON_HEADERS).end(JSON.stringify({ error: String(err) }));
     });
@@ -648,7 +764,37 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
     (url.startsWith('/runs/status') || url.startsWith('/run-leaf/status'))
   ) {
     if (url.startsWith('/run-leaf/status')) warnDeprecatedRoute('/run-leaf/status');
-    handleLeafStatus(new URL(url, 'http://localhost'), res).catch((err) => {
+    // The authorization check runs inside an async function whose promise is caught, like every
+    // sibling route's: a throw that is not a CpError (writeAuthError rethrows those) becomes a 500
+    // for this request rather than an unhandled exception.
+    const statusRoute = async () => {
+      const statusUrl = new URL(url, 'http://localhost');
+      const sessionId = statusUrl.searchParams.get('sessionId');
+      // A status read always names its session, and is always authorized before anything is read:
+      // a request without one is refused here rather than left to the handler (MI1 R7). This order
+      // exists for CodeQL's "user-controlled bypass" check and changes no response: handleLeafStatus
+      // refuses a missing sessionId the same way. So no test can tell the two orders apart -- keep
+      // this one because it makes the authorization unconditional in the code, not only in effect.
+      if (!sessionId) {
+        res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'sessionId_required' }));
+        return;
+      }
+      let authenticated: boolean;
+      try {
+        authenticated = authorizeRunRead(req.headers, sessionId, turnAuthDeps());
+      } catch (err) {
+        writeAuthError(res, err, sessionId);
+        return;
+      }
+      // An authenticated read may not name a tenant: the session token alone scopes it (MI1 R7).
+      // Unauthenticated callers (SH_REQUIRE_AUTH off, no token) keep the tenant parameter.
+      if (authenticated && statusUrl.searchParams.has('tenant')) {
+        res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'tenant_not_allowed' }));
+        return;
+      }
+      await handleLeafStatus(statusUrl, res);
+    };
+    statusRoute().catch((err) => {
       if (!res.headersSent)
         res.writeHead(500, JSON_HEADERS).end(JSON.stringify({ error: String(err) }));
     });
@@ -669,8 +815,42 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
       // Pool selection is internal routing state. Never accept a Kubernetes selector directly
       // from an external run request; a workload resolver may add one after this boundary.
       if (parsed && typeof parsed === 'object') delete parsed.sandboxPoolSelector;
-      if (parsed && parsed.async === true) return handleEnqueueLeafParsed(parsed, res);
-      return handleRunLeafParsed(parsed, raw, res);
+
+      // The same caller rules as /turn (MI1 §5 R7): required under SH_REQUIRE_AUTH, a bad token
+      // refused in either mode, and the token must name this run's session.
+      let deps: TurnAuthDeps;
+      let auth: TurnAuth | null;
+      try {
+        deps = turnAuthDeps();
+        auth = await resolveTurnAuth(req.headers, parsed ?? {}, deps);
+      } catch (err) {
+        writeAuthError(res, err, parsed?.sessionId);
+        return;
+      }
+
+      // An authenticated request may not name a tenant: the session token alone scopes the run
+      // (MI1 R7). An unauthenticated caller (SH_REQUIRE_AUTH off, no token) keeps the tenant field.
+      if (auth && parsed && parsed.tenant !== undefined) {
+        res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'tenant_not_allowed' }));
+        return;
+      }
+
+      if (parsed && parsed.async === true) {
+        if (deps.requireAuth || auth) {
+          // Running it later on its caller's credential would mean storing a bearer in the queue
+          // (MI1 §6.5); running it on the ambient credential would spend the operator's key for a
+          // user. Owned asynchronous runs are MU2's.
+          res.writeHead(501, JSON_HEADERS).end(
+            JSON.stringify({
+              error: 'async_runs_unavailable',
+              message: 'asynchronous runs are not available when callers authenticate',
+            }),
+          );
+          return;
+        }
+        return handleEnqueueLeafParsed(parsed, res);
+      }
+      return handleRunLeafParsed(parsed, raw, res, auth);
     };
     route().catch((err) => {
       if (!res.headersSent)
@@ -692,10 +872,9 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
 }
 
 export function startServer(port = PORT): ReturnType<typeof createServer> {
-  // Before anything binds: a malformed SH_SESSION_TOKEN_PUBLIC_KEYS must be a boot failure naming the
-  // bad entry, not a Ready pod that 503s every turn. /healthz and /readyz do not touch the keyset, so
-  // this is the only boot-time signal there is.
-  assertKeysetUsable(process.env);
+  // Before anything binds: the shared boot function refuses a malformed keyset and an inconsistent
+  // tenancy configuration, and scrubs ambient credentials under multi tenancy (MI1 §5 R2).
+  prepareServerProcess(process.env);
 
   const server = createServer(handler);
 

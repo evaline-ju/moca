@@ -74,6 +74,7 @@ trap teardown EXIT
   umask 077
   {
     printf 'SH_RELAY_TOKEN=%s\n' "$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
+    printf 'MOCA_RELAY_EXEC_TOKEN=%s\n' "$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
     echo 'SH_TURNS_PER_WORKER=2'
     echo 'SH_WORKERS=2'
     echo "SH_PORT=$SH_PORT"

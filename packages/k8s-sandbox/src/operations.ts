@@ -10,6 +10,7 @@ import type { K8sSandboxConfig } from './config.js';
 import type { ExecInPod } from './exec.js';
 import { mapPath, shQuote } from './paths.js';
 import { DEFAULT_OUTPUT_CAP } from './transport.js';
+import { sandboxEnv } from './sandbox-env.js';
 
 const IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
 
@@ -91,17 +92,13 @@ export function createPodEditOps(exec: ExecInPod, cfg: K8sSandboxConfig): EditOp
 export function createPodBashOps(exec: ExecInPod, cfg: K8sSandboxConfig): BashOperations {
   const q = mapper(cfg);
   return {
-    // Pi passes `env` only to the bash tool. Inject it here (transport-agnostic)
-    // as an `env VAR=val … bash -c <cmd>` prefix: scoped to this one invocation,
-    // so nothing leaks across calls (M2 dropped env entirely — see git history).
-    // Keys are validated as POSIX names (malformed keys are dropped, never interpolated)
-    // so the prefix can't be injected; values remain safe via shQuote.
+    // Pi passes `env` only to the bash tool, and it is the WHOLE harness process environment. Only
+    // sandboxEnv()'s allowlist crosses (MI1 §5 R1); everything else stays in the harness. Keys are
+    // still validated as POSIX names so the prefix can't be injected; values remain safe via shQuote.
     exec: async (command, cwd, { onData, signal, timeout, env }) => {
-      const pairs = env
-        ? Object.entries(env)
-            .filter(([k, v]) => v !== undefined && /^[A-Za-z_][A-Za-z0-9_]*$/.test(k))
-            .map(([k, v]) => `${k}=${shQuote(String(v))}`)
-        : [];
+      const pairs = Object.entries(sandboxEnv(env))
+        .filter(([k]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k))
+        .map(([k, v]) => `${k}=${shQuote(v)}`);
       const wrapped = pairs.length
         ? `cd ${q(cwd)} && env ${pairs.join(' ')} bash -c ${shQuote(command)}`
         : `cd ${q(cwd)} && ${command}`; // M2's exact form — unchanged when no env

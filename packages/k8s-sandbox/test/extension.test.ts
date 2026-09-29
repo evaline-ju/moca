@@ -52,4 +52,31 @@ describe('k8sSandboxExtension', () => {
     k8sSandboxExtension({ config: null })(pi);
     expect(tools).toHaveLength(0);
   });
+
+  it('never sends the harness process environment to the sandbox through the bash tool', async () => {
+    const commands: string[] = [];
+    const recording: SandboxTransport = {
+      exec: async (command) => {
+        commands.push(command);
+        return { stdout: Buffer.from(''), exitCode: 0, truncated: false };
+      },
+      close: vi.fn(async () => {}),
+    };
+    const saved = process.env.MI1_PLANTED_SECRET;
+    process.env.MI1_PLANTED_SECRET = 'planted-value-must-not-cross'; // notsecret
+    try {
+      const { pi, tools } = fakePi();
+      k8sSandboxExtension({ config: cfg, transport: recording })(pi);
+      const bash = (
+        tools as Array<{ name: string; execute: (...a: unknown[]) => Promise<unknown> }>
+      ).find((t) => t.name === 'bash')!;
+      await bash.execute('call-1', { command: 'echo hi' });
+      expect(commands).toHaveLength(1);
+      expect(commands[0]).not.toContain('planted-value-must-not-cross');
+      expect(commands[0]).not.toContain('MI1_PLANTED_SECRET');
+    } finally {
+      if (saved === undefined) delete process.env.MI1_PLANTED_SECRET;
+      else process.env.MI1_PLANTED_SECRET = saved;
+    }
+  });
 });

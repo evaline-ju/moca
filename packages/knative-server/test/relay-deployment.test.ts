@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -58,6 +59,19 @@ describe('relay-deployment.yaml', () => {
       token!.value,
       "SH_RELAY_TOKEN must equal worker-example.yaml's SANDBOX_TOKEN, or the relay rejects every Attach from a worker deployed off that example",
     ).toBe(wEnv.find((e) => e.name === 'SANDBOX_TOKEN')!.value);
+  });
+
+  it('sets MOCA_RELAY_EXEC_TOKEN, which the relay requires to boot (MI1 R5)', () => {
+    const c = docs().find((o) => o.kind === 'Deployment').spec.template.spec.containers[0];
+    const env: EnvVar[] = c.env;
+    const exec = env.find((e) => e.name === 'MOCA_RELAY_EXEC_TOKEN')?.value;
+    // The two conditions makeExecTokenValidator refuses to boot on: an empty token, and one equal
+    // to a sandbox token. Either would leave this manifest's relay unbootable.
+    expect(exec, 'the relay refuses to boot without MOCA_RELAY_EXEC_TOKEN').toBeTruthy();
+    expect(
+      exec,
+      'the relay refuses to boot when MOCA_RELAY_EXEC_TOKEN equals SH_RELAY_TOKEN',
+    ).not.toBe(env.find((e) => e.name === 'SH_RELAY_TOKEN')?.value);
   });
 });
 
@@ -123,6 +137,35 @@ describe('the OCP overlay patches the relay token away from the base literal (#1
       setup,
       `the Secret must carry key ${ref.key}, which the overlay reads SH_RELAY_TOKEN from`,
     ).toContain(`--from-literal=${ref.key}=`);
+  });
+
+  it('sources MOCA_RELAY_EXEC_TOKEN from the sh-relay-token Secret, which setup-ocp.sh creates', () => {
+    const env: EnvVar[] = patch().spec.template.spec.containers[0].env;
+    const ref = (
+      env.find((e) => e.name === 'MOCA_RELAY_EXEC_TOKEN') as {
+        valueFrom?: { secretKeyRef?: { name?: string; key?: string } };
+      }
+    )?.valueFrom?.secretKeyRef;
+    expect(ref).toEqual({ name: 'sh-relay-token', key: 'MOCA_RELAY_EXEC_TOKEN' });
+    const setup = readFileSync(resolve(DEPLOY, 'setup-ocp.sh'), 'utf8');
+    // The exec key must be freshly generated, never empty and never derived from SH_RELAY_TOKEN
+    // (which the relay would refuse), in both the create path and the add-if-absent patch.
+    const created = setup.match(/--from-literal=MOCA_RELAY_EXEC_TOKEN=(\S+)/g) ?? [];
+    expect(created).toEqual(['--from-literal=MOCA_RELAY_EXEC_TOKEN="$(gen_relay_token)"']);
+    expect(setup).toMatch(/\\"MOCA_RELAY_EXEC_TOKEN\\":\\"\$\(gen_relay_token\)\\"/);
+  });
+
+  it("setup-ocp.sh's gen_relay_token mints 32 random bytes, like every other path", () => {
+    const setup = readFileSync(resolve(DEPLOY, 'setup-ocp.sh'), 'utf8');
+    const fn = setup.match(/^gen_relay_token\(\) \{\n[\s\S]*?\n\}\n/m)?.[0];
+    expect(fn).toBeDefined();
+    const run = () =>
+      execFileSync('bash', ['-c', `die() { echo "$*" >&2; exit 1; }\n${fn}\ngen_relay_token`], {
+        encoding: 'utf8',
+      });
+    const [a, b] = [run(), run()];
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
+    expect(a).not.toBe(b);
   });
 
   it('replaces the literal with a secretKeyRef instead of leaving both fields set', () => {

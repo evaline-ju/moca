@@ -1,9 +1,7 @@
 import {
   createAgentSession,
   DefaultResourceLoader,
-  getAgentDir,
   SessionManager,
-  SettingsManager,
   type FileEntry,
 } from '@earendil-works/pi-coding-agent';
 import { RedisSessionBackend } from '@sh/session-backend';
@@ -11,6 +9,7 @@ import { k8sSandboxExtension, KubectlTransport } from '@sh/k8s-sandbox';
 import {
   selectPoolSandbox,
   SandboxPoolSaturatedError,
+  assertServerSandbox,
   type SelectedSandbox,
 } from './select-sandbox.js';
 import { leaseTimings } from './lease-timings.js';
@@ -28,6 +27,7 @@ import {
   requireModel,
   applyModelGateway,
   sumBranchUsage,
+  turnLoaderInputs,
   type TurnConfig,
   type TurnResult,
 } from './run-turn.js';
@@ -410,6 +410,21 @@ async function runPromptLeaf(
     };
   }
 
+  // MI1 §5 R3, here as in every other leaf kind, not left to executeTurn: `deps.executeTurn` replaces
+  // that function, and with it that check. Before the heartbeat, the overlay and the turn, so a
+  // server-mode prompt leaf with no sandbox holds nothing and runs nothing.
+  try {
+    assertServerSandbox(config, selected?.config ?? null);
+  } catch (err) {
+    if (selected) await selected.release();
+    if (selected?.transport) await selected.transport.close();
+    return {
+      status: 'failed',
+      reason: 'error',
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   // The digest whose overlay was ATTEMPTED in the sandbox, so the finally block below knows there is
   // a per-leaf /workspace/leaves/<sid>/.sh-config link to tear down AND a ref on that digest's
@@ -585,6 +600,17 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture) => {
   });
   if (!selected) throw new Error('solve leaf requires a configured sandbox pool');
 
+  // MI1 §5 R3: a server-mode caller must not reach k8sSandboxExtension with a null config. selected
+  // always carries a real config when truthy (see SelectedSandbox), so this is defense-in-depth today
+  // — but it keeps this leaf's guard identical to executeTurn's and realProduceVerdict's below, rather
+  // than relying solely on the `if (!selected) throw` above to hold that invariant forever.
+  try {
+    assertServerSandbox(config, selected.config);
+  } catch (err) {
+    await selected.release();
+    throw err;
+  }
+
   const store = new RedisSessionBackend<FileEntry>(config?.redisUrl ?? 'redis://localhost:6379');
   const backend = new BufferedRedisBackend(store);
   const prior = await store.read(sid);
@@ -622,18 +648,16 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture) => {
       void selected.heartbeat().catch(() => {});
     }, solveTimings.heartbeatMs);
 
-    const agentDir = getAgentDir();
-    const settingsManager = SettingsManager.create(cwd, agentDir);
-    const resourceLoader = new DefaultResourceLoader({
+    const { settingsManager, loaderOptions } = turnLoaderInputs({
+      config,
       cwd,
-      agentDir,
-      settingsManager,
       extensionFactories: [
         k8sSandboxExtension({ config: agentConfig }),
         flushExtension(backend),
         checkpointExtension(store, sessionManager),
       ],
     });
+    const resourceLoader = new DefaultResourceLoader(loaderOptions as never);
     await resourceLoader.reload();
 
     const { session } = await createAgentSession({
@@ -733,6 +757,20 @@ export const realProduceVerdict: ProduceVerdict = async (item, env, config, capt
     ttlMs: verdictTimings.ttlMs,
     remoteSandbox,
   });
+
+  // MI1 §5 R3: a server-mode caller with no sandbox must fail HERE, before the workspace converge,
+  // the gate front-end, and the resource loader below ever run k8sSandboxExtension with a null
+  // config. selected's own session/verdict-recovery work above cannot move after this check (the
+  // fast-path must skip leasing a pod entirely), so — unlike realProduceSolve — this can't sit before
+  // any session is created; it sits as early as the sandbox itself is known.
+  try {
+    assertServerSandbox(config, selected?.config ?? null);
+  } catch (err) {
+    if (selected) await selected.release();
+    if (selected?.transport) await selected.transport.close();
+    throw err;
+  }
+
   const converging = selected != null && !!env.repoUrl && !!env.ref;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
 
@@ -784,12 +822,9 @@ export const realProduceVerdict: ProduceVerdict = async (item, env, config, capt
     const allowVerdict =
       !item.require_approval || gateState.gateDecisions.length > 0 || seed.record != null;
 
-    const agentDir = getAgentDir();
-    const settingsManager = SettingsManager.create(cwd, agentDir);
-    const resourceLoader = new DefaultResourceLoader({
+    const { settingsManager, loaderOptions } = turnLoaderInputs({
+      config,
       cwd,
-      agentDir,
-      settingsManager,
       extensionFactories: [
         ...(allowVerdict ? [submitVerdictExtension(capture, sessionManager)] : []),
         requestApprovalExtension(capture, sessionManager, gateState.nextGateId),
@@ -799,6 +834,7 @@ export const realProduceVerdict: ProduceVerdict = async (item, env, config, capt
         verdictTerminationExtension(capture, { maxTurns: env.maxTurns }),
       ],
     });
+    const resourceLoader = new DefaultResourceLoader(loaderOptions as never);
     await resourceLoader.reload();
 
     const { session } = await createAgentSession({

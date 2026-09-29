@@ -44,7 +44,11 @@ afterEach(() => {
 });
 
 async function startRelay(): Promise<Harness> {
-  const { server } = buildServer({ records, validateToken: () => true });
+  const { server } = buildServer({
+    records,
+    validateToken: () => true,
+    validateExecToken: () => true,
+  });
   const port = await new Promise<number>((resolve, reject) => {
     server.bindAsync('127.0.0.1:0', ServerCredentials.createInsecure(), (err, p) =>
       err ? reject(err) : resolve(p),

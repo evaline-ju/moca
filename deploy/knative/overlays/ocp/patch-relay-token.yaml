@@ -17,7 +17,13 @@
 # and it is the same Secret and key the worker reads its SANDBOX_TOKEN from, which is what keeps
 # the two sides equal:
 #
-#   oc create secret generic sh-relay-token -n <ns> --from-literal=SH_RELAY_TOKEN=<token>
+#   oc create secret generic sh-relay-token -n <ns> \
+#     --from-literal=SH_RELAY_TOKEN=<sandbox-token> \
+#     --from-literal=MOCA_RELAY_EXEC_TOKEN=<exec-token>
+#
+# The two values MUST differ: the relay refuses to boot when MOCA_RELAY_EXEC_TOKEN equals any
+# SH_RELAY_TOKEN[_<id>] (MI1 R5), since a sandbox holding its own token could otherwise SandboxExec.
+# Generate each separately, e.g. `openssl rand -hex 32`. setup-ocp.sh adds the exec key for you.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -34,3 +40,9 @@ spec:
                 secretKeyRef:
                   name: sh-relay-token
                   key: SH_RELAY_TOKEN
+            - name: MOCA_RELAY_EXEC_TOKEN
+              value: null
+              valueFrom:
+                secretKeyRef:
+                  name: sh-relay-token
+                  key: MOCA_RELAY_EXEC_TOKEN

@@ -17,10 +17,18 @@ const { selectPoolSandboxMock, FakeSandboxPoolSaturatedError } = vi.hoisted(() =
   }
   return { selectPoolSandboxMock: vi.fn(), FakeSandboxPoolSaturatedError };
 });
-vi.mock('../src/select-sandbox.js', () => ({
-  selectPoolSandbox: (...args: unknown[]) => selectPoolSandboxMock(...args),
-  SandboxPoolSaturatedError: FakeSandboxPoolSaturatedError,
-}));
+// Spread the real module first: run-leaf.ts also imports assertServerSandbox (and, transitively,
+// SandboxRequiredError) from this module, and a factory that returns only the two names below would
+// leave that a real function elsewhere in this file — a TypeError, not a test failure — the moment
+// any test here reaches the real realProduceSolve/realProduceVerdict.
+vi.mock('../src/select-sandbox.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/select-sandbox.js')>();
+  return {
+    ...actual,
+    selectPoolSandbox: (...args: unknown[]) => selectPoolSandboxMock(...args),
+    SandboxPoolSaturatedError: FakeSandboxPoolSaturatedError,
+  };
+});
 
 // The `(..._args: unknown[])` params are load-bearing, not decoration: the vi.mock factories
 // below forward their arguments with a spread, and a mock whose implementation declares no
@@ -60,7 +68,12 @@ vi.mock('@sh/session-backend', () => ({
   RedisSessionBackend: FakeRedisSessionBackend,
 }));
 
-const { FakeSessionManager, FakeResourceLoader, createAgentSessionMock } = vi.hoisted(() => {
+const {
+  FakeSessionManager,
+  FakeResourceLoader,
+  createAgentSessionMock,
+  settingsManagerCreateMock,
+} = vi.hoisted(() => {
   class FakeSessionManager {
     constructor(private sid: string) {}
     getSessionId() {
@@ -80,6 +93,9 @@ const { FakeSessionManager, FakeResourceLoader, createAgentSessionMock } = vi.ho
     createAgentSessionMock: vi.fn(async (..._args: unknown[]) => ({
       session: { prompt: async () => {} },
     })),
+    // A spy (not just a stub) so MI1 R4 tests can assert the third argument
+    // (`{ projectTrusted: false }` in server mode, `{}` otherwise) that turnLoaderInputs passes.
+    settingsManagerCreateMock: vi.fn((..._args: unknown[]) => ({})),
   };
 });
 vi.mock('@earendil-works/pi-coding-agent', () => ({
@@ -91,7 +107,7 @@ vi.mock('@earendil-works/pi-coding-agent', () => ({
       new FakeSessionManager(opts.id),
     openFromCheckpoint: async (sid: string) => new FakeSessionManager(sid),
   },
-  SettingsManager: { create: () => ({}) },
+  SettingsManager: { create: (...args: unknown[]) => settingsManagerCreateMock(...args) },
 }));
 
 import {
@@ -100,9 +116,11 @@ import {
   buildSolvePrompt,
   leafSessionId,
   validateItem,
+  realProduceSolve,
+  realProduceVerdict,
 } from '../src/run-leaf.js';
 import type { LeafEnvelope } from '../src/run-leaf.js';
-import { SandboxPoolSaturatedError } from '../src/select-sandbox.js';
+import { SandboxPoolSaturatedError, SandboxRequiredError } from '../src/select-sandbox.js';
 
 describe('LeafEnvelope repo ref fields', () => {
   it('accepts optional repoUrl and ref', () => {
@@ -396,6 +414,213 @@ describe('realProduceVerdict transport wiring (Task 9)', () => {
   });
 });
 
+describe('realProduceSolve / realProduceVerdict: a lease without a sandbox config (MI1 R3, defense in depth)', () => {
+  // A truthy lease with a falsy `config` cannot happen via the real selectPoolSandbox
+  // (SelectedSandbox's `config` is a non-optional K8sSandboxConfig) — see select-sandbox.test.ts's
+  // assertServerSandbox unit tests for the exhaustive truth table. This mocked shape exists only to
+  // prove BOTH leaf kinds' guards actually fire here, in case that invariant is ever loosened.
+  const nullConfigLease = () => ({
+    config: null,
+    heartbeat: vi.fn(async () => {}),
+    release: vi.fn(async () => {}),
+  });
+
+  it('realProduceSolve: throws SandboxRequiredError and never builds a session or the sandbox extension', async () => {
+    const lease = nullConfigLease();
+    selectPoolSandboxMock.mockReset().mockResolvedValue(lease);
+    createAgentSessionMock.mockClear();
+    k8sSandboxExtensionMock.mockClear();
+
+    const env: LeafEnvelope = {
+      sessionId: 'run/solve-1',
+      item: { item_id: 'i1', file: 'f', pattern: 'p' },
+    };
+
+    await expect(realProduceSolve(env, { serverMode: true }, {})).rejects.toBeInstanceOf(
+      SandboxRequiredError,
+    );
+    const err = await realProduceSolve(env, { serverMode: true }, {}).catch((e: unknown) => e);
+    expect((err as Error).name).toBe('SandboxRequiredError');
+
+    // The lease taken to resolve `selected` is released on the throw path, and nothing past the
+    // guard — Redis session creation, the resource loader, the agent session — ever ran.
+    expect(lease.release).toHaveBeenCalled();
+    expect(createAgentSessionMock).not.toHaveBeenCalled();
+    expect(k8sSandboxExtensionMock).not.toHaveBeenCalled();
+  });
+
+  it('realProduceVerdict: throws SandboxRequiredError and never builds a session or the sandbox extension', async () => {
+    const lease = nullConfigLease();
+    selectPoolSandboxMock.mockReset().mockResolvedValue(lease);
+    createAgentSessionMock.mockClear();
+    k8sSandboxExtensionMock.mockClear();
+
+    const item = { item_id: 'i1', file: 'f', pattern: 'p' };
+    const env: LeafEnvelope = { sessionId: 'run/verdict-1', item };
+
+    await expect(realProduceVerdict(item, env, { serverMode: true }, {})).rejects.toBeInstanceOf(
+      SandboxRequiredError,
+    );
+    const err = await realProduceVerdict(item, env, { serverMode: true }, {}).catch(
+      (e: unknown) => e,
+    );
+    expect((err as Error).name).toBe('SandboxRequiredError');
+
+    // Session/verdict-recovery work (the resuming fast-path) runs BEFORE this guard — by design, so
+    // a recovered verdict never leases a pod at all — but that fast-path only touches the mocked
+    // Redis/session-manager stubs above, never createAgentSession or k8sSandboxExtension. Both of
+    // those still sit downstream of the guard, so asserting they never ran is exactly what proves
+    // the guard fired before either could be reached.
+    expect(lease.release).toHaveBeenCalled();
+    expect(createAgentSessionMock).not.toHaveBeenCalled();
+    expect(k8sSandboxExtensionMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('realProduceSolve / realProduceVerdict: no resolvable sandbox in server mode (MI1 R3)', () => {
+  // The reachable shape: selectPoolSandbox resolves to null when no sandbox is configured at all.
+  it('realProduceVerdict: refuses with SandboxRequiredError and never builds an agent session', async () => {
+    selectPoolSandboxMock.mockReset().mockResolvedValue(null);
+    createAgentSessionMock.mockClear();
+    k8sSandboxExtensionMock.mockClear();
+
+    const item = { item_id: 'i1', file: 'f', pattern: 'p' };
+    const env: LeafEnvelope = { sessionId: 'run/verdict-none', item };
+
+    const err = await realProduceVerdict(item, env, { serverMode: true }, {}).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(SandboxRequiredError);
+    // No agent session means no tool of any kind -- local or sandboxed -- was registered.
+    expect(createAgentSessionMock).not.toHaveBeenCalled();
+    expect(k8sSandboxExtensionMock).not.toHaveBeenCalled();
+  });
+
+  it('realProduceVerdict: outside server mode the same null sandbox still runs the leaf (control)', async () => {
+    selectPoolSandboxMock.mockReset().mockResolvedValue(null);
+    createAgentSessionMock.mockClear();
+
+    const item = { item_id: 'i1', file: 'f', pattern: 'p' };
+    const env: LeafEnvelope = { sessionId: 'run/verdict-none-local', item };
+
+    await realProduceVerdict(item, env, {}, {}).catch(() => {});
+    expect(createAgentSessionMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('realProduceSolve: refuses a null sandbox and never builds an agent session', async () => {
+    selectPoolSandboxMock.mockReset().mockResolvedValue(null);
+    createAgentSessionMock.mockClear();
+    k8sSandboxExtensionMock.mockClear();
+
+    const env: LeafEnvelope = {
+      sessionId: 'run/solve-none',
+      item: { item_id: 'i1', file: 'f', pattern: 'p' },
+    };
+
+    // A solve leaf needs a sandbox worktree in every mode, so it refuses a null sandbox before the
+    // server-mode gate is reached.
+    const err = await realProduceSolve(env, { serverMode: true }, {}).catch((e: unknown) => e);
+    expect((err as Error).message).toMatch(/solve leaf requires a configured sandbox pool/);
+    expect(createAgentSessionMock).not.toHaveBeenCalled();
+    expect(k8sSandboxExtensionMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('realProduceSolve / realProduceVerdict: resource-loader lockdown (MI1 R4)', () => {
+  // A real (non-null) lease, so both leaves run past the R3 sandbox gate into the resource-loader
+  // construction this test targets.
+  const LEASE_CONFIG = {
+    pod: 'sandbox-0',
+    namespace: 'default',
+    context: undefined,
+    podCwd: '/workspace',
+    headCwd: '/head',
+  };
+  const lease = () => ({
+    config: LEASE_CONFIG,
+    heartbeat: vi.fn(async () => {}),
+    release: vi.fn(async () => {}),
+  });
+
+  // The resourceLoader instance is passed to createAgentSession untransformed (see run-leaf.ts), so
+  // its constructor options — the FakeResourceLoader records them as `.opts` — are recovered from
+  // the last createAgentSession call rather than from a separate spy on DefaultResourceLoader.
+  function lastLoaderOptions(): Record<string, unknown> {
+    const call = createAgentSessionMock.mock.calls.at(-1)!;
+    const { resourceLoader } = call[0] as { resourceLoader: { opts: Record<string, unknown> } };
+    return resourceLoader.opts;
+  }
+  function lastSettingsManagerThirdArg(): unknown {
+    return settingsManagerCreateMock.mock.calls.at(-1)![2];
+  }
+
+  it('realProduceSolve in server mode: noExtensions, noContextFiles, and an untrusted project', async () => {
+    selectPoolSandboxMock.mockReset().mockResolvedValue(lease());
+    createAgentSessionMock.mockClear();
+    settingsManagerCreateMock.mockClear();
+
+    const env: LeafEnvelope = {
+      sessionId: 'run/solve-lockdown-on',
+      item: { item_id: 'i1', file: 'f', pattern: 'p' },
+      problemStatement: 'do the thing',
+      repoUrl: 'https://git.example/r.git',
+      ref: 'abc123',
+    };
+    await realProduceSolve(env, { serverMode: true }, {});
+
+    expect(lastLoaderOptions()).toMatchObject({ noExtensions: true, noContextFiles: true });
+    expect(lastSettingsManagerThirdArg()).toEqual({ projectTrusted: false });
+  });
+
+  it('realProduceSolve outside server mode: no lockdown options are set', async () => {
+    selectPoolSandboxMock.mockReset().mockResolvedValue(lease());
+    createAgentSessionMock.mockClear();
+    settingsManagerCreateMock.mockClear();
+
+    const env: LeafEnvelope = {
+      sessionId: 'run/solve-lockdown-off',
+      item: { item_id: 'i1', file: 'f', pattern: 'p' },
+      problemStatement: 'do the thing',
+      repoUrl: 'https://git.example/r.git',
+      ref: 'abc123',
+    };
+    await realProduceSolve(env, {}, {});
+
+    const opts = lastLoaderOptions();
+    expect(opts).not.toHaveProperty('noExtensions');
+    expect(opts).not.toHaveProperty('noContextFiles');
+    expect(lastSettingsManagerThirdArg()).toEqual({});
+  });
+
+  it('realProduceVerdict in server mode: noExtensions, noContextFiles, and an untrusted project', async () => {
+    selectPoolSandboxMock.mockReset().mockResolvedValue(lease());
+    createAgentSessionMock.mockClear();
+    settingsManagerCreateMock.mockClear();
+
+    const item = { item_id: 'i1', file: 'f', pattern: 'p' };
+    const env: LeafEnvelope = { sessionId: 'run/verdict-lockdown-on', item };
+    await realProduceVerdict(item, env, { serverMode: true }, {});
+
+    expect(lastLoaderOptions()).toMatchObject({ noExtensions: true, noContextFiles: true });
+    expect(lastSettingsManagerThirdArg()).toEqual({ projectTrusted: false });
+  });
+
+  it('realProduceVerdict outside server mode: no lockdown options are set', async () => {
+    selectPoolSandboxMock.mockReset().mockResolvedValue(lease());
+    createAgentSessionMock.mockClear();
+    settingsManagerCreateMock.mockClear();
+
+    const item = { item_id: 'i1', file: 'f', pattern: 'p' };
+    const env: LeafEnvelope = { sessionId: 'run/verdict-lockdown-off', item };
+    await realProduceVerdict(item, env, {}, {});
+
+    const opts = lastLoaderOptions();
+    expect(opts).not.toHaveProperty('noExtensions');
+    expect(opts).not.toHaveProperty('noContextFiles');
+    expect(lastSettingsManagerThirdArg()).toEqual({});
+  });
+});
+
 describe('buildLeafPrompt with require_approval', () => {
   it('adds a request_approval instruction when the item requires approval', () => {
     const p = buildLeafPrompt({
@@ -525,6 +750,26 @@ describe('runLeaf — prompt routing', () => {
     }));
     const r = await runLeaf(base, undefined, { executeTurn });
     expect(r).toEqual({ status: 'aborted' });
+  });
+
+  it('refuses a server-mode prompt leaf with no sandbox itself, even with executeTurn injected (MI1 R3)', async () => {
+    // The injected executeTurn replaces the real one's own R3 check, so only the leaf's check can
+    // stop this. It must fail before the turn runs, and give back any lease it took.
+    const lease = {
+      config: null,
+      heartbeat: vi.fn(async () => {}),
+      release: vi.fn(async () => {}),
+    };
+    for (const selected of [null, lease]) {
+      selectPoolSandboxMock.mockReset().mockResolvedValue(selected);
+      const executeTurn = vi.fn();
+      const r = await runLeaf(base, { serverMode: true }, { executeTurn });
+      expect(r).toMatchObject({ status: 'failed', reason: 'error' });
+      expect((r as { message?: string }).message).toMatch(/sandbox/i);
+      expect(executeTurn).not.toHaveBeenCalled();
+    }
+    expect(lease.release).toHaveBeenCalledTimes(1);
+    selectPoolSandboxMock.mockReset();
   });
 
   it('fails bad_inputs when prompt is missing', async () => {

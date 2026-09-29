@@ -67,6 +67,11 @@ SANDBOX_ID="${SANDBOX_ID:-sbx-laptop-demo}"
 # port plus a well-known credential would let anyone on the network Attach as a sandbox and
 # receive the leaf's exec payloads. Set SANDBOX_TOKEN to pin a value instead.
 RELAY_TOKEN="${SANDBOX_TOKEN:-}"
+# The harness's credential for the relay's SandboxExec (MI1 R5); the relay refuses to boot without
+# it. Left EMPTY here for the same reason as RELAY_TOKEN: step 4 generates a per-run value and
+# patches it onto the relay, rather than keeping relay-deployment.yaml's public dev value on a port
+# step 5 may bind to 0.0.0.0. Set MOCA_RELAY_EXEC_TOKEN to pin a value instead.
+MOCA_RELAY_EXEC_TOKEN="${MOCA_RELAY_EXEC_TOKEN:-}"
 # The harness reaches the relay by in-cluster DNS; the worker reaches it through the
 # tunnel. That asymmetry IS the inverted-connectivity story -- neither address is inbound
 # to the laptop.
@@ -386,13 +391,17 @@ else
   RELAY_TOKEN="$(gen_relay_token)"
   note "generated a random relay token for this run only (not relay-deployment.yaml's public 'dev-token')."
 fi
+if [ -z "$MOCA_RELAY_EXEC_TOKEN" ]; then
+  MOCA_RELAY_EXEC_TOKEN="$(gen_relay_token)"
+  note "generated a random exec token for this run only (not relay-deployment.yaml's public 'dev-exec-token')."
+fi
 # Patch the live Deployment BEFORE waiting on the rollout, so the pod that becomes Ready is
 # already the one holding this run's token -- setting it afterwards would restart the relay
 # out from under the readiness we just established. A later `kubectl apply -f
 # relay-deployment.yaml` (relay-leaf-smoke.sh does exactly that) reverts it to the declared
 # dev value, so this leaves nothing behind for other callers.
-kubectl set env deploy/sandbox-relay -n "$NS" "SH_RELAY_TOKEN=$RELAY_TOKEN" >/dev/null \
-  || abort "could not set SH_RELAY_TOKEN on deploy/sandbox-relay"
+kubectl set env deploy/sandbox-relay -n "$NS" "SH_RELAY_TOKEN=$RELAY_TOKEN" "MOCA_RELAY_EXEC_TOKEN=$MOCA_RELAY_EXEC_TOKEN" >/dev/null \
+  || abort "could not set SH_RELAY_TOKEN and MOCA_RELAY_EXEC_TOKEN on deploy/sandbox-relay"
 kubectl -n "$NS" rollout status deploy/sandbox-relay --timeout=90s >/dev/null \
   || abort "sandbox-relay rollout did not become ready"
 note "relay up. It is inert until a worker attaches AND the harness is on SH_REMOTE_SANDBOX=1."
@@ -421,10 +430,10 @@ else
   if probe_from_container --add-host=host.docker.internal:host-gateway; then
     WORKER_DOCKER_ARGS+=(--add-host=host.docker.internal:host-gateway)
     echo "    WARN: the relay port is bound to 0.0.0.0 for the duration of this demo, so it is"
-    echo "          reachable from your local network. It accepts this run's randomly generated"
-    echo "          bearer token only -- not relay-deployment.yaml's public 'dev-token' -- so a"
-    echo "          LAN peer cannot Attach as a sandbox with a credential read from the repo."
-    echo "          It is torn down on exit."
+    echo "          reachable from your local network. An Attach needs this run's sandbox token and"
+    echo "          a SandboxExec this run's exec token -- both generated per run unless you set"
+    echo "          SANDBOX_TOKEN / MOCA_RELAY_EXEC_TOKEN, and neither is relay-deployment.yaml's"
+    echo "          public dev value. It is torn down on exit."
   else
     abort "the relay answers from the host, but no container could reach it on port $RELAY_PORT -- this is container-to-host networking, not the relay. Alternative: attach the worker to kind's docker network and dial the node directly (see README-worker.md)."
   fi
@@ -475,7 +484,7 @@ assert_no_pods_match "$REMOTE_ONLY_SELECTOR"
 note "This is the trap the issue warns about: SH_REMOTE_SANDBOX=1 alone would leave idle pods"
 note "in the candidate set, and a pod could win the lease -- proving nothing while looking green."
 flip_harness_env SH_REMOTE_SANDBOX=1 SH_RELAY_ADDR="$IN_CLUSTER_RELAY_ADDR" \
-  KAGENTI_SANDBOX_POOL_SELECTOR="$REMOTE_ONLY_SELECTOR"
+  KAGENTI_SANDBOX_POOL_SELECTOR="$REMOTE_ONLY_SELECTOR" MOCA_RELAY_EXEC_TOKEN="$MOCA_RELAY_EXEC_TOKEN"
 wait_latest_ready 150 || abort "harness did not reach a ready latest revision after the flip"
 note "harness -> relay via $IN_CLUSTER_RELAY_ADDR (in-cluster DNS);"
 note "worker -> relay via host.docker.internal:${RELAY_PORT} (outbound through the tunnel)."

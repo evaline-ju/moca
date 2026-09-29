@@ -1,8 +1,12 @@
+import { SandboxExecService } from '@sh/k8s-sandbox';
+import { Server, ServerCredentials, type ServerWritableStream } from '@grpc/grpc-js';
 import { describe, it, expect, vi } from 'vitest';
 import {
   orderByLoad,
   selectPoolSandbox,
   SandboxPoolSaturatedError,
+  SandboxRequiredError,
+  assertServerSandbox,
   resolveDiscoverySource,
   resetSharedStores,
 } from '../src/select-sandbox.js';
@@ -244,6 +248,158 @@ describe('selectPoolSandbox remote dispatch', () => {
     // ...and the lease itself is taken under the holder, not the session id.
     expect(lease.acquired).toEqual(['sbx-remote-1']);
     expect(lease.acquiredHolders).toEqual(['sess-1:11111111-2222-3333-4444-555555555555']);
+  });
+});
+
+describe('selectPoolSandbox: the real defaultExecClient (MI1 R5)', () => {
+  // Deliberately omits deps.makeExecClient in both tests below, so selection reaches the
+  // module's real, un-exported defaultExecClient -- the half of R5 every OTHER grpc-branch
+  // test in this file bypasses via `makeExecClient: () => fakeExecClient`.
+  const env = (extra: Record<string, string> = {}) =>
+    ({ KAGENTI_SANDBOX_POOL_SELECTOR: 'app=sbx', ...extra }) as NodeJS.ProcessEnv;
+  const opts = { cap: 4, ttlMs: 60000, remoteSandbox: true };
+
+  it('throws naming MOCA_RELAY_EXEC_TOKEN when the token is unset, before a transport is built', async () => {
+    const lease = fakeLease({ 'sbx-remote-1': 0 }, opts.cap);
+    let transportBuilt = false;
+    const err = await selectPoolSandbox(env(), '/head', 'run-1', opts, {
+      listPods: async () => [],
+      lease,
+      records: fakeRecords([grpcRec]),
+      // makeTransport would prove the throw happens before a transport is built -- it is
+      // asserted below never to be called at all.
+      makeTransport: () => {
+        transportBuilt = true;
+        return {
+          exec: async () => ({ stdout: Buffer.alloc(0), exitCode: 0, truncated: false }),
+          close: async () => {},
+        };
+      },
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/MOCA_RELAY_EXEC_TOKEN/);
+    expect(transportBuilt).toBe(false);
+  });
+
+  it('releases the lease it acquired when the exec client cannot be built, and surfaces the original error', async () => {
+    const lease = fakeLease({ 'sbx-remote-1': 0 }, opts.cap);
+    const released: Array<[string, string]> = [];
+    lease.release = async (pod, holderId) => {
+      released.push([pod, holderId]);
+    };
+    const err = await selectPoolSandbox(
+      env(),
+      '/head',
+      'run-1',
+      { ...opts, holderId: 'turn-7' },
+      { listPods: async () => [], lease, records: fakeRecords([grpcRec]) },
+    ).catch((e) => e);
+    expect((err as Error).message).toMatch(/MOCA_RELAY_EXEC_TOKEN is not set/);
+    expect(lease.acquired).toEqual(['sbx-remote-1']);
+    expect(released).toEqual([['sbx-remote-1', 'turn-7']]);
+  });
+
+  it('releases the lease when building the transport throws, and surfaces the original error', async () => {
+    const lease = fakeLease({ 'sbx-remote-1': 0 }, opts.cap);
+    const released: string[] = [];
+    lease.release = async (pod) => {
+      released.push(pod);
+    };
+    const boom = new Error('transport construction failed');
+    const err = await selectPoolSandbox(env(), '/head', 'run-1', opts, {
+      listPods: async () => [],
+      lease,
+      records: fakeRecords([grpcRec]),
+      makeExecClient: () => ({}) as ExecClientLike,
+      makeTransport: () => {
+        throw boom;
+      },
+    }).catch((e) => e);
+    expect(err).toBe(boom);
+    expect(released).toEqual(['sbx-remote-1']);
+  });
+
+  it('surfaces the original error even when the release itself fails', async () => {
+    const lease = fakeLease({ 'sbx-remote-1': 0 }, opts.cap);
+    lease.release = async () => {
+      throw new Error('redis down');
+    };
+    const err = await selectPoolSandbox(env(), '/head', 'run-1', opts, {
+      listPods: async () => [],
+      lease,
+      records: fakeRecords([grpcRec]),
+    }).catch((e) => e);
+    expect((err as Error).message).toMatch(/MOCA_RELAY_EXEC_TOKEN is not set/);
+  });
+
+  it('builds a real relay exec client once MOCA_RELAY_EXEC_TOKEN is set, and it sends that token', async () => {
+    // A fake SandboxExec server records the bearer the built client presents: the client is the one
+    // defaultExecClient constructed from the environment, not one this test made (PR #350 review).
+    let seen: unknown;
+    const server = new Server();
+    server.addService(SandboxExecService, {
+      exec: (call: ServerWritableStream<unknown, unknown>) => {
+        seen = call.metadata.get('authorization')[0];
+        call.end();
+      },
+      abort: (_call: unknown, cb: (e: null, r: object) => void) => cb(null, {}),
+    });
+    const port = await new Promise<number>((resolve, reject) =>
+      server.bindAsync('127.0.0.1:0', ServerCredentials.createInsecure(), (e, p) =>
+        e ? reject(e) : resolve(p),
+      ),
+    );
+    const lease = fakeLease({ 'sbx-remote-1': 0 }, opts.cap);
+    let capturedClient: ExecClientLike | undefined;
+    const sel = await selectPoolSandbox(
+      env({
+        MOCA_RELAY_EXEC_TOKEN: 'worker-tok' /* notsecret */,
+        SH_RELAY_ADDR: `127.0.0.1:${port}`,
+      }),
+      '/head',
+      'run-1',
+      opts,
+      {
+        listPods: async () => [],
+        lease,
+        records: fakeRecords([grpcRec]),
+        // makeTransport is injected only to capture the client that defaultExecClient built --
+        // a grpc-js client does not dial out until a call is made, so constructing it here never
+        // touches a live relay. That is the only assertion available without one (per review).
+        makeTransport: (_id, client) => {
+          capturedClient = client;
+          return {
+            exec: async () => ({ stdout: Buffer.alloc(0), exitCode: 0, truncated: false }),
+            close: async () => {},
+          };
+        },
+      },
+    );
+    expect(sel?.transport).toBeDefined();
+    expect(capturedClient).toBeDefined();
+    const client = capturedClient as unknown as {
+      exec: (req: unknown) => NodeJS.EventEmitter;
+      close: () => void;
+    };
+    await new Promise<void>((resolve) => {
+      const call = client.exec({
+        sandboxId: 'sbx-remote-1',
+        exec: {
+          reqId: 1,
+          command: 'true',
+          stdin: new Uint8Array(),
+          timeoutS: 5,
+          streaming: true,
+          workspaceKey: '',
+        },
+      });
+      call.on('data', () => {});
+      call.on('end', () => resolve());
+      call.on('error', () => resolve());
+    });
+    client.close();
+    server.forceShutdown();
+    expect(seen).toBe('Bearer worker-tok');
   });
 });
 
@@ -504,5 +660,39 @@ describe('selectPoolSandbox discovery source', () => {
     );
     expect(singlePod?.config.pod).toBe('sandbox-0');
     expect(singlePod?.leased).toBe(false);
+  });
+});
+
+describe('assertServerSandbox (MI1 §5 R3)', () => {
+  // The four combinations of {serverMode, sandbox present}, plus the allowLocalTools opt-out —
+  // every caller of this helper (executeTurn, realProduceSolve, realProduceVerdict) collapses onto
+  // this same truth table.
+  it('throws SandboxRequiredError when server-mode has no sandbox config', () => {
+    expect(() => assertServerSandbox({ serverMode: true }, null)).toThrow(SandboxRequiredError);
+    expect(() => assertServerSandbox({ serverMode: true }, undefined)).toThrow(
+      SandboxRequiredError,
+    );
+    try {
+      assertServerSandbox({ serverMode: true }, null);
+      expect.unreachable('assertServerSandbox should have thrown');
+    } catch (err) {
+      expect((err as Error).name).toBe('SandboxRequiredError');
+    }
+  });
+
+  it('does not throw when server-mode HAS a sandbox config', () => {
+    expect(() => assertServerSandbox({ serverMode: true }, { pod: 'sandbox-0' })).not.toThrow();
+  });
+
+  it('does not throw when serverMode is unset (the CLI), regardless of sandbox presence', () => {
+    expect(() => assertServerSandbox(undefined, null)).not.toThrow();
+    expect(() => assertServerSandbox({}, null)).not.toThrow();
+    expect(() => assertServerSandbox({ serverMode: false }, null)).not.toThrow();
+  });
+
+  it('does not throw when allowLocalTools opts out, even with no sandbox config', () => {
+    expect(() =>
+      assertServerSandbox({ serverMode: true, allowLocalTools: true }, null),
+    ).not.toThrow();
   });
 });

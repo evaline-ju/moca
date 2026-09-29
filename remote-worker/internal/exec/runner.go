@@ -187,6 +187,9 @@ func (BashRunner) Run(ctx context.Context, s Spec, sink Sink) (int32, error) {
 	}
 
 	cmd := exec.CommandContext(runCtx, "bash", "-c", s.Command)
+	// An explicit environment: the container's, minus the worker's own settings (MI1 §5 R6). Left
+	// unset, cmd.Env inherits everything, SANDBOX_TOKEN included.
+	cmd.Env = commandEnv(os.Environ())
 	// Setpgid + killing -pid takes out the whole group. CommandContext's default
 	// signals only the direct bash, but real commands are pipelines with
 	// grandchildren (`cd 'x' && rg --files … | head -n 200`), which would

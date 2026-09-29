@@ -1,4 +1,4 @@
-import { credentials } from '@grpc/grpc-js';
+import { credentials, InterceptingCall, type Interceptor } from '@grpc/grpc-js';
 import {
   listPoolPods,
   resolveSandboxConfig,
@@ -266,6 +266,38 @@ export class SandboxPoolEmptyError extends Error {
   }
 }
 
+/**
+ * Thrown when a server-mode turn has no sandbox to run tools in (MI1 §5 R3). Without it, a `null`
+ * sandbox config leaves Pi's built-in tools running locally in the worker process. Deliberately NOT
+ * in turnErrorStatus's NO_CAPACITY set: this is a deployment that has no sandbox configured at all,
+ * so a retry cannot succeed, and it surfaces as a 500 naming the fix.
+ */
+export class SandboxRequiredError extends Error {
+  constructor() {
+    super(
+      'no sandbox resolved for this turn; a server refuses to run tools in its own process ' +
+        '(configure a sandbox pool, or set SH_LOCAL_TOOLS=1 for single-tenant development)',
+    );
+    this.name = 'SandboxRequiredError';
+  }
+}
+
+/**
+ * Shared MI1 §5 R3 gate: throws {@link SandboxRequiredError} when a server-mode caller has no
+ * resolvable sandbox config and has not explicitly opted into local tools. Every path that can
+ * wire up `k8sSandboxExtension` (executeTurn, and the converge, solve and prompt leaves) must call this — with the
+ * config it received and the sandbox config it resolved — before it builds a resource loader or
+ * session, so a null sandbox never reaches the extension.
+ */
+export function assertServerSandbox(
+  config: { serverMode?: boolean; allowLocalTools?: boolean } | undefined,
+  sandboxConfig: unknown,
+): void {
+  if (config?.serverMode && !config.allowLocalTools && !sandboxConfig) {
+    throw new SandboxRequiredError();
+  }
+}
+
 export interface SelectedSandbox {
   config: K8sSandboxConfig;
   /** Present ONLY for a leased grpc presence record; undefined for pods. */
@@ -310,10 +342,34 @@ export interface SelectDeps {
   ) => SandboxTransport;
 }
 
+/** Adds the worker's relay credential to every SandboxExec call (MI1 §5 R5). */
+function execTokenInterceptor(token: string): Interceptor {
+  return (options, nextCall) =>
+    new InterceptingCall(nextCall(options), {
+      start(metadata, listener, next) {
+        metadata.set('authorization', `Bearer ${token}`);
+        next(metadata, listener);
+      },
+    });
+}
+
+export function makeRelayExecClient(addr: string, token: string): ExecClientLike {
+  return new SandboxExecClient(addr, credentials.createInsecure(), {
+    interceptors: [execTokenInterceptor(token)],
+  }) as unknown as ExecClientLike;
+}
+
 /** Lazily builds a real gRPC exec client — only reached on the grpc branch when the flag is on. */
 function defaultExecClient(_sandboxId: string, env: NodeJS.ProcessEnv): ExecClientLike {
   const addr = env.SH_RELAY_ADDR ?? 'sandbox-relay.default.svc.cluster.local:8443';
-  return new SandboxExecClient(addr, credentials.createInsecure()) as unknown as ExecClientLike;
+  const token = env.MOCA_RELAY_EXEC_TOKEN;
+  if (!token) {
+    // Named here rather than surfacing as the relay's UNAUTHENTICATED on the first exec.
+    throw new Error(
+      'MOCA_RELAY_EXEC_TOKEN is not set: the relay refuses unauthenticated SandboxExec',
+    );
+  }
+  return makeRelayExecClient(addr, token);
 }
 
 /**
@@ -376,33 +432,42 @@ export async function selectPoolSandbox(
   );
   for (const name of orderByLoad(loads)) {
     if (await lease.acquire(name, opts.cap, holderId, opts.ttlMs)) {
-      const config: K8sSandboxConfig = { pod: name, namespace, context, podCwd, headCwd };
-      const rec = grpcById.get(name);
-      const make = deps.makeTransport ?? GrpcRelayTransport;
-      const transport = rec
-        ? make(
-            name,
-            (deps.makeExecClient ?? ((id: string) => defaultExecClient(id, env)))(name),
-            // The SESSION id becomes the Exec's workspace_key -- never the lease holder id. This is
-            // the ONLY harness change the microVM tier needs, and it is required for correctness
-            // rather than convenience: without it, consecutive leaseholders of one sandbox_id inherit
-            // the previous session's workspace (spec §3.4).
-            //
-            // It has to be the session id specifically, because the key is also what makes a session
-            // CONTINUOUS: `WorkspaceRoot/<workspace_key>` is created on the first Exec for an unseen
-            // key and lives until an idle Reclaim (§4.4), so keying it per turn would open turn 2 of a
-            // session in an empty workspace and give it its own standby VM pool (§4.3) -- continuity
-            // lost and standbys multiplied per turn rather than per session.
-            { workspaceKey: sessionId },
-          )
-        : undefined;
-      return {
-        config,
-        transport,
-        leased: true,
-        heartbeat: () => lease.heartbeat(name, holderId, opts.ttlMs),
-        release: () => lease.release(name, holderId),
-      };
+      // The lease is held from here on: every step after the acquire runs inside this try, so a
+      // throw (an exec client that cannot be built, a transport constructor) releases it before the
+      // original error propagates, rather than holding a slot until the lease TTL expires.
+      try {
+        const config: K8sSandboxConfig = { pod: name, namespace, context, podCwd, headCwd };
+        const rec = grpcById.get(name);
+        const make = deps.makeTransport ?? GrpcRelayTransport;
+        const transport = rec
+          ? make(
+              name,
+              (deps.makeExecClient ?? ((id: string) => defaultExecClient(id, env)))(name),
+              // The SESSION id becomes the Exec's workspace_key -- never the lease holder id. This
+              // is the ONLY harness change the microVM tier needs, and it is required for
+              // correctness rather than convenience: without it, consecutive leaseholders of one
+              // sandbox_id inherit the previous session's workspace (spec §3.4).
+              //
+              // It has to be the session id specifically, because the key is also what makes a
+              // session CONTINUOUS: `WorkspaceRoot/<workspace_key>` is created on the first Exec for
+              // an unseen key and lives until an idle Reclaim (§4.4), so keying it per turn would
+              // open turn 2 of a session in an empty workspace and give it its own standby VM pool
+              // (§4.3) -- continuity lost and standbys multiplied per turn rather than per session.
+              { workspaceKey: sessionId },
+            )
+          : undefined;
+        return {
+          config,
+          transport,
+          leased: true,
+          heartbeat: () => lease.heartbeat(name, holderId, opts.ttlMs),
+          release: () => lease.release(name, holderId),
+        };
+      } catch (err) {
+        // Best effort: a failed release must not replace the error that explains the failure.
+        await lease.release(name, holderId).catch(() => {});
+        throw err;
+      }
     }
   }
   throw new SandboxPoolSaturatedError(selector);

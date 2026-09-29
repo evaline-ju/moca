@@ -14,7 +14,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 export MOCK_LOG="$TMP/mock.log"
 mkdir -p "$TMP/bin"
-for cmd in podman systemctl getent pnpm; do
+for cmd in podman systemctl getent pnpm nft; do
   cat >"$TMP/bin/$cmd" <<'MOCK'
 #!/usr/bin/env bash
 printf '%s %s\n' "$(basename "$0")" "$*" >>"$MOCK_LOG"
@@ -27,10 +27,27 @@ done
 # local user) while the container still receives it. Logging only argv could not tell "passed safely"
 # apart from "not passed at all".
 export MOCK_ENV_LOG="$TMP/mock-env.log"
+# `podman network inspect` also needs real stdout: ensure_sandbox_network parses it back to detect
+# a pre-existing network whose subnet/gateway or isolation differs from what is configured.
+# MOCK_PODMAN_INSPECT (subnet/gateway), MOCK_PODMAN_ISOLATE (the isolate option) and MOCK_PODMAN_IFACE
+# (the bridge interface name) let a test simulate such a network; their defaults match what
+# setup-vm.sh configures, so every call site that sets none of them keeps passing.
 cat >"$TMP/bin/podman" <<'MOCK'
 #!/usr/bin/env bash
 printf '%s %s\n' "$(basename "$0")" "$*" >>"$MOCK_LOG"
 printf 'podman-env SANDBOX_TOKEN=%s\n' "${SANDBOX_TOKEN-<unset>}" >>"$MOCK_ENV_LOG"
+# The exec token must never reach a sandbox by inheritance either (an `export`, a `set -a` over
+# relay.env): record whether podman's own environment carries it.
+printf 'podman-env MOCA_RELAY_EXEC_TOKEN=%s\n' "${MOCA_RELAY_EXEC_TOKEN-<unset>}" >>"$MOCK_ENV_LOG"
+if [[ "$1" == "network" && "$2" == "inspect" ]]; then
+  if [[ "$*" == *isolate* ]]; then
+    printf '%s\n' "${MOCK_PODMAN_ISOLATE-strict}"
+  elif [[ "$*" == *NetworkInterface* ]]; then
+    printf '%s\n' "${MOCK_PODMAN_IFACE-moca-sandbox0}"
+  else
+    printf '%s\n' "${MOCK_PODMAN_INSPECT:-10.89.40.0/24 10.89.40.1}"
+  fi
+fi
 MOCK
 chmod +x "$TMP/bin/podman"
 
@@ -179,32 +196,36 @@ grep -qE '^SH_TURNS_PER_WORKER=$' "$ENV_SRC_DIR/supervisor.env.example" ||
   fail "the example env must leave SH_TURNS_PER_WORKER empty"
 pass "no default shipped for SH_TURNS_PER_WORKER"
 
-# --- the relay's bind port and the supervisor's dial port must agree (the real F3 bug) -----
+# --- the supervisor dials the relay's EXEC listener, and the two ports agree (F3, MI1 R5) ---------
 # R46 (same as above): both assignments below can abort the pipeline on no-match under
 # `set -euo pipefail`, before their `[[ -n ... ]] || fail ...` guards run -- `|| true` on the
 # failure-capable stage in each, `grep -q` gating the second.
-relay_port=$(grep -oE '^SH_RELAY_PORT=[0-9]+' "$ENV_SRC_DIR/relay.env.example" | cut -d= -f2 || true)
+exec_port=$(grep -oE '^MOCA_RELAY_EXEC_ADDR=.*:[0-9]+$' "$ENV_SRC_DIR/relay.env.example" | grep -oE '[0-9]+$' || true)
 if grep -qE '^SH_RELAY_ADDR=.*:[0-9]+$' "$ENV_SRC_DIR/supervisor.env.example"; then
-  addr_port=$(grep -oE '^SH_RELAY_ADDR=.*:[0-9]+$' "$ENV_SRC_DIR/supervisor.env.example" |
-    grep -oE '[0-9]+$')
+  addr_port=$(grep -oE '^SH_RELAY_ADDR=.*:[0-9]+$' "$ENV_SRC_DIR/supervisor.env.example" | grep -oE '[0-9]+$')
 else
   addr_port=""
 fi
-[[ -n "$relay_port" ]] || fail "relay.env.example is missing SH_RELAY_PORT"
+[[ -n "$exec_port" ]] || fail "relay.env.example is missing MOCA_RELAY_EXEC_ADDR"
 [[ -n "$addr_port" ]] || fail "supervisor.env.example's SH_RELAY_ADDR has no port"
-[[ "$relay_port" == "$addr_port" ]] ||
-  fail "SH_RELAY_PORT ($relay_port) in relay.env.example must equal the port in" \
-    "SH_RELAY_ADDR ($addr_port) in supervisor.env.example -- they describe the same wire"
-pass "relay bind port and supervisor dial port agree"
+[[ "$exec_port" == "$addr_port" ]] ||
+  fail "MOCA_RELAY_EXEC_ADDR's port ($exec_port) must equal SH_RELAY_ADDR's ($addr_port): they describe one wire"
+grep -qE '^MOCA_RELAY_EXEC_ADDR=127\.0\.0\.1:' "$ENV_SRC_DIR/relay.env.example" ||
+  fail "the exec listener must bind loopback, where no sandbox container can reach it"
+pass "the supervisor dials the relay's loopback exec listener, on the port it binds"
 
-# --- SANDBOX_IMAGE default matches the rest of the repo (B1) --------------------------------
-# deploy/knative/setup-ocp.sh:42 and setup-k8s.sh:30 both default to
-# ghcr.io/rossoctl/serverless-harness-sandbox:latest -- the repo-name segment, not just the
-# namespace, was dropped here. ghcr.io/rossoctl/sandbox:latest exists nowhere else in the repo.
-[[ "$SANDBOX_IMAGE" == "ghcr.io/rossoctl/serverless-harness-sandbox:latest" ]] ||
+# --- SANDBOX_IMAGE default is the remote-worker image ------------------------------------------
+# Sandboxes here attach to the relay (SH_REMOTE_SANDBOX=1, SH_SANDBOX_DISCOVERY=records), so the
+# container must run remote-worker -- the image compose's sandbox service uses. The Kubernetes
+# scripts' serverless-harness-sandbox image is a pod the harness execs into; it never dials the
+# relay, so with it every turn finds no sandbox presence records.
+[[ "$SANDBOX_IMAGE" == "ghcr.io/rossoctl/serverless-harness-remote-worker:latest" ]] ||
   fail "SANDBOX_IMAGE default is '$SANDBOX_IMAGE', expected" \
-    "ghcr.io/rossoctl/serverless-harness-sandbox:latest (matching setup-ocp.sh/setup-k8s.sh)"
-pass "SANDBOX_IMAGE defaults to the image the rest of the repo actually publishes"
+    "ghcr.io/rossoctl/serverless-harness-remote-worker:latest (the image that attaches to the relay)"
+compose_sandbox_image=$(grep -oE 'SH_SANDBOX_IMAGE:-[^}]+' "$VM_DIR/../compose/docker-compose.yml" | head -1)
+[[ "${compose_sandbox_image#SH_SANDBOX_IMAGE:-}" == "$SANDBOX_IMAGE" ]] ||
+  fail "SANDBOX_IMAGE default ('$SANDBOX_IMAGE') must match compose's sandbox image ('$compose_sandbox_image')"
+pass "SANDBOX_IMAGE defaults to the remote-worker image, the one compose runs as a sandbox"
 
 # --- sandbox count is honoured --------------------------------------------------------------
 : >"$MOCK_LOG"
@@ -234,6 +255,99 @@ echo 'SH_RELAY_TOKEN=s3cr3t' >>"$TOKENED_RELAY_ENV"
 require_relay_token "$TOKENED_RELAY_ENV" ||
   fail "require_relay_token should pass once SH_RELAY_TOKEN is set"
 pass "require_relay_token passes once SH_RELAY_TOKEN is set"
+
+# --- MI1 R5: the exec token is generated once, into BOTH env files, with one value -----------------
+EXEC_DIR="$(mktemp -d)"
+printf 'SH_RELAY_PORT=9443\nSH_RELAY_TOKEN=keep\n' >"$EXEC_DIR/relay.env"
+printf 'PORT=8080\n' >"$EXEC_DIR/supervisor.env"
+SH_ENV_DIR="$EXEC_DIR" ensure_exec_token || fail "ensure_exec_token failed"
+relay_val="$(grep -E '^MOCA_RELAY_EXEC_TOKEN=' "$EXEC_DIR/relay.env" | cut -d= -f2-)"
+sup_val="$(grep -E '^MOCA_RELAY_EXEC_TOKEN=' "$EXEC_DIR/supervisor.env" | cut -d= -f2-)"
+[[ "$relay_val" =~ ^[0-9a-f]{64}$ ]] || fail "relay.env has no generated MOCA_RELAY_EXEC_TOKEN"
+[[ "$sup_val" == "$relay_val" ]] || fail "supervisor.env's exec token differs from relay.env's"
+SH_ENV_DIR="$EXEC_DIR" ensure_exec_token || fail "second ensure_exec_token failed"
+[[ "$(grep -c '^MOCA_RELAY_EXEC_TOKEN=' "$EXEC_DIR/relay.env")" == 1 ]] || fail "re-run duplicated the token"
+[[ "$(grep -E '^MOCA_RELAY_EXEC_TOKEN=' "$EXEC_DIR/relay.env" | cut -d= -f2-)" == "$relay_val" ]] ||
+  fail "re-run replaced the token"
+grep -q '^SH_RELAY_TOKEN=keep$' "$EXEC_DIR/relay.env" || fail "ensure_exec_token touched SH_RELAY_TOKEN"
+pass "MOCA_RELAY_EXEC_TOKEN: generated once, same value in relay.env and supervisor.env"
+rm -rf "$EXEC_DIR"
+
+# An operator-edited relay.env whose last line has no newline: the append must not glue onto it.
+EXEC_DIR="$(mktemp -d)"
+printf 'SH_RELAY_PORT=9443\nSH_RELAY_TOKEN=keep' >"$EXEC_DIR/relay.env"
+printf 'PORT=8080\n' >"$EXEC_DIR/supervisor.env"
+SH_ENV_DIR="$EXEC_DIR" ensure_exec_token || fail "ensure_exec_token failed on a file with no final newline"
+grep -q '^SH_RELAY_TOKEN=keep$' "$EXEC_DIR/relay.env" ||
+  fail "appending to a relay.env with no final newline changed SH_RELAY_TOKEN: $(cat "$EXEC_DIR/relay.env")"
+grep -qE '^MOCA_RELAY_EXEC_TOKEN=[0-9a-f]{64}$' "$EXEC_DIR/relay.env" ||
+  fail "the exec token was not appended as its own line: $(cat "$EXEC_DIR/relay.env")"
+pass "ensure_exec_token appends on its own line to a relay.env with no final newline"
+rm -rf "$EXEC_DIR"
+
+# --- MI1 R5: the exec listener and the supervisor's dial address move together ------------------
+# Before MI1 the relay served everything on one listener and the supervisor dialed it at
+# SH_RELAY_ADDR=127.0.0.1:9443. install_env never rewrites an existing env file, so a re-run on such
+# a VM must migrate BOTH files together (relay: MOCA_RELAY_EXEC_ADDR, supervisor: SH_RELAY_ADDR);
+# files that already agree are left alone; and any other combination -- one side migrated, or ports
+# that disagree -- refuses, naming both values, rather than leaving the supervisor dialing a port
+# nothing serves SandboxExec on.
+LST_DIR="$(mktemp -d)"
+sum_files() { cat "$LST_DIR/relay.env" "$LST_DIR/supervisor.env" | cksum; }
+listener_env() { # <relay extra lines> <supervisor SH_RELAY_ADDR line or empty>
+  printf 'SH_RELAY_PORT=9443\nREDIS_URL=redis://127.0.0.1:6379\nSH_RELAY_TOKEN=keep\n%s' "$1" >"$LST_DIR/relay.env"
+  printf 'PORT=8080\nSH_TURNS_PER_WORKER=9\n%s\nREDIS_URL=redis://127.0.0.1:6379\n' "$2" >"$LST_DIR/supervisor.env"
+  chmod 0640 "$LST_DIR/relay.env" "$LST_DIR/supervisor.env"
+}
+exec_addr_of() { grep -E '^MOCA_RELAY_EXEC_ADDR=' "$LST_DIR/relay.env" | cut -d= -f2-; }
+dial_addr_of() { grep -E '^SH_RELAY_ADDR=' "$LST_DIR/supervisor.env" | cut -d= -f2-; }
+
+# fresh: both files straight from the templates already agree -- a no-op
+cp "$ENV_SRC_DIR/relay.env.example" "$LST_DIR/relay.env"
+cp "$ENV_SRC_DIR/supervisor.env.example" "$LST_DIR/supervisor.env"
+before="$(sum_files)"
+SH_ENV_DIR="$LST_DIR" ensure_exec_listener || fail "ensure_exec_listener refused a fresh install's env files"
+[[ "$(sum_files)" == "$before" ]] || fail "ensure_exec_listener rewrote a fresh install's env files"
+pass "ensure_exec_listener: a fresh install is already consistent and left untouched"
+
+# pre-MI1: no exec address, supervisor on the old default -- both migrate, nothing else changes
+listener_env "" "SH_RELAY_ADDR=127.0.0.1:9443"
+SH_ENV_DIR="$LST_DIR" ensure_exec_listener || fail "ensure_exec_listener failed to migrate a pre-MI1 pair"
+[[ "$(exec_addr_of)" == "127.0.0.1:9444" ]] || fail "relay.env did not gain MOCA_RELAY_EXEC_ADDR=127.0.0.1:9444: $(cat "$LST_DIR/relay.env")"
+[[ "$(dial_addr_of)" == "127.0.0.1:9444" ]] || fail "supervisor.env's SH_RELAY_ADDR was not moved to 127.0.0.1:9444: $(cat "$LST_DIR/supervisor.env")"
+[[ "$(grep -c '^SH_RELAY_ADDR=' "$LST_DIR/supervisor.env")" == 1 ]] || fail "the migration duplicated SH_RELAY_ADDR"
+grep -q '^SH_TURNS_PER_WORKER=9$' "$LST_DIR/supervisor.env" || fail "the migration lost an operator setting in supervisor.env"
+grep -q '^SH_RELAY_TOKEN=keep$' "$LST_DIR/relay.env" || fail "the migration touched SH_RELAY_TOKEN"
+[[ "$(stat -c %a "$LST_DIR/supervisor.env" 2>/dev/null || stat -f %Lp "$LST_DIR/supervisor.env")" == 640 ]] ||
+  fail "the migration changed supervisor.env's mode"
+pass "ensure_exec_listener: a pre-MI1 pair migrates both files together, and nothing else"
+
+# already migrated: a second run is a byte-identical no-op
+before="$(sum_files)"
+SH_ENV_DIR="$LST_DIR" ensure_exec_listener || fail "ensure_exec_listener refused an already-migrated pair"
+[[ "$(sum_files)" == "$before" ]] || fail "ensure_exec_listener rewrote an already-migrated pair"
+pass "ensure_exec_listener: an already-migrated pair is left untouched"
+
+# mismatches: each refuses, names both values, and writes nothing
+for case_ in "MOCA_RELAY_EXEC_ADDR=127.0.0.1:9444|SH_RELAY_ADDR=127.0.0.1:9443|127.0.0.1:9444|127.0.0.1:9443" \
+  "|SH_RELAY_ADDR=127.0.0.1:9444|<unset>|127.0.0.1:9444" \
+  "MOCA_RELAY_EXEC_ADDR=127.0.0.1:9444|SH_RELAY_ADDR=127.0.0.1:9555|127.0.0.1:9444|127.0.0.1:9555" \
+  "|SH_RELAY_ADDR=10.0.0.5:9443|<unset>|10.0.0.5:9443"; do
+  IFS='|' read -r relay_line sup_line want_relay want_sup <<<"$case_"
+  listener_env "${relay_line:+$relay_line
+}" "$sup_line"
+  before="$(sum_files)"
+  if mm_err=$(SH_ENV_DIR="$LST_DIR" ensure_exec_listener 2>&1); then
+    fail "ensure_exec_listener accepted relay '${relay_line:-<no exec addr>}' with supervisor '$sup_line'"
+  fi
+  echo "$mm_err" | grep -qF "MOCA_RELAY_EXEC_ADDR=$want_relay" ||
+    fail "the refusal must name the relay's MOCA_RELAY_EXEC_ADDR ($want_relay): $mm_err"
+  echo "$mm_err" | grep -qF "SH_RELAY_ADDR=$want_sup" ||
+    fail "the refusal must name the supervisor's SH_RELAY_ADDR ($want_sup): $mm_err"
+  [[ "$(sum_files)" == "$before" ]] || fail "a refused combination was still written to"
+done
+pass "ensure_exec_listener: a half-migrated or disagreeing pair refuses, naming both values"
+rm -rf "$LST_DIR"
 
 # --- relay_token strips one matched pair of surrounding quotes (systemd's EnvironmentFile=
 # semantics) ----------------------------------------------------------------------------------
@@ -285,10 +399,148 @@ grep -q -- 'SANDBOX_TOKEN=s3cr3t' "$MOCK_LOG" &&
 grep -q -- 'podman-env SANDBOX_TOKEN=s3cr3t' "$MOCK_ENV_LOG" ||
   fail "the container does not actually receive SANDBOX_TOKEN: passing by name only works if the" \
     "value is in podman's own environment: $(cat "$MOCK_ENV_LOG")"
-grep -q -- '--add-host host.containers.internal:host-gateway' "$MOCK_LOG" ||
-  fail "start_sandboxes must map host.containers.internal explicitly (podman-run(1)" \
-    "host-gateway), not rely on implicit netavark DNS: $(cat "$MOCK_LOG")"
-pass "start_sandboxes: per-container SANDBOX_ID, host-reaching RELAY_ADDR, matching SANDBOX_TOKEN"
+grep -q -- '--network moca-sandbox' "$MOCK_LOG" ||
+  fail "sandboxes must run on the dedicated moca-sandbox network: $(cat "$MOCK_LOG")"
+grep -q -- '--add-host host.containers.internal:10.89.40.1' "$MOCK_LOG" ||
+  fail "host.containers.internal must point at the moca-sandbox gateway: $(cat "$MOCK_LOG")"
+grep -q -- 'host-gateway' "$MOCK_LOG" &&
+  fail "sandboxes must reach the host only through the moca-sandbox gateway, where the firewall" \
+    "admits the relay's attach port and DNS alone -- not through host-gateway (MI1 R8): $(cat "$MOCK_LOG")"
+pass "start_sandboxes: dedicated network, gateway-pinned host alias, no host-gateway"
+
+# --- MI1 R8: the sandbox network and the firewall that confines it --------------------------------
+: >"$MOCK_LOG"
+ensure_sandbox_network ||
+  fail "ensure_sandbox_network must pass when the live network matches the configured subnet/gateway"
+grep -q -- 'podman network create --ignore --subnet 10.89.40.0/24 --gateway 10.89.40.1 --opt isolate=strict --interface-name moca-sandbox0 moca-sandbox' "$MOCK_LOG" ||
+  fail "ensure_sandbox_network must create moca-sandbox idempotently with the fixed subnet," \
+    "isolated from every other podman network: $(cat "$MOCK_LOG")"
+grep -q -- 'podman network inspect moca-sandbox --format {{index .Options "isolate"}}' "$MOCK_LOG" ||
+  fail "ensure_sandbox_network must read back the live isolate option: $(cat "$MOCK_LOG")"
+grep -q -- 'podman network inspect moca-sandbox --format {{.NetworkInterface}}' "$MOCK_LOG" ||
+  fail "ensure_sandbox_network must read back the live bridge interface name: $(cat "$MOCK_LOG")"
+pass "ensure_sandbox_network creates the fixed-subnet, strictly isolated network and passes when it already matches"
+
+# --- ensure_sandbox_network fails closed on a network that is not strictly isolated (MI1 R8) -----
+# --ignore keeps a pre-existing moca-sandbox whatever its options, so a network created without
+# isolate=strict (or by a netavark that does not record it) would put sandboxes on a bridge that
+# reaches other podman networks -- Redis's among them. Unset and a weaker value both refuse.
+for isolate in "" "<no value>" "true"; do
+  export MOCK_PODMAN_ISOLATE="$isolate"
+  if isolate_err=$(ensure_sandbox_network 2>&1); then
+    fail "ensure_sandbox_network must fail when the live network's isolate option is '$isolate'"
+  fi
+  echo "$isolate_err" | grep -qF "strict" ||
+    fail "the isolation message must name the expected value (strict): $isolate_err"
+  echo "$isolate_err" | grep -qF "isolate=" ||
+    fail "the isolation message must name the option and its actual value: $isolate_err"
+done
+unset MOCK_PODMAN_ISOLATE
+pass "ensure_sandbox_network fails closed, naming expected and actual, on a network without isolate=strict"
+
+# --- ensure_sandbox_network fails closed on a subnet/gateway mismatch ---------------------------
+# podman network create --ignore keeps a pre-existing moca-sandbox network regardless of its
+# actual subnet/gateway, and the firewall's rules are written against
+# MOCA_SANDBOX_SUBNET/MOCA_SANDBOX_GATEWAY specifically -- a live network on different values
+# would leave real sandbox traffic unmatched by any of those rules. MOCK_PODMAN_INSPECT controls
+# what `podman network inspect` reports for this test; its default (unset, in effect for the
+# passing case just above and every other ensure_sandbox_network call in this file) matches the
+# configured subnet/gateway.
+export MOCK_PODMAN_INSPECT="10.89.41.0/24 10.89.41.1"
+if mismatch_err=$(ensure_sandbox_network 2>&1); then
+  fail "ensure_sandbox_network must fail when the live network's subnet/gateway differ from" \
+    "MOCA_SANDBOX_SUBNET/MOCA_SANDBOX_GATEWAY"
+fi
+echo "$mismatch_err" | grep -qF "10.89.40.0/24 10.89.40.1" ||
+  fail "the mismatch message must name the expected subnet/gateway: $mismatch_err"
+echo "$mismatch_err" | grep -qF "10.89.41.0/24 10.89.41.1" ||
+  fail "the mismatch message must name the actual subnet/gateway: $mismatch_err"
+unset MOCK_PODMAN_INSPECT
+pass "ensure_sandbox_network fails closed and names both values on a subnet/gateway mismatch"
+
+# --- ensure_sandbox_network fails closed on a bridge with another interface name (MI1 R8) ---------
+# The firewall matches sandbox traffic by the bridge it arrives on, so a pre-existing moca-sandbox
+# whose bridge has another name would leave that traffic unmatched by the per-bridge rules.
+export MOCK_PODMAN_IFACE="podman1"
+if iface_err=$(ensure_sandbox_network 2>&1); then
+  fail "ensure_sandbox_network must fail when the live bridge interface is not moca-sandbox0"
+fi
+echo "$iface_err" | grep -qF "moca-sandbox0" || fail "the interface message must name the expected bridge: $iface_err"
+echo "$iface_err" | grep -qF "podman1" || fail "the interface message must name the actual bridge: $iface_err"
+unset MOCK_PODMAN_IFACE
+pass "ensure_sandbox_network fails closed and names both values on a bridge interface mismatch"
+
+cp "$TOKENED_RELAY_ENV" "$SH_ENV_DIR/relay.env"
+: >"$MOCK_LOG"
+install_sandbox_firewall
+NFT="$SH_ENV_DIR/moca-sandbox.nft"
+[[ -f "$NFT" ]] || fail "install_sandbox_firewall must render $NFT"
+grep -qF 'iifname "moca-sandbox0" ip saddr 10.89.40.0/24 tcp dport 9443 accept' "$NFT" ||
+  fail "the attach port must be allowed, over IPv4 from the sandbox bridge only: $(cat "$NFT")"
+grep -qF 'iifname "moca-sandbox0" ip saddr 10.89.40.0/24 meta l4proto { tcp, udp } th dport 53 accept' "$NFT" ||
+  fail "DNS to podman's resolver must be allowed, over IPv4 from the sandbox bridge only: $(cat "$NFT")"
+# Pinned on its own: the IPv4-only sweep below exempts this rule, so dropping its iifname -- accepting
+# established/related traffic from every interface -- would otherwise pass the whole file.
+grep -qxF '    iifname "moca-sandbox0" ct state established,related accept' "$NFT" ||
+  fail "the established/related accept must be scoped to the sandbox bridge: $(cat "$NFT")"
+grep -qF 'iifname "moca-sandbox0" counter drop' "$NFT" ||
+  fail "everything else arriving on the sandbox bridge -- IPv6 included -- must drop: $(cat "$NFT")"
+grep -qF 'ip saddr 10.89.40.0/24 counter drop' "$NFT" ||
+  fail "traffic from the sandbox subnet on any other interface must drop too: $(cat "$NFT")"
+# Every accept other than the established/related one must be IPv4-only: an accept without
+# `ip saddr` would let IPv6 (link-local is up on the bridge and in every container) through.
+if grep -E 'accept' "$NFT" | grep -vE 'ct state established,related accept|policy accept' | grep -vqF 'ip saddr'; then
+  fail "an accept rule without ip saddr would admit IPv6 from the sandbox bridge: $(cat "$NFT")"
+fi
+grep -q 'hook input' "$NFT" || fail "the table must filter traffic TO the host (input), not forwarding"
+grep -q 'hook forward' "$NFT" && fail "S1 must not filter forwarded (internet) traffic; that is S5's"
+grep -q 'nft -f' "$MOCK_LOG" || fail "install_sandbox_firewall must load the table now: $(cat "$MOCK_LOG")"
+grep -q 'systemctl enable moca-sandbox-firewall.service' "$MOCK_LOG" ||
+  fail "the firewall unit must be enabled so the table survives a reboot: $(cat "$MOCK_LOG")"
+grep -qE '^systemctl start moca-sandbox-firewall\.service$' "$MOCK_LOG" ||
+  fail "the firewall unit must be started so it is active for the units that require it: $(cat "$MOCK_LOG")"
+grep -qE '^systemctl (restart|try-restart|reload-or-restart) moca-sandbox-firewall\.service$' "$MOCK_LOG" &&
+  fail "the firewall unit must never be restarted: through RequiredBy= that restarts podman-restart.service and every container it manages: $(cat "$MOCK_LOG")"
+pass "moca-sandbox: fixed subnet; host reachable only on the attach port and DNS; persistent; started, never restarted"
+
+# --- install_sandbox_firewall follows sandbox_relay_addr()'s port, not relay_port()'s
+# unconditionally --------------------------------------------------------------------------------
+# SH_SANDBOX_RELAY_ADDR can point sandboxes at a different port than relay_port() returns; the
+# firewall must open the port sandboxes actually dial.
+: >"$MOCK_LOG"
+SH_SANDBOX_RELAY_ADDR="host.containers.internal:7443" install_sandbox_firewall
+grep -q 'tcp dport 7443' "$NFT" ||
+  fail "install_sandbox_firewall must open the port from sandbox_relay_addr(), not relay_port(): $(cat "$NFT")"
+grep -q '9443' "$NFT" &&
+  fail "install_sandbox_firewall must not also open relay_port()'s value once" \
+    "SH_SANDBOX_RELAY_ADDR overrides the port: $(cat "$NFT")"
+pass "install_sandbox_firewall follows SH_SANDBOX_RELAY_ADDR's port when it overrides relay_port()"
+
+grep -q '^ExecStart=@NFT@ -f @SH_ENV_DIR@/moca-sandbox\.nft$' "$VM_DIR/systemd/moca-sandbox-firewall.service" ||
+  fail "the checked-in unit must use the @NFT@ and @SH_ENV_DIR@ placeholders (a literal path breaks" \
+    "when nft is not in /usr/sbin or SH_ENV_DIR is customized):" \
+    "$(grep '^ExecStart=' "$VM_DIR/systemd/moca-sandbox-firewall.service")"
+grep -q '^Before=.*sh-relay.service' "$VM_DIR/systemd/moca-sandbox-firewall.service" ||
+  fail "the firewall must be in place before the relay (and so before any sandbox) starts"
+grep -q '^RequiredBy=.*sh-relay.service' "$VM_DIR/systemd/moca-sandbox-firewall.service" ||
+  fail "RequiredBy=sh-relay.service must be set: Before= alone does not stop the relay from" \
+    "starting if this oneshot's load fails at boot"
+grep -q '^RequiredBy=.*podman-restart.service' "$VM_DIR/systemd/moca-sandbox-firewall.service" ||
+  fail "RequiredBy=podman-restart.service must be set: Before= alone does not stop it from" \
+    "starting if this oneshot's load fails at boot"
+pass "moca-sandbox-firewall.service is ordered before, and required by, the relay and podman-restart"
+
+INSTALLED_FIREWALL_UNIT="$SH_UNIT_DIR/moca-sandbox-firewall.service"
+[[ -f "$INSTALLED_FIREWALL_UNIT" ]] ||
+  fail "install_sandbox_firewall must install the firewall unit into $SH_UNIT_DIR"
+grep -qF "ExecStart=$(command -v nft) -f $SH_ENV_DIR/moca-sandbox.nft" "$INSTALLED_FIREWALL_UNIT" ||
+  fail "the installed unit must run the nft on PATH, with @SH_ENV_DIR@ substituted with the real" \
+    "SH_ENV_DIR ($SH_ENV_DIR): $(cat "$INSTALLED_FIREWALL_UNIT")"
+grep -q '@NFT@' "$INSTALLED_FIREWALL_UNIT" &&
+  fail "the installed unit must not still contain the @NFT@ placeholder: $(cat "$INSTALLED_FIREWALL_UNIT")"
+grep -q '@SH_ENV_DIR@' "$INSTALLED_FIREWALL_UNIT" &&
+  fail "the installed unit must not still contain the @SH_ENV_DIR@ placeholder: $(cat "$INSTALLED_FIREWALL_UNIT")"
+pass "install_sandbox_firewall renders @SH_ENV_DIR@ into the real SH_ENV_DIR when installing the unit"
 
 # --- missing commands fail loudly -----------------------------------------------------------
 if PATH="/nonexistent" require_cmds podman 2>/dev/null; then
@@ -472,16 +724,25 @@ fi
 # sh-supervisor.service` is refused with "start request repeated too quickly" until
 # `systemctl reset-failed`. Enabling without --now sidesteps the crash loop entirely: the unit
 # is wired into multi-user.target for the next boot, but this run does not start it.
+#
+# A re-run must apply what it just wrote: `enable --now` does nothing to a unit that is already
+# running, so env and unit changes would wait for the next reboot. The relay is restarted; the
+# supervisor is try-restarted -- restarted if it is running, left stopped if it is not.
 : >"$MOCK_LOG"
 start_services
-grep -qE '^systemctl enable --now sh-relay\.service$' "$MOCK_LOG" ||
-  fail "start_services must enable --now the relay unit: $(cat "$MOCK_LOG")"
+grep -qE '^systemctl enable sh-relay\.service$' "$MOCK_LOG" ||
+  fail "start_services must enable the relay unit: $(cat "$MOCK_LOG")"
+grep -qE '^systemctl restart sh-relay\.service$' "$MOCK_LOG" ||
+  fail "start_services must restart the relay so a re-run's env takes effect: $(cat "$MOCK_LOG")"
 grep -qE '^systemctl enable sh-supervisor\.service$' "$MOCK_LOG" ||
   fail "start_services must enable (without --now) the supervisor unit: $(cat "$MOCK_LOG")"
-grep -qE '^systemctl enable --now sh-supervisor\.service$' "$MOCK_LOG" &&
-  fail "start_services must NOT --now the supervisor unit (guaranteed crash loop while" \
+grep -qE '^systemctl try-restart sh-supervisor\.service$' "$MOCK_LOG" ||
+  fail "start_services must try-restart the supervisor, so a running one picks up a re-run's" \
+    "env: $(cat "$MOCK_LOG")"
+grep -qE '^systemctl (enable --now|start|restart) sh-supervisor\.service$' "$MOCK_LOG" &&
+  fail "start_services must NOT start a stopped supervisor (guaranteed crash loop while" \
     "SH_TURNS_PER_WORKER is unset): $(cat "$MOCK_LOG")"
-pass "supervisor enabled without --now, relay enabled --now"
+pass "relay restarted; supervisor enabled and try-restarted, never started"
 
 # --- main(), end to end, against mocks (last: exercises the real call order) ---------------
 # require_cmds also needs `install` and `node`, which are on the real PATH (appended after the
@@ -516,7 +777,7 @@ grep -q 'getent passwd harness' "$MOCK_LOG" || fail "main() did not check for th
 
 reload_line=$(grep -n 'systemctl daemon-reload' "$MOCK_LOG" | head -1 | cut -d: -f1)
 redis_line=$(grep -n 'podman run .*sh-redis' "$MOCK_LOG" | head -1 | cut -d: -f1)
-relay_enable_line=$(grep -n 'systemctl enable --now sh-relay.service' "$MOCK_LOG" | head -1 | cut -d: -f1)
+relay_enable_line=$(grep -n 'systemctl restart sh-relay.service' "$MOCK_LOG" | head -1 | cut -d: -f1)
 [[ -n "$reload_line" && -n "$redis_line" && -n "$relay_enable_line" ]] ||
   fail "main() did not perform the expected steps: $(cat "$MOCK_LOG")"
 ((reload_line < redis_line)) ||
@@ -528,6 +789,30 @@ grep -q -- 'podman-env SANDBOX_TOKEN=e2e-token' "$MOCK_ENV_LOG" ||
     "(B5 / require_relay_token wiring): $(cat "$MOCK_ENV_LOG")"
 grep -q -- 'SANDBOX_TOKEN=e2e-token' "$MOCK_LOG" &&
   fail "the relay token leaked into podman's argv on the end-to-end path: $(cat "$MOCK_LOG")"
+# The firewall is load-bearing only if it is in place before the first sandbox starts.
+firewall_line=$(grep -n 'nft -f' "$MOCK_LOG" | head -1 | cut -d: -f1)
+sandbox_line=$(grep -n 'podman run .*sh-sandbox-' "$MOCK_LOG" | head -1 | cut -d: -f1)
+[[ -n "$firewall_line" && -n "$sandbox_line" ]] ||
+  fail "main() must both load the firewall and start sandboxes: $(cat "$MOCK_LOG")"
+((firewall_line < sandbox_line)) ||
+  fail "main() must load the sandbox firewall before it starts the first sandbox"
+# A sandbox never receives the exec token -- the credential that authorizes SandboxExec into ANY
+# sandbox -- by any route: not by argv, not from an env file, not inherited.
+exec_token=$(sed -n 's/^MOCA_RELAY_EXEC_TOKEN=//p' "$SH_ENV_DIR/relay.env")
+[[ -n "$exec_token" ]] || fail "main() must have generated MOCA_RELAY_EXEC_TOKEN in relay.env"
+grep -F -- "$exec_token" "$MOCK_LOG" | grep -q 'sh-sandbox-' &&
+  fail "a sandbox's podman run carries the exec token in argv: $(cat "$MOCK_LOG")"
+grep -qF -- "podman-env MOCA_RELAY_EXEC_TOKEN=$exec_token" "$MOCK_ENV_LOG" &&
+  fail "podman inherits MOCA_RELAY_EXEC_TOKEN, so every sandbox it starts would too"
+if grep 'podman run .*sh-sandbox-' "$MOCK_LOG" | grep -qE -- '--env-file|--env-host|--env-merge'; then
+  fail "a sandbox is started with an env file or the host environment: $(cat "$MOCK_LOG")"
+fi
+# Only the three settings a sandbox worker needs are set, by -e.
+bad_e=$(grep 'podman run .*sh-sandbox-' "$MOCK_LOG" | grep -oE -- '-e [A-Za-z_][A-Za-z0-9_]*' |
+  sed 's/^-e //' | grep -vxE 'SANDBOX_ID|RELAY_ADDR|SANDBOX_TOKEN' | sort -u || true)
+[[ -z "$bad_e" ]] || fail "a sandbox is given environment beyond SANDBOX_ID/RELAY_ADDR/SANDBOX_TOKEN: $bad_e"
+declare -f main | grep -q 'ensure_exec_listener' ||
+  fail "main() must run ensure_exec_listener, or a re-run on a pre-MI1 VM keeps the single listener"
 pass "main() end to end: harness-account check, both units, both env files, correct ordering"
 
 # The closing message must match the behaviour we actually land on: the supervisor is enabled

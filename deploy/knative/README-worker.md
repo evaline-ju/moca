@@ -61,15 +61,18 @@ oc set env deploy/sandbox-relay SH_RELAY_TOKEN=dev-token -n default
 ```
 
 > **Not on an OCP overlay deployment.** `setup-ocp.sh` deploys the relay through
-> `overlays/ocp`, which reads `SH_RELAY_TOKEN` from the `sh-relay-token` Secret so the
-> token never sits in the Deployment spec (#173). `oc set env` replaces the whole env
-> entry rather than merging into it, so the command above would swap that `secretKeyRef`
-> back for a literal — putting a live token into the spec. Rotate the Secret instead, and
-> restart the relay so it re-reads it (env from a Secret is resolved only at pod start):
+> `overlays/ocp`, which reads `SH_RELAY_TOKEN` and `MOCA_RELAY_EXEC_TOKEN` from the
+> `sh-relay-token` Secret so neither token sits in the Deployment spec (#173). `oc set env`
+> replaces the whole env entry rather than merging into it, so the command above would
+> swap that `secretKeyRef` back for a literal — putting a live token into the spec. Rotate
+> the one key in the Secret instead, and restart the relay so it re-reads it (env from a
+> Secret is resolved only at pod start). Patch the key rather than re-applying the Secret:
+> a manifest that names only `SH_RELAY_TOKEN` would delete `MOCA_RELAY_EXEC_TOKEN`, and
+> the relay does not start without it.
 >
 > ```bash
-> oc create secret generic sh-relay-token -n default \
->   --from-literal=SH_RELAY_TOKEN=<token> --dry-run=client -o yaml | oc apply -f -
+> oc patch secret sh-relay-token -n default --type=merge \
+>   -p '{"stringData":{"SH_RELAY_TOKEN":"<token>"}}'
 > oc rollout restart deploy/sandbox-relay -n default
 > ```
 
@@ -83,15 +86,31 @@ oc set env deploy/sandbox-relay SH_RELAY_TOKEN_sbx-dev-1=dev-token -n default
 
 ## Step 2 — Enable the remote-sandbox path on the harness
 
-The relay is inert until the harness opts in. Point the harness at the relay and
-turn the path on:
+The relay is inert until the harness opts in. Point the harness at the relay, turn
+the path on, and give it the relay's exec token. The relay refuses every
+`SandboxExec` that does not present `MOCA_RELAY_EXEC_TOKEN` as its bearer, so the
+harness reads it from the `sh-relay-token` Secret — by a `secretKeyRef` to that one
+key, never the whole Secret, whose `SH_RELAY_TOKEN` is the sandboxes' credential:
 
 ```bash
-oc set env ksvc/serverless-harness \
-  SH_REMOTE_SANDBOX=1 \
-  SH_RELAY_ADDR=sandbox-relay.default.svc:8443 \
-  -n default
+# `oc set env` does not work on a Knative Service: upsert the three entries by name and
+# replace the env array in one patch, passing every other entry through whole.
+NEWENV=$(oc get ksvc serverless-harness -n default -o json | jq -c '
+  (.spec.template.spec.containers[0].env // [])
+  | map(select(.name | IN("SH_REMOTE_SANDBOX", "SH_RELAY_ADDR", "MOCA_RELAY_EXEC_TOKEN") | not))
+  + [{name: "SH_REMOTE_SANDBOX", value: "1"},
+     {name: "SH_RELAY_ADDR", value: "sandbox-relay.default.svc:8443"},
+     {name: "MOCA_RELAY_EXEC_TOKEN",
+      valueFrom: {secretKeyRef: {name: "sh-relay-token", key: "MOCA_RELAY_EXEC_TOKEN"}}}]')
+oc patch ksvc serverless-harness -n default --type=json \
+  -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/env\",\"value\":$NEWENV}]"
 ```
+
+`setup-ocp.sh` creates both keys of `sh-relay-token`; it and
+[`remote-worker/deploy-incluster.sh`](../../remote-worker/deploy-incluster.sh) each add
+`MOCA_RELAY_EXEC_TOKEN` to an older Secret that lacks it, and neither rotates an
+existing one. The exec token belongs to the harness and the relay only; a worker is a
+sandbox and never holds it.
 
 This rolls a new Knative revision. With `SH_REMOTE_SANDBOX=1` and a worker
 present in the pool, `select-sandbox` can lease the remote sandbox and drive a
@@ -130,11 +149,13 @@ oc exec deploy/redis -n default -- redis-cli HGETALL sh:sandbox:records
 
 **Drive an exec** without the full harness, straight through the relay — port-
 forward the relay Service and use `grpcurl` (the relay does not register gRPC
-reflection, so pass the proto):
+reflection, so pass the proto). An Exec presents the exec token, as the harness does:
 
 ```bash
 oc port-forward svc/sandbox-relay 8443:8443 -n default &
-grpcurl -plaintext -proto proto/sandbox/v1/sandbox.proto \
+EXEC_TOKEN=$(oc get secret sh-relay-token -n default \
+  -o jsonpath='{.data.MOCA_RELAY_EXEC_TOKEN}' | base64 -d)
+grpcurl -plaintext -H "authorization: Bearer $EXEC_TOKEN" -proto proto/sandbox/v1/sandbox.proto \
   -d '{"sandbox_id":"sbx-dev-1","exec":{"req_id":1,"command":"echo hi","timeout_s":10,"streaming":true}}' \
   localhost:8443 sandbox.v1.SandboxExec/Exec
 ```
@@ -172,25 +193,26 @@ no cost to `make test`. Start a relay and a worker, then run it:
 # Redis — pick a free port; something else on this machine may already hold 6379.
 docker run --rm -d -p 6380:6379 --name sh-live-relay-redis redis:7
 
-# Relay
-SH_RELAY_TOKEN=dev-token SH_RELAY_PORT=8443 REDIS_URL=redis://127.0.0.1:6380 \
-  pnpm --filter @sh/sandbox-relay start &
+# Relay (it refuses to boot without MOCA_RELAY_EXEC_TOKEN, the workers' Exec credential)
+SH_RELAY_TOKEN=dev-token MOCA_RELAY_EXEC_TOKEN=dev-exec-token SH_RELAY_PORT=8443 \
+  REDIS_URL=redis://127.0.0.1:6380 pnpm --filter @sh/sandbox-relay start &
 
 # Reference worker, under the default SANDBOX_ID the test expects
 cd remote-worker && SANDBOX_ID=sbx-dev-1 RELAY_ADDR=localhost:8443 \
   SANDBOX_TOKEN=dev-token go run ./cmd/worker &
 cd ..
 
-# The live cases
-SH_LIVE_RELAY=1 pnpm --filter @sh/k8s-sandbox test live-relay
+# The live cases (each Exec presents the exec token as its bearer)
+SH_LIVE_RELAY=1 MOCA_RELAY_EXEC_TOKEN=dev-exec-token pnpm --filter @sh/k8s-sandbox test live-relay
 
 # Teardown
 kill %1 %2   # relay, worker (job numbers from your shell)
 docker stop sh-live-relay-redis   # started with --rm; stop also removes it
 ```
 
-`RELAY_ADDR`, `SANDBOX_ID`, and `SANDBOX_TOKEN` are all overridable env vars if
-you want to point the first two cases at a relay/worker running elsewhere.
+`RELAY_ADDR`, `SANDBOX_ID`, `SANDBOX_TOKEN` and `MOCA_RELAY_EXEC_TOKEN` are all
+overridable env vars if you want to point the first two cases at a relay/worker
+running elsewhere.
 
 The third case (worker disconnect) does **not** use the worker started above —
 it builds the worker binary itself in a `beforeAll` (`go build -o <tmp> ./cmd/worker`)

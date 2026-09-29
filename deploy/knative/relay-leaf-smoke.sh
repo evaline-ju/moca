@@ -52,6 +52,9 @@ SANDBOX_ID="sbx-relay-smoke-$$"
 WORKER_DEPLOY="sandbox-worker-relay-smoke"
 RELAY_ADDR="sandbox-relay.${NS}.svc:8443"
 NONEXISTENT_SELECTOR="sh.kagenti.io/sandbox-pool=relay-smoke-none-$$"
+# The relay now requires this to boot at all (MI1 R5); matches relay-deployment.yaml's own
+# dev value, which this script applies bare (see lib-relay.sh's header comment above).
+MOCA_RELAY_EXEC_TOKEN="${MOCA_RELAY_EXEC_TOKEN:-dev-exec-token}"
 
 BUILD_DIR=""
 BUILT_IMAGE=0
@@ -228,7 +231,7 @@ snapshot_harness_env
 # least-loaded-first leasing cannot pick an in-cluster pod that isn't a candidate. ---
 claim "Flip harness to the remote path (pool selector matches no pods)"
 assert_no_pods_match "$NONEXISTENT_SELECTOR"
-flip_harness_env SH_REMOTE_SANDBOX=1 SH_RELAY_ADDR="$RELAY_ADDR" KAGENTI_SANDBOX_POOL_SELECTOR="$NONEXISTENT_SELECTOR"
+flip_harness_env SH_REMOTE_SANDBOX=1 SH_RELAY_ADDR="$RELAY_ADDR" KAGENTI_SANDBOX_POOL_SELECTOR="$NONEXISTENT_SELECTOR" MOCA_RELAY_EXEC_TOKEN="$MOCA_RELAY_EXEC_TOKEN"
 wait_latest_ready 150 || abort "harness did not reach a ready latest revision after flipping to the remote path"
 
 # --- Remote assertions: both must be consistent with execution on the RHEL worker, not
@@ -253,7 +256,7 @@ assert_verdict "remote/RedHat" "$resp_redhat" "FLAGGED" \
 # routing; the routing proof is the Alpine/Red Hat pair asserted above while the
 # worker was the only candidate. ---
 claim "Assert: worker disconnect re-leases a healthy sandbox"
-set_ksvc_env SH_REMOTE_SANDBOX=1 SH_RELAY_ADDR="$RELAY_ADDR" KAGENTI_SANDBOX_POOL_SELECTOR="$POOL_SELECTOR"
+set_ksvc_env SH_REMOTE_SANDBOX=1 SH_RELAY_ADDR="$RELAY_ADDR" KAGENTI_SANDBOX_POOL_SELECTOR="$POOL_SELECTOR" MOCA_RELAY_EXEC_TOKEN="$MOCA_RELAY_EXEC_TOKEN"
 wait_latest_ready 150 || abort "harness did not reach a ready latest revision before the disconnect assertion"
 
 kubectl delete deploy "$WORKER_DEPLOY" -n "$NS" --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || true
