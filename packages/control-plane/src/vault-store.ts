@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { CpError } from './errors.js';
 import type {
   CredentialDescriptor,
@@ -27,7 +28,7 @@ export interface VaultStoreOptions {
   /** `VAULT_ADDR`, e.g. `https://vault.internal:8200`. */
   addr: string;
   /** Called per request, so a token file rewritten by Vault Agent is picked up without a restart. */
-  token: () => string;
+  token: () => string | Promise<string>;
   /** `VAULT_NAMESPACE` (Vault Enterprise / HCP); omitted from requests when unset. */
   namespace?: string;
   /** The KV v2 mount (`SH_VAULT_KV_MOUNT`, default `secret`). */
@@ -75,7 +76,7 @@ const trimSlashes = (s: string): string => {
  */
 export class VaultCredentialStore implements CredentialStore {
   private readonly base: string;
-  private readonly token: () => string;
+  private readonly token: () => string | Promise<string>;
   private readonly namespace?: string;
   private readonly keks: Buffer[];
   private readonly fetchImpl: VaultFetch;
@@ -108,10 +109,10 @@ export class VaultCredentialStore implements CredentialStore {
     return `${this.base}/${subjectHash(subject)}`;
   }
 
-  private headers(): Record<string, string> {
+  private async headers(): Promise<Record<string, string>> {
     let token: string;
     try {
-      token = this.token();
+      token = await this.token();
     } catch {
       // An unreadable VAULT_TOKEN_FILE: the store is not answering, and the path (which may name a
       // secret's location) stays out of the caller's error.
@@ -133,7 +134,7 @@ export class VaultCredentialStore implements CredentialStore {
     url: string,
     body?: unknown,
   ): Promise<{ status: number; json: unknown }> {
-    const headers = this.headers();
+    const headers = await this.headers();
     let res: { status: number; text(): Promise<string> };
     let text: string;
     try {
@@ -241,7 +242,7 @@ function isCasMismatch(json: unknown): boolean {
 }
 
 /** `VAULT_TOKEN`, or the CURRENT contents of `VAULT_TOKEN_FILE` -- exactly one of them. */
-export function vaultTokenSource(env: NodeJS.ProcessEnv): () => string {
+export function vaultTokenSource(env: NodeJS.ProcessEnv): () => string | Promise<string> {
   const direct = env.VAULT_TOKEN;
   const file = env.VAULT_TOKEN_FILE;
   if (direct && file) {
@@ -249,14 +250,15 @@ export function vaultTokenSource(env: NodeJS.ProcessEnv): () => string {
   }
   if (direct) return () => direct;
   if (file) {
-    const readToken = (): string => {
-      const t = readFileSync(file, 'utf8').trim();
+    const check = (raw: string): string => {
+      const t = raw.trim();
       if (!t) throw new Error(`VAULT_TOKEN_FILE ${file} is empty`);
       return t;
     };
-    // Read once now, so an unreadable or empty file fails STARTUP with its name in the log.
-    readToken();
-    return readToken;
+    // Read once now, synchronously, so an unreadable or empty file fails STARTUP with its name in
+    // the log. Per request it is an async read, so a slow disk never blocks the event loop.
+    check(readFileSync(file, 'utf8'));
+    return async () => check(await readFile(file, 'utf8'));
   }
   throw new Error('the vault credential store needs VAULT_TOKEN or VAULT_TOKEN_FILE');
 }

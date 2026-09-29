@@ -21,9 +21,26 @@ export function subjectHash(subject: string): string {
   return createHash('sha256').update(subject).digest('hex').slice(0, 16);
 }
 
+/**
+ * The document AS READ from the backend: only its envelope (`v`, `credentials`) is checked, and
+ * everything inside -- entries this version cannot read, descriptor fields it does not know, any
+ * top-level field -- is kept exactly as stored. Writes change ONE named entry and carry the rest
+ * back untouched; entries are parsed only to answer `get` and `list`.
+ *
+ * Rebuilding the document from what this version understood and writing THAT back would make the
+ * first put or delete for a subject silently erase every row it skipped. With several Vault-backed
+ * replicas that is a rolling upgrade (or rollback) in which an older replica deletes each credential
+ * a newer one wrote. The Kubernetes store never had the problem: it merge-patches single keys.
+ */
 export interface SubjectDocument {
   v: 1;
-  credentials: Record<string, { descriptor: CredentialDescriptor; sealed: string }>;
+  credentials: Record<string, unknown>;
+  [field: string]: unknown;
+}
+
+interface Entry {
+  descriptor: CredentialDescriptor;
+  sealed: string;
 }
 
 export const emptyDocument = (): SubjectDocument => ({ v: 1, credentials: {} });
@@ -34,11 +51,8 @@ const isRecord = (v: unknown): v is Record<string, unknown> =>
 /**
  * Check a document read back from a backend, refusing in a TYPED way. A corrupt or foreign file is
  * "the credential store is not answering usefully" (503), not "the control plane has a bug" (500) --
- * the same reasoning as k8s-secret-store.ts's parseSecretJson.
- *
- * An entry whose descriptor is incomplete is dropped rather than failing the whole document, which
- * mirrors the Kubernetes store skipping a data key that has no annotations: one bad row must not
- * lock a subject out of every other credential they hold.
+ * the same reasoning as k8s-secret-store.ts's parseSecretJson. A version other than 1 is refused
+ * outright, reads and writes alike: this code cannot know which of its fields a write would lose.
  */
 export function parseDocument(raw: unknown): SubjectDocument {
   if (!isRecord(raw) || raw.v !== 1 || !isRecord(raw.credentials)) {
@@ -47,37 +61,45 @@ export function parseDocument(raw: unknown): SubjectDocument {
       'the credential store returned an unexpected shape',
     );
   }
-  const out = emptyDocument();
-  for (const [name, entry] of Object.entries(raw.credentials)) {
-    if (!isRecord(entry) || typeof entry.sealed !== 'string') continue;
-    const d = entry.descriptor;
-    if (
-      !isRecord(d) ||
-      d.name !== name ||
-      typeof d.kind !== 'string' ||
-      typeof d.consumer !== 'string' ||
-      !isRecord(d.destination) ||
-      !Array.isArray(d.destination.hosts) ||
-      !isRecord(d.binding)
-    ) {
-      continue;
-    }
-    out.credentials[name] = {
-      descriptor: {
-        name,
-        kind: d.kind,
-        consumer: d.consumer as Consumer,
-        destination: { hosts: d.destination.hosts as string[] },
-        binding: d.binding as unknown as CredentialDescriptor['binding'],
-        endpoint: typeof d.endpoint === 'string' ? d.endpoint : null,
-      },
-      sealed: entry.sealed,
-    };
-  }
-  return out;
+  return raw as SubjectDocument;
 }
 
-/** A copy with `cred` sealed in under `keks[0]`; the input document is not mutated. */
+/**
+ * One entry, or null when this version cannot read it. A null entry is skipped by `get` and `list`,
+ * which mirrors the Kubernetes store skipping a data key with no annotations: one bad row must not
+ * lock a subject out of every other credential they hold. It is NOT removed -- see SubjectDocument.
+ */
+function parseEntry(name: string, entry: unknown): Entry | null {
+  if (!isRecord(entry) || typeof entry.sealed !== 'string') return null;
+  const d = entry.descriptor;
+  if (
+    !isRecord(d) ||
+    d.name !== name ||
+    typeof d.kind !== 'string' ||
+    typeof d.consumer !== 'string' ||
+    !isRecord(d.destination) ||
+    !Array.isArray(d.destination.hosts) ||
+    !isRecord(d.binding)
+  ) {
+    return null;
+  }
+  return {
+    descriptor: {
+      name,
+      kind: d.kind,
+      consumer: d.consumer as Consumer,
+      destination: { hosts: d.destination.hosts as string[] },
+      binding: d.binding as unknown as CredentialDescriptor['binding'],
+      endpoint: typeof d.endpoint === 'string' ? d.endpoint : null,
+    },
+    sealed: entry.sealed,
+  };
+}
+
+/**
+ * A copy with `cred` sealed in under `keks[0]`. Every other entry and field is carried over as
+ * stored; the input document is not mutated.
+ */
 export function withCredential(
   doc: SubjectDocument,
   keks: Buffer[],
@@ -85,29 +107,25 @@ export function withCredential(
   cred: StoredCredential,
 ): SubjectDocument {
   const { descriptor, secret } = cred;
-  return {
-    v: 1,
-    credentials: {
-      ...doc.credentials,
-      [descriptor.name]: {
-        descriptor,
-        sealed: seal(keks, subject, descriptor.name, JSON.stringify(secret)),
-      },
-    },
+  const entry: Entry = {
+    descriptor,
+    sealed: seal(keks, subject, descriptor.name, JSON.stringify(secret)),
   };
+  return { ...doc, credentials: { ...doc.credentials, [descriptor.name]: entry } };
 }
 
-/** A copy without `name`; the input document is not mutated. */
+/** A copy without `name`, everything else as stored; the input document is not mutated. */
 export function withoutCredential(doc: SubjectDocument, name: string): SubjectDocument {
   const credentials = { ...doc.credentials };
   delete credentials[name];
-  return { v: 1, credentials };
+  return { ...doc, credentials };
 }
 
-/** Descriptors only, sorted by name -- this path never touches the KEK (spec §6.2). */
+/** Descriptors of every READABLE entry, sorted by name -- never touches the KEK (spec §6.2). */
 export function describeAll(doc: SubjectDocument): CredentialDescriptor[] {
-  return Object.values(doc.credentials)
-    .map((e) => e.descriptor)
+  return Object.entries(doc.credentials)
+    .map(([name, raw]) => parseEntry(name, raw)?.descriptor)
+    .filter((d): d is CredentialDescriptor => d !== undefined)
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -120,7 +138,8 @@ export function readCredential(
   // Own-property only: a credential name is caller-chosen, and `doc.credentials['constructor']`
   // must be "absent", not Object.prototype's function.
   if (!Object.hasOwn(doc.credentials, name)) return null;
-  const entry = doc.credentials[name]!;
+  const entry = parseEntry(name, doc.credentials[name]);
+  if (!entry) return null;
   const plaintext = openOrBlameSubject(keks, subject, name, entry.sealed);
   return { descriptor: entry.descriptor, secret: JSON.parse(plaintext) as Record<string, string> };
 }

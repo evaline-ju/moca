@@ -88,6 +88,11 @@ storeContract('VaultCredentialStore', () => {
   return {
     storeWith: (keks) => makeStore(v, keks),
     raw: () => JSON.stringify([...v.kv.entries()]),
+    plant: (subject, edit) => {
+      const path = `moca/credentials/${subjectHash(subject)}`;
+      const cur = v.kv.get(path)!;
+      v.kv.set(path, { version: cur.version + 1, data: edit(cur.data as Record<string, any>) });
+    },
   };
 });
 
@@ -219,13 +224,24 @@ describe('vaultTokenSource', () => {
     expect(vaultTokenSource({ VAULT_TOKEN: TOKEN })()).toBe(TOKEN);
   });
 
-  it('re-reads VAULT_TOKEN_FILE on every call, so a Vault Agent renewal is picked up', () => {
+  it('re-reads VAULT_TOKEN_FILE on every call, so a Vault Agent renewal is picked up', async () => {
     const file = join(mkdtempSync(join(tmpdir(), 'cp-vault-')), 'token');
     writeFileSync(file, 'hvs.first\n'); // notsecret
     const source = vaultTokenSource({ VAULT_TOKEN_FILE: file });
-    expect(source()).toBe('hvs.first'); // notsecret
+    expect(await source()).toBe('hvs.first'); // notsecret
     writeFileSync(file, 'hvs.second'); // notsecret
-    expect(source()).toBe('hvs.second'); // notsecret
+    expect(await source()).toBe('hvs.second'); // notsecret
+  });
+
+  it('a token file emptied after startup fails that request as credential_unavailable', async () => {
+    const file = join(mkdtempSync(join(tmpdir(), 'cp-vault-')), 'token');
+    writeFileSync(file, TOKEN);
+    const store = makeStore(fakeVault(), [newKek()], {
+      token: vaultTokenSource({ VAULT_TOKEN_FILE: file }),
+    });
+    expect(await store.list(ALICE)).toEqual([]);
+    writeFileSync(file, '');
+    await expect(store.list(ALICE)).rejects.toMatchObject({ code: 'credential_unavailable' });
   });
 
   it('fails at startup on a missing or empty token file, on both settings, and on neither', () => {

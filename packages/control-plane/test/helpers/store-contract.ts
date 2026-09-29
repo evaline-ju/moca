@@ -32,6 +32,8 @@ export const newKek = (): Buffer => randomBytes(KEK_BYTES); // notsecret -- gene
 export interface ContractBackend {
   storeWith: (keks: Buffer[]) => CredentialStore;
   raw: () => string;
+  /** Rewrite `subject`'s stored document in place, as another writer (a newer replica) would. */
+  plant: (subject: string, edit: (doc: Record<string, any>) => Record<string, any>) => void;
 }
 
 export function storeContract(label: string, backend: () => ContractBackend): void {
@@ -40,7 +42,7 @@ export function storeContract(label: string, backend: () => ContractBackend): vo
     beforeEach(() => {
       b = backend();
     });
-    const make = (keks: Buffer[]) => ({ store: b.storeWith(keks), raw: b.raw });
+    const make = (keks: Buffer[]) => ({ store: b.storeWith(keks), raw: b.raw, plant: b.plant });
 
     it('round-trips a credential by exact name, and an unknown name is null', async () => {
       const { store } = make([newKek()]);
@@ -121,6 +123,35 @@ export function storeContract(label: string, backend: () => ContractBackend): vo
       expect(await store.get(ALICE, 'drop')).toBeNull();
       expect((await store.list(ALICE)).map((d) => d.name)).toEqual(['keep']);
       expect(raw()).not.toContain('"drop"');
+    });
+
+    it('a write keeps what it cannot read: unreadable rows, unknown fields, other versions` data', async () => {
+      const { store, plant, raw } = make([newKek()]);
+      await store.put(ALICE, cred('known'));
+      // What a NEWER replica might have written: a row in a shape this version cannot parse, an
+      // extra descriptor field on a row it can, and a top-level field it has never heard of.
+      plant(ALICE, (doc) => ({
+        ...doc,
+        futureTopLevel: { keep: true },
+        credentials: {
+          ...doc.credentials,
+          'from-the-future': { descriptorV2: { name: 'from-the-future' }, sealedV2: 'opaque-v2' },
+          known: {
+            ...doc.credentials.known,
+            descriptor: { ...doc.credentials.known.descriptor, rotationPolicy: 'weekly' },
+          },
+        },
+      }));
+      // Read paths skip the unreadable row and still see the rest.
+      expect((await store.list(ALICE)).map((d) => d.name)).toEqual(['known']);
+      expect(await store.get(ALICE, 'from-the-future')).toBeNull();
+
+      await store.put(ALICE, cred('unrelated'));
+      await store.delete(ALICE, 'unrelated');
+      for (const kept of ['opaque-v2', 'sealedV2', 'futureTopLevel', 'rotationPolicy']) {
+        expect(raw(), kept).toContain(kept);
+      }
+      expect((await store.get(ALICE, 'known'))?.secret).toEqual({ token: 'ghp-fake' }); // notsecret
     });
 
     describe('KEK rotation', () => {

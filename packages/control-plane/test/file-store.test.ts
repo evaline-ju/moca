@@ -24,6 +24,10 @@ storeContract('FileCredentialStore', () => {
       readdirSync(dir)
         .map((f) => readFileSync(join(dir, f), 'utf8'))
         .join('\n'),
+    plant: (subject, edit) => {
+      const file = join(dir, `${subjectHash(subject)}.json`);
+      writeFileSync(file, JSON.stringify(edit(JSON.parse(readFileSync(file, 'utf8')))));
+    },
   };
 });
 
