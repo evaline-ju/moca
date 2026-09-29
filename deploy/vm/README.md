@@ -194,19 +194,30 @@ the sandbox subnet; everything else arriving on the bridge, IPv6 included, is dr
 (`MOCA_RELAY_EXEC_ADDR=127.0.0.1:9444`), and the exec token (`MOCA_RELAY_EXEC_TOKEN`, held only by
 the relay and the supervisor) is the control.
 
-**This is the item in this deployment layer least verified on real hardware.** Nobody has run
-this script against an actual podman installation; `host.containers.internal` pinned to the
-`moca-sandbox` gateway, plus an explicit `--add-host`, is the documented, version-independent
-mechanism, but rootful vs. rootless podman, firewall rules, and SELinux/AppArmor policy can all
-still block the container from reaching the host's bound port in ways a unit test cannot see.
-The nftables rule above and the gateway alias fall in the same gap: the shell tests mock
-`podman` and `nft`, so nothing here has confirmed against a real kernel that the attach port is
-actually reachable and everything else is actually dropped. `isolate=strict` is in it too: it needs
-a netavark that supports it, and `setup-vm.sh` refuses to continue when the created network does
-not report `isolate=strict`, but no real run has yet confirmed the isolation it provides. If a sandbox container cannot
-attach on a real VM, `SH_SANDBOX_RELAY_ADDR` (or, if podman itself cannot resolve
-`host.containers.internal`, the VM's actual gateway or bridge IP) is the override to reach for
-first; `sudo nft list table inet moca_sandbox` shows the loaded rules.
+**What has been verified on a real host, and what has not.** One live run (2026-09-29) on Amazon
+Linux 2023 (kernel 6.18), with rootful podman 5.8.7 (a static build — Amazon Linux 2023 packages no
+podman), netavark 1.17.2 using its nftables firewall driver, and nftables 1.0.4, confirmed from
+inside a sandbox container:
+
+- the relay's attach port on the gateway connects;
+- every other host port tried (22, 8080, 8081, 9444, 6379) is dropped, over IPv4 and over IPv6
+  link-local;
+- DNS resolves and outbound internet works;
+- Redis on podman's default network is unreachable (`isolate=strict`).
+
+On the same host:
+
+- with the table made unloadable, `sh-relay.service` and `podman-restart.service` both refuse to
+  start;
+- a pre-MI1 install migrates to the split exec listener;
+- a fresh install with the default image completes a turn.
+
+Not verified: SELinux- or AppArmor-enforcing hosts, rootless podman, a distro-packaged podman, and
+an actual reboot — the fail-closed ordering was exercised with `systemctl`, not a boot.
+
+If a sandbox container cannot attach on a real VM, `SH_SANDBOX_RELAY_ADDR` (or, if podman itself
+cannot resolve `host.containers.internal`, the VM's actual gateway or bridge IP) is the override to
+reach for first; `sudo nft list table inet moca_sandbox` shows the loaded rules.
 
 ## Reboots
 

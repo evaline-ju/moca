@@ -425,8 +425,8 @@ NFT
   systemctl start moca-sandbox-firewall.service
 }
 
-# Reaching the host's relay port from inside a container is the one piece of this deployment
-# most likely to need a real VM run to confirm -- see the report's "Still unverified" section.
+# Reaching the host's relay port from inside a container has been confirmed on one real host
+# (deploy/vm/README.md lists what was and was not verified there).
 # host.containers.internal is podman's documented analogue of Docker's host.docker.internal
 # (podman-run(1): the host-gateway special string), but the alias is now pinned to the
 # moca-sandbox gateway rather than podman's host-gateway value: host-gateway resolves to whatever
