@@ -46,6 +46,13 @@ beforeEach(() => {
   );
   mkdirSync(join(agentDir, 'prompts'), { recursive: true });
   writeFileSync(join(agentDir, 'prompts', 'planted-prompt.md'), 'PLANTED-PROMPT-TEMPLATE\n');
+  // An extension in the AGENT directory as well as the project one: `projectTrusted: false` alone
+  // already suppresses the project's, so only this one shows that `noExtensions` itself holds.
+  mkdirSync(join(agentDir, 'extensions'), { recursive: true });
+  writeFileSync(
+    join(agentDir, 'extensions', 'planted-agent.ts'),
+    'export default function () { (globalThis as any).__MI1_PLANTED_AGENT_EXTENSION = true; }\n',
+  );
   // A theme in the agent directory: pi's own bundled dark theme, renamed, so it is certainly valid.
   mkdirSync(join(agentDir, 'themes'), { recursive: true });
   writeFileSync(
@@ -57,6 +64,7 @@ beforeEach(() => {
   savedAgentDir = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = agentDir;
   delete (globalThis as Record<string, unknown>).__MI1_PLANTED_EXTENSION;
+  delete (globalThis as Record<string, unknown>).__MI1_PLANTED_AGENT_EXTENSION;
 });
 
 afterEach(() => {
@@ -87,6 +95,7 @@ describe('server-mode resource loader (MI1 R4)', () => {
     expect(loader.getAgentsFiles().agentsFiles).toEqual([]);
     expect(loader.getExtensions().extensions).toEqual([]);
     expect((globalThis as Record<string, unknown>).__MI1_PLANTED_EXTENSION).toBeUndefined();
+    expect((globalThis as Record<string, unknown>).__MI1_PLANTED_AGENT_EXTENSION).toBeUndefined();
   });
 
   it('outside server mode the same files ARE picked up — each assertion above is sensitive', async () => {
@@ -103,6 +112,7 @@ describe('server-mode resource loader (MI1 R4)', () => {
     ).toContain('PLANTED-AGENTS');
     expect(loader.getExtensions().extensions.length).toBeGreaterThan(0);
     expect((globalThis as Record<string, unknown>).__MI1_PLANTED_EXTENSION).toBe(true);
+    expect((globalThis as Record<string, unknown>).__MI1_PLANTED_AGENT_EXTENSION).toBe(true);
   });
 
   it('discovers no skill, prompt template or theme in server mode', async () => {
