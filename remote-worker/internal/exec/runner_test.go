@@ -529,6 +529,8 @@ func TestCommandsDoNotInheritWorkerSettings(t *testing.T) {
 	t.Setenv("RELAY_TLS", "planted-tls")
 	t.Setenv("SANDBOX_ID", "planted-id")
 	t.Setenv("WORKER_MAX_CONCURRENT", "planted-max")
+	t.Setenv("SANDBOX_IMAGE", "planted-image")
+	t.Setenv("SANDBOX_TRUST", "planted-trust")
 	t.Setenv("SANDBOX_TOKEN_sbx1", "planted-per-sandbox") // notsecret
 	t.Setenv("MOCA_RELAY_EXEC_TOKEN", "planted-exec")     // notsecret
 	t.Setenv("SH_SOMETHING", "planted-sh")
