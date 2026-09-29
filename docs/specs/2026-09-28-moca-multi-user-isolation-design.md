@@ -815,6 +815,15 @@ prediction sealed before E8's next rung, since it sits on the hot path.
   Cortex's strengths and the reason S6 exists.
 - **An external authorization server** (D5).
 - **A multi-user mode on the Kubernetes path.** RA1 deprecates it; it keeps `single` behaviour.
+- **Subject on every log line.** P5 requires per-session attribution per log line
+  (`2026-09-06-p5-session-isolation-design.md`, the `TurnConfig.subject` paragraph). S1 logs no
+  subject, so in a worker multiplexing S sessions a line cannot be attributed. This belongs to the
+  first slice that multiplexes users (S2).
+- **Per-user admission quota.** `packages/supervisor/src/admission.ts` bounds the worker as a whole,
+  so one user can use every slot. This belongs with S2's grants, which name the user.
+- **Tenant-scoped session listing.** `RedisSessionBackend.list()`
+  (`packages/session-backend/src/redis-backend.ts`) returns every tenant's sessions. No route
+  exposes it to a caller today, but no caller-facing use may be added before S2 scopes it.
 - **Per-subject PVC authorization and subject-scoped workload names** for `/workloads`. Under `multi`
   a caller-named `workspace.claimName` is refused instead (§4.3). `docs/context-service.md` states the
   boundary.
