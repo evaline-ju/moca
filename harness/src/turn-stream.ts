@@ -80,12 +80,21 @@ export function sseExtension(
 }
 
 /**
+ * A clean finish, in BOTH vocabularies a TurnResult can carry: pi's normalized one (`stop`,
+ * `length` -- what executeTurn copies from the last message, so what every real turn reports) and the
+ * Anthropic wire's (`end_turn`, `max_tokens` -- run-turn.ts's own default when there is no message).
+ * Matching only the wire's made every real, cleanly finished SSE turn end in an `error` frame.
+ */
+const CLEAN_STOP_REASONS = new Set(['stop', 'length', 'end_turn', 'max_tokens']);
+
+/**
  * Derive the terminal frame from the returned TurnResult (§3.4). `done` for a clean finish
- * (end_turn/max_tokens), `error` otherwise (error/aborted). Both carry every TurnResult field, so a
- * streamed client ends with the same facts a sync client reads; only the event NAME differs.
+ * (CLEAN_STOP_REASONS), `error` otherwise (error/aborted/toolUse). Both carry every TurnResult
+ * field, so a streamed client ends with the same facts a sync client reads; only the event NAME
+ * differs.
  */
 export function terminalFrame(result: TurnResult): TurnStreamFrame {
-  const clean = result.stopReason === 'end_turn' || result.stopReason === 'max_tokens';
+  const clean = CLEAN_STOP_REASONS.has(result.stopReason);
   if (clean) {
     return {
       type: 'done',

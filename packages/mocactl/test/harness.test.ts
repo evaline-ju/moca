@@ -40,6 +40,39 @@ describe('HarnessClient.streamTurn', () => {
     expect(calls[0].headers.authorization).toBe('Bearer st');
   });
 
+  // The sync body carries executeTurn's stopReason, which is pi's normalized vocabulary ('stop',
+  // 'length'), not the Anthropic wire's end_turn/max_tokens -- the same mismatch that made the
+  // server's own terminalFrame end clean turns in `error` (#348).
+  it.each(['stop', 'length', 'end_turn', 'max_tokens'])(
+    "a sync JSON reply that stopped with '%s' ends in done",
+    async (stopReason) => {
+      const { fetch } = scriptedFetch(json({ sessionId: 's1', response: 'pong', stopReason }));
+      const frames = await collect(
+        new HarnessClient('http://h', fetch).streamTurn({
+          sessionId: 's1',
+          prompt: 'p',
+          token: 't',
+        }),
+      );
+      expect(frames.map((f) => f.type)).toEqual(['text', 'done']);
+    },
+  );
+
+  it.each(['error', 'aborted', 'toolUse'])(
+    "a sync JSON reply that stopped with '%s' ends in error",
+    async (stopReason) => {
+      const { fetch } = scriptedFetch(json({ sessionId: 's1', response: '', stopReason }));
+      const frames = await collect(
+        new HarnessClient('http://h', fetch).streamTurn({
+          sessionId: 's1',
+          prompt: 'p',
+          token: 't',
+        }),
+      );
+      expect(frames.at(-1)?.type).toBe('error');
+    },
+  );
+
   it('stops at the terminal frame even if more bytes follow', async () => {
     const { fetch } = scriptedFetch(
       sseResponse([
