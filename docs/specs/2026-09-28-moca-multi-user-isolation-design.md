@@ -801,8 +801,9 @@ attack surface for nothing.
 
 ## 15. Configuration surface
 
-New settings use the `MOCA_` prefix (see the header's naming note). Secrets are **files**, never
-environment variables (§6.7).
+New settings use the `MOCA_` prefix (see the header's naming note). From S2, secrets are **files**,
+never environment variables (§6.7); S1's one new secret, `MOCA_RELAY_EXEC_TOKEN`, is an environment
+variable until then.
 
 | Setting                                | Read by                                | Default                    | Meaning                                                                                          |
 | -------------------------------------- | -------------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------ |
