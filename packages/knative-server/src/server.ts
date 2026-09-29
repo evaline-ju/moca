@@ -27,6 +27,7 @@ import {
 } from './context-service.js';
 import { CpError, statusFor } from '@sh/control-plane';
 import {
+  authenticateSubject,
   authorizeRunRead,
   resolveTurnAuth,
   runtimeFieldsForTurn,
@@ -412,6 +413,11 @@ function getResultStore(): RedisResultStore {
 
 const workloadKey = (id: string) => `sh:workload:${id}`;
 
+const withOwner = (record: WorkloadRecord, subject: string | null): WorkloadRecord => {
+  const { owner: _ignored, ...rest } = record;
+  return subject === null ? rest : { ...rest, owner: subject };
+};
+
 async function saveWorkload(record: WorkloadRecord): Promise<void> {
   await getResultStore().set(workloadKey(record.workloadId), JSON.stringify(record));
 }
@@ -437,17 +443,49 @@ function contextServiceFailure(operation: string, err: unknown, res: ServerRespo
   res.writeHead(502, JSON_HEADERS).end(JSON.stringify({ error: 'context_service_error' }));
 }
 
-async function resolveRunWorkload(body: any, res: ServerResponse): Promise<any | null> {
+/**
+ * A workload belongs to the subject that created it. A caller may reach one only with the same
+ * subject — an unowned workload (created unauthenticated) only without one. A mismatch reads as
+ * `workload_not_found`, so a workload ID is not an existence oracle across subjects.
+ */
+const ownedBy = (record: WorkloadRecord, subject: string | null): boolean =>
+  (record.owner ?? null) === subject;
+
+/**
+ * The one place a run acquires a sandbox pool selector. `/runs` strips any caller-supplied selector
+ * as internal routing state, so this lookup must not re-admit another subject's pool: the workload
+ * has to be owned by the run's caller (MI1 R7).
+ */
+async function resolveRunWorkload(
+  body: any,
+  subject: string | null,
+  res: ServerResponse,
+): Promise<any | null> {
   if (!body?.workloadId) return body;
   const record = await findWorkload(body.workloadId);
-  if (!record || record.status === 'deleted') {
+  if (!record || record.status === 'deleted' || !ownedBy(record, subject)) {
     res.writeHead(404, JSON_HEADERS).end(JSON.stringify({ error: 'workload_not_found' }));
     return null;
   }
   return { ...body, sandboxPoolSelector: record.sandboxSelector };
 }
 
+/**
+ * Authenticate a `/workloads` request, writing the refusal itself. Resolves to the caller's subject,
+ * `null` for an allowed unauthenticated caller, or `undefined` when the request was refused.
+ */
+function workloadCaller(req: IncomingMessage, res: ServerResponse): string | null | undefined {
+  try {
+    return authenticateSubject(req.headers, turnAuthDeps());
+  } catch (err) {
+    writeAuthError(res, err);
+    return undefined;
+  }
+}
+
 async function handleCreateWorkload(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const subject = workloadCaller(req, res);
+  if (subject === undefined) return;
   if (!requireContextService(res)) return;
   let spec: WorkloadRequest;
   try {
@@ -461,8 +499,14 @@ async function handleCreateWorkload(req: IncomingMessage, res: ServerResponse): 
     res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'workload_name_invalid' }));
     return;
   }
+  // A live workload of another subject's cannot be claimed by re-creating its name.
+  const existing = await findWorkload(workloadId);
+  if (existing && existing.status !== 'deleted' && !ownedBy(existing, subject)) {
+    res.writeHead(409, JSON_HEADERS).end(JSON.stringify({ error: 'workload_name_taken' }));
+    return;
+  }
   try {
-    const record = await createWorkload(workloadId, spec);
+    const record = withOwner(await createWorkload(workloadId, spec), subject);
     await saveWorkload(record);
     res.writeHead(201, JSON_HEADERS).end(JSON.stringify(record));
   } catch (err) {
@@ -470,14 +514,22 @@ async function handleCreateWorkload(req: IncomingMessage, res: ServerResponse): 
   }
 }
 
-async function handleGetWorkload(id: string, res: ServerResponse): Promise<void> {
+async function handleGetWorkload(
+  req: IncomingMessage,
+  id: string,
+  res: ServerResponse,
+): Promise<void> {
+  const subject = workloadCaller(req, res);
+  if (subject === undefined) return;
   if (!requireContextService(res)) return;
-  if (!(await findWorkload(id))) {
+  const stored = await findWorkload(id);
+  if (!stored || !ownedBy(stored, subject)) {
     res.writeHead(404, JSON_HEADERS).end(JSON.stringify({ error: 'workload_not_found' }));
     return;
   }
   try {
-    const record = await getWorkload(id);
+    // Context Service knows nothing of owners: carry the stored one over the refreshed record.
+    const record = withOwner(await getWorkload(id), subject);
     await saveWorkload(record);
     res.writeHead(200, JSON_HEADERS).end(JSON.stringify(record));
   } catch (err) {
@@ -485,10 +537,16 @@ async function handleGetWorkload(id: string, res: ServerResponse): Promise<void>
   }
 }
 
-async function handleDeleteWorkload(id: string, res: ServerResponse): Promise<void> {
+async function handleDeleteWorkload(
+  req: IncomingMessage,
+  id: string,
+  res: ServerResponse,
+): Promise<void> {
+  const subject = workloadCaller(req, res);
+  if (subject === undefined) return;
   if (!requireContextService(res)) return;
   const record = await findWorkload(id);
-  if (!record || record.status === 'deleted') {
+  if (!record || record.status === 'deleted' || !ownedBy(record, subject)) {
     res.writeHead(404, JSON_HEADERS).end(JSON.stringify({ error: 'workload_not_found' }));
     return;
   }
@@ -507,7 +565,8 @@ async function handleEnqueueLeafParsed(body: any, res: ServerResponse): Promise<
     return;
   }
   if (rejectInvalidConfigRef(body, res)) return;
-  body = await resolveRunWorkload(body, res);
+  // Only an unauthenticated caller reaches the queue (an authenticated async run is a 501).
+  body = await resolveRunWorkload(body, null, res);
   if (!body) return;
   const q = getQueue();
   await q.ensureGroup();
@@ -528,7 +587,7 @@ async function handleRunLeafParsed(
     return;
   }
   if (rejectInvalidConfigRef(body, res)) return;
-  body = await resolveRunWorkload(body, res);
+  body = await resolveRunWorkload(body, auth?.subject ?? null, res);
   if (!body) return;
 
   // Spec §4.3: on pool saturation the sync path bounded-waits with backoff, then 503 Retry-After.
@@ -640,14 +699,14 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
 
   const workloadMatch = url.match(/^\/workloads\/([^/?]+)$/);
   if (workloadMatch && req.method === 'GET') {
-    handleGetWorkload(decodeURIComponent(workloadMatch[1]), res).catch((err) => {
+    handleGetWorkload(req, decodeURIComponent(workloadMatch[1]), res).catch((err) => {
       if (!res.headersSent)
         res.writeHead(500, JSON_HEADERS).end(JSON.stringify({ error: String(err) }));
     });
     return;
   }
   if (workloadMatch && req.method === 'DELETE') {
-    handleDeleteWorkload(decodeURIComponent(workloadMatch[1]), res).catch((err) => {
+    handleDeleteWorkload(req, decodeURIComponent(workloadMatch[1]), res).catch((err) => {
       if (!res.headersSent)
         res.writeHead(500, JSON_HEADERS).end(JSON.stringify({ error: String(err) }));
     });
