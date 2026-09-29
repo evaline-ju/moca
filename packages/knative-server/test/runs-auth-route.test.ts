@@ -172,6 +172,17 @@ describe('GET /runs/status under SH_REQUIRE_AUTH=true (MI1 R7)', () => {
     expect((await call('GET', '/runs/status?sessionId=sid-1')).status).toBe(401);
   });
 
+  it('refuses a status read that names no session, with or without a token', async () => {
+    for (const path of ['/runs/status', '/runs/status?sessionId=', '/run-leaf/status']) {
+      const anonymous = await call('GET', path);
+      expect(anonymous.status).toBe(400);
+      expect(anonymous.json.error).toBe('sessionId_required');
+      const withToken = await call('GET', path, undefined, tokenFor('sid-1'));
+      expect(withToken.status).toBe(400);
+      expect(withToken.json.error).toBe('sessionId_required');
+    }
+  });
+
   it("refuses a valid token reading another session's status", async () => {
     const r = await call('GET', '/runs/status?sessionId=sid-2', undefined, tokenFor('sid-1'));
     expect(r.status).toBe(400);

@@ -666,20 +666,24 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
     const statusRoute = async () => {
       const statusUrl = new URL(url, 'http://localhost');
       const sessionId = statusUrl.searchParams.get('sessionId');
-      if (sessionId) {
-        let authenticated: boolean;
-        try {
-          authenticated = authorizeRunRead(req.headers, sessionId, turnAuthDeps());
-        } catch (err) {
-          writeAuthError(res, err, sessionId);
-          return;
-        }
-        // An authenticated read may not name a tenant: the session token alone scopes it (MI1 R7).
-        // Unauthenticated callers (SH_REQUIRE_AUTH off, no token) keep the tenant parameter.
-        if (authenticated && statusUrl.searchParams.has('tenant')) {
-          res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'tenant_not_allowed' }));
-          return;
-        }
+      // A status read always names its session, and is always authorized before anything is read:
+      // a request without one is refused here rather than left to the handler (MI1 R7).
+      if (!sessionId) {
+        res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'sessionId_required' }));
+        return;
+      }
+      let authenticated: boolean;
+      try {
+        authenticated = authorizeRunRead(req.headers, sessionId, turnAuthDeps());
+      } catch (err) {
+        writeAuthError(res, err, sessionId);
+        return;
+      }
+      // An authenticated read may not name a tenant: the session token alone scopes it (MI1 R7).
+      // Unauthenticated callers (SH_REQUIRE_AUTH off, no token) keep the tenant parameter.
+      if (authenticated && statusUrl.searchParams.has('tenant')) {
+        res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'tenant_not_allowed' }));
+        return;
       }
       await handleLeafStatus(statusUrl, res);
     };
