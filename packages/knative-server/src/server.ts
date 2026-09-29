@@ -36,6 +36,7 @@ import {
   type TurnAuthDeps,
 } from './turn-auth.js';
 import { prepareServerProcess } from './server-process.js';
+import { readTenancy } from './tenancy.js';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
@@ -452,6 +453,29 @@ const ownedBy = (record: WorkloadRecord, subject: string | null): boolean =>
   (record.owner ?? null) === subject;
 
 /**
+ * Who may DELETE a workload: its owner, and ANY caller for an unowned one. A record written before
+ * workloads had owners carries none, and under SH_REQUIRE_AUTH=true no caller is unauthenticated --
+ * so without this it could be neither read, deleted nor re-created, and its pool and volume would
+ * leak with no API path to reclaim them. Deleting is the only thing a non-owner may do: an unowned
+ * workload was reachable by every caller before, so reclaiming it grants nothing new, while
+ * reading or running on it would.
+ */
+const mayDelete = (record: WorkloadRecord, subject: string | null): boolean =>
+  record.owner === undefined || ownedBy(record, subject);
+
+/**
+ * Context Service's reply names the pool it acted on. Every lookup here keys on the ID the caller
+ * asked for, so a reply naming a different pool is refused rather than stored under its own name --
+ * the ownership checks and the store must agree on which record they mean.
+ */
+function sameWorkload(record: WorkloadRecord, workloadId: string): WorkloadRecord {
+  if (record.workloadId !== workloadId) {
+    throw new Error(`Context Service answered for '${record.workloadId}', not '${workloadId}'`);
+  }
+  return record;
+}
+
+/**
  * The one place a run acquires a sandbox pool selector. `/runs` strips any caller-supplied selector
  * as internal routing state, so this lookup must not re-admit another subject's pool: the workload
  * has to be owned by the run's caller (MI1 R7).
@@ -499,6 +523,13 @@ async function handleCreateWorkload(req: IncomingMessage, res: ServerResponse): 
     res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'workload_name_invalid' }));
     return;
   }
+  // A caller-named claim is any PVC in the namespace: owning the workload says nothing about owning
+  // the volume, and nothing here or in Context Service authorizes one against the other. Refused
+  // under multi tenancy until claims are scoped to their subject (MI1 §4.3, §13).
+  if (spec.workspace?.claimName !== undefined && readTenancy(process.env) === 'multi') {
+    res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'claim_name_not_allowed' }));
+    return;
+  }
   // A live workload of another subject's cannot be claimed by re-creating its name.
   const existing = await findWorkload(workloadId);
   if (existing && existing.status !== 'deleted' && !ownedBy(existing, subject)) {
@@ -506,7 +537,10 @@ async function handleCreateWorkload(req: IncomingMessage, res: ServerResponse): 
     return;
   }
   try {
-    const record = withOwner(await createWorkload(workloadId, spec), subject);
+    const record = withOwner(
+      sameWorkload(await createWorkload(workloadId, spec), workloadId),
+      subject,
+    );
     await saveWorkload(record);
     res.writeHead(201, JSON_HEADERS).end(JSON.stringify(record));
   } catch (err) {
@@ -529,7 +563,7 @@ async function handleGetWorkload(
   }
   try {
     // Context Service knows nothing of owners: carry the stored one over the refreshed record.
-    const record = withOwner(await getWorkload(id), subject);
+    const record = withOwner(sameWorkload(await getWorkload(id), id), subject);
     await saveWorkload(record);
     res.writeHead(200, JSON_HEADERS).end(JSON.stringify(record));
   } catch (err) {
@@ -546,7 +580,7 @@ async function handleDeleteWorkload(
   if (subject === undefined) return;
   if (!requireContextService(res)) return;
   const record = await findWorkload(id);
-  if (!record || record.status === 'deleted' || !ownedBy(record, subject)) {
+  if (!record || record.status === 'deleted' || !mayDelete(record, subject)) {
     res.writeHead(404, JSON_HEADERS).end(JSON.stringify({ error: 'workload_not_found' }));
     return;
   }

@@ -48,8 +48,10 @@ import { startServer } from '../src/server.js';
 
 const { privateKey, publicKey } = generateKeyPairSync('ed25519');
 const signer = makeSigner(privateKey.export({ format: 'pem', type: 'pkcs8' }).toString());
+// Both callers share a tenant AND a sid, and differ only in `sub`: an owner keyed on either of the
+// other two would let BOB reach ALICE's workload, which the tests below would catch.
 const tokenFor = (sub: string, sid = 'run/i') =>
-  signer.mint({ sub, tenant: sub, roles: [], scope: ['turn:write'], sid, ttlSeconds: 300 });
+  signer.mint({ sub, tenant: 'acme', roles: [], scope: ['turn:write'], sid, ttlSeconds: 300 });
 const ALICE = tokenFor('github:alice');
 const BOB = tokenFor('github:bob');
 
@@ -63,6 +65,7 @@ const record = {
 };
 
 const KEYS = [
+  'MOCA_TENANCY',
   'SH_REQUIRE_AUTH',
   'SH_SESSION_TOKEN_PUBLIC_KEYS',
   'SH_CONTROL_PLANE_URL',
@@ -202,7 +205,107 @@ describe('/workloads under SH_REQUIRE_AUTH=true', () => {
   });
 });
 
+describe('/workloads under SH_REQUIRE_AUTH=true: records the harness did not write', () => {
+  beforeEach(() => {
+    process.env.SH_REQUIRE_AUTH = 'true';
+  });
+
+  it("stores the caller as owner, never an owner Context Service's reply carries", async () => {
+    createWorkload.mockResolvedValue({ ...record, owner: 'github:carol' });
+    const created = await call('POST', '/workloads', ALICE, { name: 'demo-workload' });
+    expect(created.json.owner).toBe('github:alice');
+    expect(JSON.parse(records.get('sh:workload:demo-workload')!).owner).toBe('github:alice');
+
+    getWorkload.mockResolvedValue({ ...record, owner: 'github:carol' });
+    expect((await call('GET', '/workloads/demo-workload', ALICE)).json.owner).toBe('github:alice');
+    expect(JSON.parse(records.get('sh:workload:demo-workload')!).owner).toBe('github:alice');
+  });
+
+  it('refuses a Context Service reply that names a different workload', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    createWorkload.mockResolvedValue({ ...record, workloadId: 'someone-else' });
+    expect((await call('POST', '/workloads', ALICE, { name: 'demo-workload' })).status).toBe(502);
+    expect(records.size).toBe(0);
+    log.mockRestore();
+  });
+
+  describe('a workload stored before workloads had owners', () => {
+    beforeEach(() => {
+      records.set('sh:workload:demo-workload', JSON.stringify(record)); // no `owner`
+    });
+
+    it('cannot be read, run on or re-created by an authenticated caller', async () => {
+      expect((await call('GET', '/workloads/demo-workload', ALICE)).status).toBe(404);
+      expect((await run(ALICE)).status).toBe(404);
+      expect((await call('POST', '/workloads', ALICE, { name: 'demo-workload' })).status).toBe(409);
+      expect(runLeaf).not.toHaveBeenCalled();
+      expect(createWorkload).not.toHaveBeenCalled();
+    });
+
+    it('can be deleted by any authenticated caller, which frees the name', async () => {
+      expect((await call('DELETE', '/workloads/demo-workload', BOB)).status).toBe(204);
+      expect(deleteWorkload).toHaveBeenCalledWith('demo-workload');
+      const created = await call('POST', '/workloads', ALICE, { name: 'demo-workload' });
+      expect(created).toMatchObject({ status: 201, json: { owner: 'github:alice' } });
+    });
+  });
+
+  it("still refuses to delete another subject's OWNED workload", async () => {
+    await call('POST', '/workloads', ALICE, { name: 'demo-workload' });
+    expect((await call('DELETE', '/workloads/demo-workload', BOB)).status).toBe(404);
+    expect(deleteWorkload).not.toHaveBeenCalled();
+  });
+});
+
+describe('a caller-named workspace claim', () => {
+  const withClaim = { name: 'demo-workload', workspace: { claimName: 'alice-data' } };
+
+  it('is refused under MOCA_TENANCY=multi, before Context Service is asked', async () => {
+    process.env.MOCA_TENANCY = 'multi';
+    expect(await call('POST', '/workloads', undefined, withClaim)).toEqual({
+      status: 400,
+      json: { error: 'claim_name_not_allowed' },
+    });
+    expect(createWorkload).not.toHaveBeenCalled();
+  });
+
+  it('is passed through under single tenancy, where the one user owns every claim', async () => {
+    expect((await call('POST', '/workloads', undefined, withClaim)).status).toBe(201);
+    expect(createWorkload).toHaveBeenCalledWith(
+      'demo-workload',
+      expect.objectContaining({ workspace: { claimName: 'alice-data' } }),
+    );
+  });
+});
+
 describe('/workloads with authentication optional', () => {
+  it("leaves an unauthenticated create unowned, even when Context Service's reply names an owner", async () => {
+    // With a caller subject the spread overwrites any inbound owner; this is the case only the
+    // strip in withOwner handles.
+    createWorkload.mockResolvedValue({ ...record, owner: 'github:carol' });
+    expect(
+      (await call('POST', '/workloads', undefined, { name: 'demo-workload' })).json.owner,
+    ).toBe(undefined);
+    expect(JSON.parse(records.get('sh:workload:demo-workload')!).owner).toBeUndefined();
+    expect((await call('GET', '/workloads/demo-workload', tokenFor('github:carol'))).status).toBe(
+      404,
+    );
+  });
+
+  it('still refuses a present-but-bad token: it is not downgraded to an anonymous caller', async () => {
+    for (const [method, path] of [
+      ['POST', '/workloads'],
+      ['GET', '/workloads/demo-workload'],
+      ['DELETE', '/workloads/demo-workload'],
+    ] as const) {
+      const body = method === 'POST' ? { name: 'demo-workload' } : undefined;
+      const res = await call(method, path, 'not-a-token', body);
+      expect(res.json.error, `${method} ${path}`).toBe('token_invalid');
+    }
+    expect(createWorkload).not.toHaveBeenCalled();
+    expect(deleteWorkload).not.toHaveBeenCalled();
+  });
+
   it('keeps unauthenticated callers apart from owned workloads, in both directions', async () => {
     await call('POST', '/workloads', ALICE, { name: 'demo-workload' });
     // An owned workload is not reachable without its owner's token ...
