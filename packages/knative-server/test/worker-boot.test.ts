@@ -1,22 +1,47 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const src = readFileSync(fileURLToPath(new URL('../src/worker.ts', import.meta.url)), 'utf8');
 const serverSrc = readFileSync(fileURLToPath(new URL('../src/server.ts', import.meta.url)), 'utf8');
+const workerPath = fileURLToPath(new URL('../src/worker.ts', import.meta.url));
 const leafJobPath = fileURLToPath(new URL('../src/leaf-job.ts', import.meta.url));
 const leafJobSrc = readFileSync(leafJobPath, 'utf8');
 const PKG_DIR = fileURLToPath(new URL('..', import.meta.url));
 const TSX = fileURLToPath(new URL('../node_modules/.bin/tsx', import.meta.url));
 
+// Anchored to start-of-line: worker.ts also names this call inside a `//` comment, which an
+// unanchored match would accept with the real call deleted (PR #350 review).
+const BOOT_CALL = /^\s*prepareServerProcess\(process\.env\);/m;
+
 describe('every server entry point runs the same boot function (MI1 R2)', () => {
   it('the P6 worker calls prepareServerProcess at boot', () => {
-    expect(src).toMatch(/prepareServerProcess\(process\.env\)/);
+    expect(src).toMatch(BOOT_CALL);
   });
   it('startServer calls prepareServerProcess', () => {
-    expect(serverSrc).toMatch(/prepareServerProcess\(process\.env\)/);
+    expect(serverSrc).toMatch(BOOT_CALL);
   });
+  it('the P6 worker refuses to boot under MOCA_TENANCY=multi without SH_REQUIRE_AUTH', async () => {
+    // The behaviour, not the source text. Forked with an IPC channel, as the supervisor forks it:
+    // without one the worker exits on the missing channel before it reaches the boot check.
+    const child = spawn(TSX, [workerPath], {
+      cwd: PKG_DIR,
+      stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, MOCA_TENANCY: 'multi' },
+    });
+    let stderr = '';
+    child.stderr!.on('data', (d: Buffer) => (stderr += d.toString()));
+    const status = await new Promise<number | null>((resolve) => {
+      const timer = setTimeout(() => child.kill('SIGKILL'), 20_000);
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        resolve(code);
+      });
+    });
+    expect(stderr).toMatch(/MOCA_TENANCY=multi requires SH_REQUIRE_AUTH=true/);
+    expect(status).toBe(2);
+  }, 30_000);
   it('the async-run job calls prepareServerProcess before it touches the queue', () => {
     const boot = leafJobSrc.indexOf('prepareServerProcess(process.env)');
     expect(boot).toBeGreaterThan(-1);
