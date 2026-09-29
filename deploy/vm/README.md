@@ -83,7 +83,9 @@ Across those two runs, the script does the following, in this order:
 
 **A re-run restarts what it owns.** `systemctl enable --now` leaves an already-running unit alone,
 so env and unit changes from a re-run would otherwise wait for the next reboot. `setup-vm.sh`
-therefore restarts `sh-relay.service` and `moca-sandbox-firewall.service` on every run, and
+therefore restarts `sh-relay.service` on every run, reloads the sandbox firewall table directly
+(its unit is only started, never restarted: through `RequiredBy=` a restart would also restart
+`podman-restart.service` and every `--restart=always` container), and
 `try-restart`s `sh-supervisor.service` — restarted if it is running, left stopped if it is not, so
 a supervisor whose `SH_TURNS_PER_WORKER` is not set yet is never started by the script. A re-run
 also recreates Redis and the sandbox containers (`podman run --replace`), so Redis state is lost

@@ -449,9 +449,11 @@ grep -q 'hook forward' "$NFT" && fail "S1 must not filter forwarded (internet) t
 grep -q 'nft -f' "$MOCK_LOG" || fail "install_sandbox_firewall must load the table now: $(cat "$MOCK_LOG")"
 grep -q 'systemctl enable moca-sandbox-firewall.service' "$MOCK_LOG" ||
   fail "the firewall unit must be enabled so the table survives a reboot: $(cat "$MOCK_LOG")"
-grep -q 'systemctl restart moca-sandbox-firewall.service' "$MOCK_LOG" ||
-  fail "the firewall unit must be restarted so a re-run's rendered unit and table take effect: $(cat "$MOCK_LOG")"
-pass "moca-sandbox: fixed subnet; host reachable only on the attach port and DNS; persistent; restarted"
+grep -qE '^systemctl start moca-sandbox-firewall\.service$' "$MOCK_LOG" ||
+  fail "the firewall unit must be started so it is active for the units that require it: $(cat "$MOCK_LOG")"
+grep -qE '^systemctl (restart|try-restart|reload-or-restart) moca-sandbox-firewall\.service$' "$MOCK_LOG" &&
+  fail "the firewall unit must never be restarted: through RequiredBy= that restarts podman-restart.service and every container it manages: $(cat "$MOCK_LOG")"
+pass "moca-sandbox: fixed subnet; host reachable only on the attach port and DNS; persistent; started, never restarted"
 
 # --- install_sandbox_firewall follows sandbox_relay_addr()'s port, not relay_port()'s
 # unconditionally --------------------------------------------------------------------------------

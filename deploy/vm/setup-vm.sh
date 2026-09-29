@@ -400,8 +400,10 @@ NFT
   rm -f "$tmp_unit"
   systemctl daemon-reload
   systemctl enable moca-sandbox-firewall.service
-  # A re-run must apply the unit it just rendered, not leave the previous one active until reboot.
-  systemctl restart moca-sandbox-firewall.service
+  # The table is already loaded by the nft -f above; start only marks the unit active, and the
+  # rendered unit takes effect at the next boot. Never restart it: through RequiredBy= a restart
+  # also restarts podman-restart.service, which stops every --restart=always container on the host.
+  systemctl start moca-sandbox-firewall.service
 }
 
 # Reaching the host's relay port from inside a container is the one piece of this deployment
