@@ -15,6 +15,15 @@ vi.mock('@sh/harness/leaf-result-store', async (orig) => {
   return { ...actual, RedisResultStore: FakeStore };
 });
 
+const enqueue = vi.fn(async () => {});
+vi.mock('@sh/work-queue', () => ({
+  RedisWorkQueue: class {
+    async ensureGroup() {}
+    enqueue = (...a: unknown[]) => enqueue(...(a as []));
+    async close() {}
+  },
+}));
+
 const runLeaf = vi.fn(async () => ({ status: 'responded', text: 'ok' }));
 vi.mock('@sh/harness/run-leaf', () => ({
   runLeaf: (...a: unknown[]) => runLeaf(...(a as [])),
@@ -69,6 +78,7 @@ beforeEach(async () => {
   process.env.SH_CONTROL_PLANE_URL = `http://127.0.0.1:${(cp.address() as { port: number }).port}`;
   process.env.SH_EXCHANGE_TOKEN = 'shared-abc'; // notsecret
   runLeaf.mockClear();
+  enqueue.mockClear();
   server = startServer(0);
   await new Promise<void>((r) => server.once('listening', () => r()));
   base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -190,6 +200,20 @@ describe('without SH_REQUIRE_AUTH, /runs behaves as today', () => {
     const r = await call('POST', '/runs', envelope('sid-9'));
     expect(r.status).toBeLessThan(300);
     expect(runLeaf).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses an asynchronous run presented with a session token rather than queue it on the ambient credential', async () => {
+    const r = await call('POST', '/runs', envelope('sid-1', { async: true }), tokenFor('sid-1'));
+    expect(r.status).toBe(501);
+    expect(r.json.error).toBe('async_runs_unavailable');
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(runLeaf).not.toHaveBeenCalled();
+  });
+
+  it('queues an unauthenticated asynchronous run', async () => {
+    const r = await call('POST', '/runs', envelope('sid-9', { async: true }));
+    expect(r.status).toBe(202);
+    expect(enqueue).toHaveBeenCalledTimes(1);
   });
 
   it('still refuses a present-but-bad token', async () => {

@@ -3,26 +3,24 @@ import { RedisWorkQueue } from '@sh/work-queue';
 import { processOne } from '@sh/harness/leaf-job-runner';
 import { runLeaf, leafSessionId, type LeafEnvelope } from '@sh/harness/run-leaf';
 import { RedisResultStore, toResultRecord, writeResult } from '@sh/harness/leaf-result-store';
-import { type TurnConfig } from '@sh/harness/run-turn';
+// The same boot preparation and the same turn config as the HTTP server: a queued run is a server
+// turn too (MI1 §5 R2-R4).
+import { prepareServerProcess } from './server-process.js';
+import { buildConfig } from './server.js';
 
 const MIN_IDLE_MS = 90_000;
 const MAX_ATTEMPTS = 3;
 const CONSUMER_GC_IDLE_MS = 300_000; // 5 min — GC consumers idle longer than this with 0 pending
 const RESULT_TTL_SECONDS = parseInt(process.env.LEAF_RESULT_TTL_SECONDS ?? '86400', 10);
 
-function buildConfig(): TurnConfig {
-  return {
-    redisUrl: process.env.REDIS_URL,
-    cwd: process.env.HARNESS_CWD || process.cwd(),
-    anthropicBaseUrl: process.env.ANTHROPIC_BASE_URL,
-    anthropicAuthToken: process.env.ANTHROPIC_AUTH_TOKEN,
-  };
-}
-
 // Module-scoped so the top-level catch can close it if an exception escapes the drain loop.
 let queue: RedisWorkQueue | undefined;
 
 async function main(): Promise<void> {
+  // Before the queue is touched: refuse an inconsistent tenancy configuration, scrub ambient
+  // credentials under multi tenancy, and give the process a private agent directory.
+  prepareServerProcess(process.env);
+
   const q = new RedisWorkQueue(process.env.REDIS_URL);
   queue = q;
   await q.ensureGroup();
