@@ -941,14 +941,14 @@ failures across 4 files means it is stopped. A fresh worktree needs `git submodu
 
 - [P6](2026-09-08-p6-vm-process-manager-design.md) · [ADR-0034](../adrs/0034-vm-process-manager-socket-handoff.md) — the multiplexed worker this design makes multi-user.
 - [P4](2026-09-09-p4-microvm-sandbox-design.md) · [ADR-0035](../adrs/0035-per-exec-microvm-warm-standby.md) — per-`Exec` microVMs, jails, the no-secrets-in-the-snapshot invariant.
-- [P4.1](2026-09-15-p4-1-microvm-egress-transport-design.md) — the vsock egress hop, T1–T7; §12.2 amended here. Issues [#277](https://github.com/rossoctl/serverless-harness/issues/277), [#278](https://github.com/rossoctl/serverless-harness/issues/278).
+- [P4.1](2026-09-15-p4-1-microvm-egress-transport-design.md) — the vsock egress hop, T1–T7; §12.2 amended here. Issues [#277](https://github.com/rossoctl/moca/issues/277), [#278](https://github.com/rossoctl/moca/issues/278).
 - [P5](2026-09-06-p5-session-isolation-design.md) · [ADR-0032](../adrs/0032-per-request-subject-no-ambient-credential.md) — per-request subject, no ambient credential; its scrub is S1's R2.
 - [MU1](2026-09-08-multi-user-control-plane-design.md) · [ADR-0033](../adrs/0033-multi-user-control-plane.md) — session tokens, the exchange, the credential store.
 - [Workflow promotion](2026-09-02-claude-code-workflow-promotion-design.md) · [ADR-0030](../adrs/0030-claude-code-workflow-promotion.md) · [ADR-0031](../adrs/0031-promoted-memory-read-only.md) — the bundle format and pipeline §7 builds on.
 - [Z1](2026-06-26-identity-spine-design.md) — tiers, the forbidden "shared identity + subject header" pattern, the authoritative binding store.
 - [Z5](2026-06-19-m13-generalized-credentialed-egress-design.md) — forward proxy, placeholder swap, allowlist as exfiltration boundary, audit shape.
 - [RA1](2026-09-24-ra1-density-cutover-and-repo-rearchitecture-design.md) — the Kubernetes-free substrate and the MOCA name.
-- [#348](https://github.com/rossoctl/serverless-harness/issues/348) — compose control plane; §10.3.
+- [#348](https://github.com/rossoctl/moca/issues/348) — compose control plane; §10.3.
 - [cortex#905](https://github.com/rossoctl/cortex/issues/905) — per-subject resolution in Cortex, rescoped to this contract.
 - RFC 8693 (OAuth 2.0 Token Exchange), RFC 7515 (JWS), RFC 8037 (EdDSA in JOSE).
 

@@ -17,7 +17,7 @@ async function collect(it: AsyncGenerator<TurnFrame>): Promise<TurnFrame[]> {
 describe('CLEAN_STOP_REASONS', () => {
   // The harness's terminalFrame and this client's sync fallback must agree on what a clean finish
   // is: the two lists drifting from pi's vocabulary is exactly how #348's `error`-on-every-turn bug
-  // shipped. Read from source because mocactl takes no dependency on @sh/harness.
+  // shipped. Read from source because mocactl takes no dependency on @moca/harness.
   it('matches the harness`s set exactly', () => {
     const src = readFileSync(
       new URL('../../../harness/src/turn-stream.ts', import.meta.url),

@@ -138,10 +138,20 @@ this amendment) as the authoritative record of what moved, not the original §3.
 is left as-is rather than rewritten, consistent with this repo's own "don't retro-edit, note the
 correction" convention for specs.
 
+## 0.9 Amendment — September 29, 2026 (Phase 1 executed)
+
+Phase 1 (the rename to MOCA) has executed. This document's own §11 table — describing exactly this
+rename — was itself swept by the mechanical rename pass that carried it out, which briefly
+overwrote its "Current" column with post-rename values before this amendment restored them. §11's
+table below reflects the pre-Phase-1 state again, consistent with this document's own §0.7/§0.8
+convention of never retro-editing original text. The actual rename is recorded in the commits on
+`feat/ra1-phase1-moca-rename` (rebased onto `rossoctl/main` after PRs #350 and #364 landed), not by
+editing this table.
+
 ## 0. How this document came to be
 
 Written by an assistant session at the user's request, after: (a) reading the P4, P4.1, and P6
-specs directly; (b) reading `serverless-harness-density-and-architecture.pptx` (an internal
+specs directly; (b) reading `moca-density-and-architecture.pptx` (an internal
 architecture review deck, held outside this repo); (c) three parallel audits — of every code
 subsystem, of every file in `docs/specs/` and `docs/adrs/`, and of external OSS repo-organization
 conventions; (d) a check of the user's own working notes outside this repo
@@ -250,7 +260,7 @@ Confirmed at the code level, in three matched layers:
    describes.
 
 Both `SandboxTransport` implementations and the shared proto types currently live inside
-`@sh/k8s-sandbox`, which is why that package **cannot be split into "elevated" vs. "deprecated"
+`@moca/k8s-sandbox`, which is why that package **cannot be split into "elevated" vs. "deprecated"
 halves for free** — see §6.
 
 ### 3.4 No existing seam for swapping the agent-runtime framework
@@ -425,7 +435,7 @@ deleted. Nothing in this table is deleted by RA1.
 | `.github/workflows/ci.yml`, `microvm-kvm-gates.yml`, `security-scans.yml`, `scorecard.yml`, `dependabot.yml`                                    | 1 (rebrand references only)                                                           | Keep as-is otherwise                                                                                                                                                             | Already cluster-free                                                                                                                                                                                  |
 | `docs/specs/`, `docs/adrs/`                                                                                                                     | 4                                                                                     | Update statuses (§8)                                                                                                                                                             | Design-level supersession happens once P4/P6 is confirmed primary, independent of when code is actually removed                                                                                       |
 | `docs/notes/`                                                                                                                                   | —                                                                                     | Keep as-is                                                                                                                                                                       | Narrative decision records — stay in main repo, distinct from runnable experiment scripts                                                                                                             |
-| `docs/demos/serverless-harness-demo.md`                                                                                                         | 1 (rename refs), 3–4 (rewrite to feature P4/P6 as primary and note K8s as deprecated) | Read fully first, then rewrite across phases                                                                                                                                     | Probably the primary onboarding doc, likely Knative-flavored — it's user-facing, unlike the internal specs                                                                                            |
+| `docs/demos/moca-demo.md`                                                                                                                       | 1 (rename refs), 3–4 (rewrite to feature P4/P6 as primary and note K8s as deprecated) | Read fully first, then rewrite across phases                                                                                                                                     | Probably the primary onboarding doc, likely Knative-flavored — it's user-facing, unlike the internal specs                                                                                            |
 | `docs/plans/`                                                                                                                                   | —                                                                                     | No action                                                                                                                                                                        | Already gitignored/local-only                                                                                                                                                                         |
 | `CLAUDE.md`                                                                                                                                     | 1                                                                                     | Rewrite                                                                                                                                                                          | Stale today independent of this plan (missing 5 of 9 packages, describes a nonexistent top-level `experiments/`)                                                                                      |
 | `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CODEOWNERS`                                                                                     | 1, 3, 4                                                                               | Rewrite incrementally across phases                                                                                                                                              | Content should reflect each phase's actual state, not jump ahead of it                                                                                                                                |
@@ -581,7 +591,7 @@ the new ordering (§4), not an oversight.
   Phase 2 is authorized. No open item remains here.
 - **`packages/ibac-stub`** — small surface, not deeply audited. Five-minute look before deciding
   its classification.
-- **`docs/demos/serverless-harness-demo.md`** — likely the primary onboarding doc and likely
+- **`docs/demos/moca-demo.md`** — likely the primary onboarding doc and likely
   Knative-flavored. Read fully before rewriting; it's user-facing, unlike the internal design
   specs.
 - **RC1/AuthBridge** (spec + ADR-0025/0026/0027) sits between "load-bearing credential mechanism

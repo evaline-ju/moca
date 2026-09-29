@@ -1,7 +1,7 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { AMBIENT_KEY_SENTINEL } from '@sh/harness/ambient-sentinel';
+import { AMBIENT_KEY_SENTINEL } from '@moca/harness/ambient-sentinel';
 import { assertKeysetUsable } from './turn-auth.js';
 import { readTenancy, type Tenancy } from './tenancy.js';
 

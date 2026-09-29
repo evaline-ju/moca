@@ -272,7 +272,7 @@ ENV8="$SH_COMPOSE_DIR/.env"
 [[ "$(env_value SH_EXCHANGE_TOKEN "$ENV8")" =~ ^[0-9a-f]{64}$ ]] || fail "SH_EXCHANGE_TOKEN is not 32 bytes of hex"
 [[ "$(mode_of "$ENV8")" == 600 ]] || fail ".env must stay mode 600 once it holds the signing key"
 for k in $MU1_KEYS; do assert_not_in_argv "$(env_value "$k" "$ENV8")"; done
-grep -qE '^docker run --rm --network none --user 1000:1000 -w /app/packages/control-plane ghcr\.io/rossoctl/serverless-harness:latest node --import tsx src/genkeys\.ts' \
+grep -qE '^docker run --rm --network none --user 1000:1000 -w /app/packages/control-plane ghcr\.io/rossoctl/moca:latest node --import tsx src/genkeys\.ts' \
   "$MOCK_LOG" || fail "the key generator must run offline in the harness image: $(grep '^docker run' "$MOCK_LOG")"
 pass "a fresh install generates the four MU1 secrets in the harness image, offline, never in argv"
 

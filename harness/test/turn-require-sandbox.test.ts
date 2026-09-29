@@ -22,7 +22,7 @@ const { createAgentSession, FakeRedisSessionBackend } = vi.hoisted(() => {
   };
 });
 
-vi.mock('@sh/session-backend', () => ({
+vi.mock('@moca/session-backend', () => ({
   RedisSessionBackend: FakeRedisSessionBackend,
   swallowRedisErrors: () => {},
 }));

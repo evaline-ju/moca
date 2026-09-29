@@ -12,7 +12,7 @@
 # to -- is the `control-plane` PROFILE, because it cannot start without a GitHub OAuth client id
 # (SH_GITHUB_CLIENT_ID) and a stack without one must still come up. install.sh sets
 # COMPOSE_PROFILES=control-plane in .env when it is given a client id.
-name: serverless-harness
+name: moca
 
 services:
   # docker.io/redis:7-alpine, as deploy/vm/setup-vm.sh's start_redis pins. Unpublished: this Redis
@@ -25,7 +25,7 @@ services:
     restart: unless-stopped
 
   sandbox-relay:
-    image: ${SH_HARNESS_IMAGE:-ghcr.io/rossoctl/serverless-harness:latest}
+    image: ${SH_HARNESS_IMAGE:-ghcr.io/rossoctl/moca:latest}
     # `node --import tsx` resolves the tsx loader from the CWD, and tsx is linked only into each
     # package's own node_modules -- so the package dir, never the repo root (setup-vm.test.sh).
     working_dir: /app/packages/sandbox-relay
@@ -56,7 +56,7 @@ services:
   # workers together: scale W with SH_WORKERS, never with replicas or per-worker services. For
   # more capacity than one container's CPUs, run another copy of this whole stack.
   supervisor:
-    image: ${SH_HARNESS_IMAGE:-ghcr.io/rossoctl/serverless-harness:latest}
+    image: ${SH_HARNESS_IMAGE:-ghcr.io/rossoctl/moca:latest}
     working_dir: /app/packages/supervisor
     command: [node, --import, tsx, src/main.ts]
     user: '1000:1000'
@@ -121,7 +121,7 @@ services:
   # control plane itself refuses to boot on any missing one, naming it (`docker compose logs
   # control-plane`).
   control-plane:
-    image: ${SH_HARNESS_IMAGE:-ghcr.io/rossoctl/serverless-harness:latest}
+    image: ${SH_HARNESS_IMAGE:-ghcr.io/rossoctl/moca:latest}
     profiles: [control-plane]
     working_dir: /app/packages/control-plane
     command: [node, --import, tsx, src/main.ts]
@@ -159,7 +159,7 @@ services:
   # For more, copy this service with a different SANDBOX_ID: replicas would share one id and
   # collide on a single sh:sandbox:records entry.
   sandbox:
-    image: ${SH_SANDBOX_IMAGE:-ghcr.io/rossoctl/serverless-harness-remote-worker:latest}
+    image: ${SH_SANDBOX_IMAGE:-ghcr.io/rossoctl/moca-remote-worker:latest}
     environment:
       SANDBOX_ID: sh-sandbox-0
       RELAY_ADDR: sandbox-relay:${SH_RELAY_PORT:-9443}

@@ -2,16 +2,16 @@
 
 - **Status:** Implemented
 - **Date:** 2026-06-17
-- **Deciders:** Serverless Harness team
+- **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-06-17-m2-k8s-sandbox-client-design.md`](../specs/2026-06-17-m2-k8s-sandbox-client-design.md)
 
 ## Context
 
-For a serverless harness the agent's "hands" (file and shell tools) must run in an isolated remote sandbox, not on the harness head. Pi exposes pluggable `Operations` interfaces and a shipped SSH example demonstrates delegating them over a transport, so no Pi fork is needed — only a new transport and wiring.
+For MOCA, the agent's "hands" (file and shell tools) must run in an isolated remote sandbox, not on the harness head. Pi exposes pluggable `Operations` interfaces and a shipped SSH example demonstrates delegating them over a transport, so no Pi fork is needed — only a new transport and wiring.
 
 ## Decision
 
-We will ship a `@sh/k8s-sandbox` package that routes all seven Pi Operations (read/write/edit/bash/ls/grep/find) to an existing pod through an injectable `execInPod` seam whose default implementation shells out to `kubectl exec`, gated on by the `KAGENTI_SANDBOX_POD` env var.
+We will ship a `@moca/k8s-sandbox` package that routes all seven Pi Operations (read/write/edit/bash/ls/grep/find) to an existing pod through an injectable `execInPod` seam whose default implementation shells out to `kubectl exec`, gated on by the `KAGENTI_SANDBOX_POD` env var.
 
 ### Alternatives considered
 

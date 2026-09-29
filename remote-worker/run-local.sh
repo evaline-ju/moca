@@ -25,7 +25,7 @@ echo "2) enable remote-sandbox path on the harness (rolls a new ksvc revision)"
 # secretKeyRefs) through whole. The harness presents MOCA_RELAY_EXEC_TOKEN on every SandboxExec
 # (MI1 R5) and reads it by a secretKeyRef to that ONE key: sh-relay-token's SH_RELAY_TOKEN is the
 # sandboxes' credential and never reaches the harness.
-harness_env="$(oc get ksvc serverless-harness -n "$NS" -o json | jq -c \
+harness_env="$(oc get ksvc moca -n "$NS" -o json | jq -c \
   --arg addr "sandbox-relay.${NS}.svc:8443" '
   (.spec.template.spec.containers[0].env // [])
   | map(select(.name | IN("SH_REMOTE_SANDBOX", "SH_RELAY_ADDR", "MOCA_RELAY_EXEC_TOKEN") | not))
@@ -33,7 +33,7 @@ harness_env="$(oc get ksvc serverless-harness -n "$NS" -o json | jq -c \
      {name: "SH_RELAY_ADDR", value: $addr},
      {name: "MOCA_RELAY_EXEC_TOKEN",
       valueFrom: {secretKeyRef: {name: "sh-relay-token", key: "MOCA_RELAY_EXEC_TOKEN"}}}]')"
-oc patch ksvc serverless-harness -n "$NS" --type=json \
+oc patch ksvc moca -n "$NS" --type=json \
   -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/env\",\"value\":${harness_env}}]"
 
 echo "3) port-forward relay -> localhost:${PORT}"

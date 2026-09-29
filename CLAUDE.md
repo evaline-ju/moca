@@ -1,4 +1,4 @@
-# Serverless Harness
+# MOCA
 
 ## Overview
 
@@ -9,16 +9,27 @@ and budget-aware compaction checkpoints.
 ## Repository Structure
 
 ```
-serverless-harness/
-├── harness/              # Core harness runtime (@sh/harness)
+moca/
+├── harness/              # Core harness runtime (@moca/harness)
 ├── packages/
-│   ├── k8s-sandbox/      # K8s pod exec client (@sh/k8s-sandbox)
-│   ├── knative-server/   # Knative HTTP entrypoint (@sh/knative-server)
-│   ├── session-backend/  # Redis session storage (@sh/session-backend)
-│   ├── mocactl/          # MOCA terminal client for the control plane (@sh/mocactl)
-│   └── work-queue/       # Redis Streams work queue (@sh/work-queue)
-├── deploy/knative/       # Deployment scripts and smoke tests (experiment drivers moved to
-│                         # rossoctl/moca-experiments, 2026-09-25)
+│   ├── k8s-sandbox/      # K8s pod exec client (@moca/k8s-sandbox)
+│   ├── knative-server/   # Knative HTTP entrypoint (@moca/knative-server)
+│   ├── session-backend/  # Redis session storage (@moca/session-backend)
+│   ├── work-queue/       # Redis Streams work queue (@moca/work-queue)
+│   ├── sandbox-relay/    # gRPC relay between control plane and remote-worker sandboxes (@moca/sandbox-relay)
+│   ├── supervisor/       # P6 VM process manager / socket-handoff supervisor (@moca/supervisor)
+│   ├── control-plane/    # Multi-user control plane, credential issuance (@moca/control-plane)
+│   ├── config-bundle/    # Promoted config bundle loading (@moca/config-bundle)
+│   ├── ibac-stub/        # IBAC stub (@moca/ibac-stub)
+│   └── mocactl/          # MOCA terminal client for the control plane (@moca/mocactl)
+├── remote-worker/        # Go module: container + microVM sandbox workers, vmpoolctl
+├── deploy/
+│   ├── knative/          # Kubernetes/Knative/KEDA deployment (experiment drivers moved to
+│   │                     # rossoctl/moca-experiments, 2026-09-25)
+│   ├── vm/               # P6 single-VM systemd deployment
+│   ├── microvm/          # P4 Firecracker microVM deployment
+│   ├── compose/          # Docker Compose trial of the P6 runtime (no root, five minutes)
+│   └── claude/           # Claude Code workflow-promotion tooling (the /promote command)
 ├── pi-fork/              # Git submodule: Pi AI framework (must be built)
 └── Dockerfile            # Container image (node:22-alpine)
 ```
@@ -39,8 +50,8 @@ serverless-harness/
 
 ```bash
 # Clone with submodules
-git clone --recurse-submodules https://github.com/kagenti/serverless-harness.git
-cd serverless-harness
+git clone --recurse-submodules https://github.com/rossoctl/moca.git
+cd moca
 
 # Build pi-fork (required for type declarations)
 cd pi-fork && npm ci && npm run build && cd ..
@@ -72,7 +83,7 @@ pre-commit install
 Redirect long command output to files — never pollute conversation context:
 
 ```bash
-export LOG_DIR=/tmp/kagenti/tdd/serverless-harness
+export LOG_DIR=/tmp/kagenti/tdd/moca
 mkdir -p $LOG_DIR
 command > $LOG_DIR/name.log 2>&1; echo "EXIT:$?"
 ```

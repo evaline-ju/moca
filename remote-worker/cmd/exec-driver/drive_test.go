@@ -18,7 +18,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
-	pb "github.com/kagenti/serverless-harness/gen/go/sandbox/v1"
+	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
 )
 
 // msFieldShape pins the times-file ms field to whole.fractional with exactly three decimal

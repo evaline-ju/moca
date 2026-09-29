@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
-import { AMBIENT_KEY_SENTINEL } from '@sh/harness/ambient-sentinel';
+import { AMBIENT_KEY_SENTINEL } from '@moca/harness/ambient-sentinel';
 import { isTenancyNearMiss, readTenancy } from '../src/tenancy.js';
 import { prepareServerProcess, scrubAmbientCredentials } from '../src/server-process.js';
 import { buildConfig } from '../src/server.js';

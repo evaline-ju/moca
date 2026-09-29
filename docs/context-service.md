@@ -1,6 +1,6 @@
 # Optional Context Service integration
 
-Serverless Harness can use an external Context Service to allocate a workload-scoped sandbox pool
+MOCA can use an external Context Service to allocate a workload-scoped sandbox pool
 and workspace. This integration is optional. Without it, existing `/runs` requests and static
 sandbox-pool configuration behave as before.
 
@@ -16,7 +16,7 @@ Context Service requests time out after 5 seconds by default. Set
 `CONTEXT_SERVICE_TIMEOUT_MS` to a positive number of milliseconds to override this limit.
 
 `POST /workloads` asks Context Service to allocate the pool. A subsequent `/runs` request can pass
-the returned `workloadId`; Serverless Harness resolves it to the pool selector before leasing and
+the returned `workloadId`; MOCA resolves it to the pool selector before leasing and
 executing in a sandbox. Deleting the workload asks Context Service to release its resources.
 
 If `CONTEXT_SERVICE_URL` is unset, the workload lifecycle routes return
@@ -40,7 +40,7 @@ first come, first served.
 can be neither read nor run on, and its name cannot be re-created, but **any** authenticated caller
 may `DELETE` it. That releases the Context Service pool and frees the name for an owned re-create.
 
-**PVC access is not authorized.** Serverless Harness forwards a caller-provided
+**PVC access is not authorized.** MOCA forwards a caller-provided
 `workspace.claimName` to Context Service, and neither component checks that the caller may use that
 claim. Owning a workload says nothing about owning the volume it names. So a `claimName` is refused
 (`400 claim_name_not_allowed`) from any authenticated caller, which under `SH_REQUIRE_AUTH=true` is

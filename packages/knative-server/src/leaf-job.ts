@@ -1,8 +1,8 @@
 // packages/knative-server/src/leaf-job.ts
-import { RedisWorkQueue } from '@sh/work-queue';
-import { processOne } from '@sh/harness/leaf-job-runner';
-import { runLeaf, leafSessionId, type LeafEnvelope } from '@sh/harness/run-leaf';
-import { RedisResultStore, toResultRecord, writeResult } from '@sh/harness/leaf-result-store';
+import { RedisWorkQueue } from '@moca/work-queue';
+import { processOne } from '@moca/harness/leaf-job-runner';
+import { runLeaf, leafSessionId, type LeafEnvelope } from '@moca/harness/run-leaf';
+import { RedisResultStore, toResultRecord, writeResult } from '@moca/harness/leaf-result-store';
 // The same boot preparation and the same turn config as the HTTP server: a queued run is a server
 // turn too (MI1 §5 R2-R4).
 import { prepareServerProcess } from './server-process.js';

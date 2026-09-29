@@ -1,10 +1,10 @@
 import { generateKeyPairSync } from 'node:crypto';
 import http from 'node:http';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { keyIdFor, makeSigner, publicKeyToBase64 } from '@sh/control-plane';
+import { keyIdFor, makeSigner, publicKeyToBase64 } from '@moca/control-plane';
 
-vi.mock('@sh/harness/leaf-result-store', async (orig) => {
-  const actual = await orig<typeof import('@sh/harness/leaf-result-store')>();
+vi.mock('@moca/harness/leaf-result-store', async (orig) => {
+  const actual = await orig<typeof import('@moca/harness/leaf-result-store')>();
   class FakeStore {
     async set() {}
     async get() {
@@ -16,7 +16,7 @@ vi.mock('@sh/harness/leaf-result-store', async (orig) => {
 });
 
 const enqueue = vi.fn(async () => {});
-vi.mock('@sh/work-queue', () => ({
+vi.mock('@moca/work-queue', () => ({
   RedisWorkQueue: class {
     async ensureGroup() {}
     enqueue = (...a: unknown[]) => enqueue(...(a as []));
@@ -25,7 +25,7 @@ vi.mock('@sh/work-queue', () => ({
 }));
 
 const runLeaf = vi.fn(async () => ({ status: 'responded', text: 'ok' }));
-vi.mock('@sh/harness/run-leaf', () => ({
+vi.mock('@moca/harness/run-leaf', () => ({
   runLeaf: (...a: unknown[]) => runLeaf(...(a as [])),
   validateItem: () => null,
   leafSessionId: (env: { sessionId?: string }) => env.sessionId ?? 'leaf',

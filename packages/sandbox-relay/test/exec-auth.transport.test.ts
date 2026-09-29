@@ -15,8 +15,8 @@ import {
   SandboxWorkerService,
   type ServerFrame,
   type WorkerFrame,
-} from '@sh/k8s-sandbox';
-import type { RecordStore } from '@sh/harness';
+} from '@moca/k8s-sandbox';
+import type { RecordStore } from '@moca/harness';
 import { buildServer, makeExecTokenValidator, startRelay } from '../src/main.js';
 
 const records: RecordStore = { put: async () => {}, remove: async () => {}, list: async () => [] };

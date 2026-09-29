@@ -1,7 +1,7 @@
 # AuthBridge Two-Hop Egress Control (RC1)
 
 This demo shows **Rosso Cortex / AuthBridge** acting as the zero-trust credential
-plane on the serverless harness: it does both **credential injection** and
+plane on MOCA: it does both **credential injection** and
 **action control** on the harness's two HTTP egress hops, and the real credential
 is **never held by any model-influenced workload** — only a placeholder is, and the
 real value is swapped in at the proxy, _after_ an allow/deny gate.
@@ -84,7 +84,7 @@ modes: `up` (apply the AB path), `smoke` (run leaf-smoke against the Route), `re
 (return to the base direct-Anthropic state), and `gate` (= `up` → `smoke` →
 `restore`, the default). To keep the AB path applied for manual inspection, run
 `RC1_GATE_KEEP=1 ./deploy/knative/rc1-ocp-gate.sh gate` (then `restore` when done).
-The gate resolves the Route automatically (`oc get ksvc serverless-harness -n default -o jsonpath='{.status.url}'`).
+The gate resolves the Route automatically (`oc get ksvc moca -n default -o jsonpath='{.status.url}'`).
 
 ## What it installs
 
@@ -156,7 +156,7 @@ kubectl -n default get secret llm-credentials \
 kubectl -n default get secret ab1-llm-cred -o jsonpath='{.data.api\.anthropic\.com}' | base64 -d | head -c 8; echo '...'
 
 # On a running harness revision pod, the injected env is the placeholder too:
-POD=$(kubectl -n default get pod -l serving.knative.dev/service=serverless-harness -o name | head -1)
+POD=$(kubectl -n default get pod -l serving.knative.dev/service=moca -o name | head -1)
 kubectl -n default exec "$POD" -c user-container -- printenv ANTHROPIC_BASE_URL   # => http://authbridge-ab1:8080
 ```
 
