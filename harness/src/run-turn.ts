@@ -351,10 +351,11 @@ function synthesizeCustomModel(
     api: 'anthropic-messages',
     // provider MUST be "anthropic" (not a synthetic tag): pi resolves the request API key by
     // provider name — authStorage.getApiKey(provider) maps "anthropic" -> ANTHROPIC_API_KEY
-    // (which applyModelGateway seeds from the auth token), whereas an unknown provider like
-    // "custom" has no env-key mapping and fails with `No API key found for "custom"`. Request
-    // routing is by baseUrl + api, not provider, so tagging it "anthropic" sends traffic to the
-    // custom baseUrl while satisfying the key lookup. Overridable via SH_MODEL_PROVIDER.
+    // (which applyModelGateway seeds only with a constant sentinel when a Bearer token is in
+    // play, never with the token itself), whereas an unknown provider like "custom" has no
+    // env-key mapping and fails with `No API key found for "custom"`. Request routing is by
+    // baseUrl + api, not provider, so tagging it "anthropic" sends traffic to the custom baseUrl
+    // while satisfying the key lookup. Overridable via SH_MODEL_PROVIDER.
     provider: (env.SH_MODEL_PROVIDER ?? 'anthropic') as Model<'anthropic-messages'>['provider'],
     baseUrl,
     reasoning: false,
@@ -603,8 +604,11 @@ export function resourceLoaderOptionsFor(
  *
  * In server mode: discovered extension FILES are off (the harness's own extensions arrive as
  * extensionFactories, which noExtensions does not affect); the project is untrusted, so no project
- * settings and no <cwd>/.pi/SYSTEM.md or APPEND_SYSTEM.md are read; and no ancestor AGENTS.md/CLAUDE.md
- * walk happens — a promoted bundle still supplies its context through agentsFilesOverride.
+ * settings and no <cwd>/.pi/SYSTEM.md or APPEND_SYSTEM.md are read; no ancestor AGENTS.md/CLAUDE.md
+ * walk happens; and no skill, prompt template or theme is discovered from $HOME, the agent directory
+ * or the project. A promoted bundle still supplies its context through agentsFilesOverride and its
+ * skills and prompt templates through additionalSkillPaths/additionalPromptTemplatePaths, which pi
+ * loads even when discovery is off.
  */
 export function turnLoaderInputs(opts: {
   config?: TurnConfig;
@@ -624,7 +628,15 @@ export function turnLoaderInputs(opts: {
       { cwd: opts.cwd, agentDir, settingsManager, extensionFactories: opts.extensionFactories },
       opts.promotedConfig,
     ),
-    ...(locked ? { noExtensions: true, noContextFiles: true } : {}),
+    ...(locked
+      ? {
+          noExtensions: true,
+          noContextFiles: true,
+          noSkills: true,
+          noPromptTemplates: true,
+          noThemes: true,
+        }
+      : {}),
   };
   return { agentDir, settingsManager, loaderOptions };
 }

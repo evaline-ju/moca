@@ -4,10 +4,15 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DefaultResourceLoader } from '@earendil-works/pi-coding-agent';
 import { turnLoaderInputs } from '../src/run-turn.js';
+import type { PromotedConfig } from '../src/config-resolver.js';
 
 let root: string;
 let cwd: string;
 let savedAgentDir: string | undefined;
+let savedHome: string | undefined;
+
+const skill = (name: string) =>
+  `---\nname: ${name}\ndescription: A planted skill used to test loader discovery.\n---\n\nBody.\n`;
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'mi1-r4-'));
@@ -22,6 +27,18 @@ beforeEach(() => {
     join(cwd, '.pi', 'extensions', 'planted.ts'),
     'export default function () { (globalThis as any).__MI1_PLANTED_EXTENSION = true; }\n',
   );
+  // A user-scope skill under $HOME/.agents/skills and a prompt template in the agent directory: both
+  // are discovered by default, so they show whether discovery is on.
+  const home = join(root, 'home');
+  mkdirSync(join(home, '.agents', 'skills', 'planted-home-skill'), { recursive: true });
+  writeFileSync(
+    join(home, '.agents', 'skills', 'planted-home-skill', 'SKILL.md'),
+    skill('planted-home-skill'),
+  );
+  mkdirSync(join(agentDir, 'prompts'), { recursive: true });
+  writeFileSync(join(agentDir, 'prompts', 'planted-prompt.md'), 'PLANTED-PROMPT-TEMPLATE\n');
+  savedHome = process.env.HOME;
+  process.env.HOME = home;
   savedAgentDir = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = agentDir;
   delete (globalThis as Record<string, unknown>).__MI1_PLANTED_EXTENSION;
@@ -30,14 +47,17 @@ beforeEach(() => {
 afterEach(() => {
   if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = savedAgentDir;
+  if (savedHome === undefined) delete process.env.HOME;
+  else process.env.HOME = savedHome;
   rmSync(root, { recursive: true, force: true });
 });
 
-async function load(serverMode: boolean) {
+async function load(serverMode: boolean, promotedConfig?: PromotedConfig) {
   const { loaderOptions } = turnLoaderInputs({
     config: serverMode ? { serverMode: true } : undefined,
     cwd,
     extensionFactories: [],
+    promotedConfig,
   });
   const loader = new DefaultResourceLoader(loaderOptions as never);
   await loader.reload();
@@ -57,5 +77,53 @@ describe('server-mode resource loader (MI1 R4)', () => {
   it('outside server mode the same files ARE picked up — the test is sensitive', async () => {
     const loader = await load(false);
     expect(loader.getSystemPrompt() ?? '').toContain('PLANTED-PROJECT-SYSTEM');
+  });
+
+  it('discovers no skill, prompt template or theme in server mode', async () => {
+    const { loaderOptions } = turnLoaderInputs({
+      config: { serverMode: true },
+      cwd,
+      extensionFactories: [],
+    });
+    expect(loaderOptions).toMatchObject({
+      noSkills: true,
+      noPromptTemplates: true,
+      noThemes: true,
+    });
+    const loader = await load(true);
+    expect(loader.getSkills().skills.map((s) => s.name)).not.toContain('planted-home-skill');
+    expect(loader.getPrompts().prompts.map((p) => p.name)).not.toContain('planted-prompt');
+  });
+
+  it('outside server mode the user skill and the prompt template ARE discovered — the test is sensitive', async () => {
+    const loader = await load(false);
+    expect(loader.getSkills().skills.map((s) => s.name)).toContain('planted-home-skill');
+    expect(loader.getPrompts().prompts.map((p) => p.name)).toContain('planted-prompt');
+  });
+
+  it('a promoted bundle still delivers its skills and prompt templates in server mode', async () => {
+    const promotedRoot = join(root, 'promoted');
+    const skillsDir = join(promotedRoot, 'skills');
+    const promptsDir = join(promotedRoot, 'prompts');
+    mkdirSync(join(skillsDir, 'promoted-skill'), { recursive: true });
+    writeFileSync(join(skillsDir, 'promoted-skill', 'SKILL.md'), skill('promoted-skill'));
+    mkdirSync(promptsDir, { recursive: true });
+    writeFileSync(join(promptsDir, 'promoted-prompt.md'), 'PROMOTED-PROMPT\n');
+    const promoted: PromotedConfig = {
+      digest: 'sha256:test',
+      root: promotedRoot,
+      skillsDir,
+      promptsDir,
+      context: [],
+      promptFragments: [],
+      entries: [],
+    };
+    const loader = await load(true, promoted);
+    const skills = loader.getSkills().skills.map((s) => s.name);
+    expect(skills).toContain('promoted-skill');
+    expect(skills).not.toContain('planted-home-skill');
+    const prompts = loader.getPrompts().prompts.map((p) => p.name);
+    expect(prompts).toContain('promoted-prompt');
+    expect(prompts).not.toContain('planted-prompt');
   });
 });
