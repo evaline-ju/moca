@@ -144,14 +144,22 @@ Phase 1 (the rename to MOCA) has executed. This document's own §11 table — de
 rename — was itself swept by the mechanical rename pass that carried it out, which briefly
 overwrote its "Current" column with post-rename values before this amendment restored them. §11's
 table below reflects the pre-Phase-1 state again, consistent with this document's own §0.7/§0.8
-convention of never retro-editing original text. The actual rename is recorded in the commits on
-`feat/ra1-phase1-moca-rename` (rebased onto `rossoctl/main` after PRs #350 and #364 landed), not by
-editing this table.
+convention of never retro-editing original text. The actual rename is recorded in PR #351
+(`rossoctl/moca`), not by editing this table.
+
+Deliberately **not** renamed, and expected to stay that way past this phase: `SH_*` environment
+variable names, the `sh-relay-token` Secret name, the `sh-supervisor.service`/`sh-relay.service`
+systemd unit filenames, the `sh-worker`/`sh-supervisor` process labels in code comments and log
+lines, and the `sh-knative` default local cluster name. These are operational identifiers on
+already-shippable deployment paths, not display branding — renaming them is a live-migration
+concern §11 never asked for. (MI1's own spec, landed on `main` after this rename was first drafted,
+independently notes in its own naming header that existing `SH_*` names are "left for RA1 Phase
+1's rename" — this is that rename's answer: left alone, on purpose.)
 
 ## 0. How this document came to be
 
 Written by an assistant session at the user's request, after: (a) reading the P4, P4.1, and P6
-specs directly; (b) reading `moca-density-and-architecture.pptx` (an internal
+specs directly; (b) reading `serverless-harness-density-and-architecture.pptx` (an internal
 architecture review deck, held outside this repo); (c) three parallel audits — of every code
 subsystem, of every file in `docs/specs/` and `docs/adrs/`, and of external OSS repo-organization
 conventions; (d) a check of the user's own working notes outside this repo

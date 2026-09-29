@@ -159,7 +159,7 @@ actual file content, so the leaf verdict reflects what is really in
 directly with the `grpcurl` exec above; the worker pod log shows the matching
 `exec req_id=…` frames.
 
-> **Required egress rule (upstream gap).** The harness `moca-egress`
+> **Required egress rule (upstream gap).** The harness `moca-harness-egress`
 > NetworkPolicy is default-deny egress. As shipped it allows DNS, Redis, and
 > :443/:6443 — but **not the relay**, so with `SH_REMOTE_SANDBOX=1` every remote
 > exec is silently default-denied (harness→relay blocked) and times out. This repo's
@@ -167,7 +167,7 @@ directly with the `grpcurl` exec above; the worker pod log shows the matching
 > (`app=sandbox-relay` :8443). If you deployed before that fix, patch it live:
 >
 > ```bash
-> oc patch networkpolicy moca-egress -n default --type=json \
+> oc patch networkpolicy moca-harness-egress -n default --type=json \
 >   -p '[{"op":"add","path":"/spec/egress/-","value":{"ports":[{"port":8443,"protocol":"TCP"}],"to":[{"podSelector":{"matchLabels":{"app":"sandbox-relay"}}}]}}]'
 > ```
 

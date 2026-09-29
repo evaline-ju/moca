@@ -139,9 +139,9 @@ describe('tightened AB1 egress variant', () => {
   const AB1_POLICY_PATH = resolve(DEPLOY, 'authbridge/harness-egress-ab1.yaml');
   const policies = networkPolicies(AB1_POLICY_PATH);
 
-  it('defines exactly one NetworkPolicy named moca-egress', () => {
+  it('defines exactly one NetworkPolicy named moca-harness-egress', () => {
     expect(policies).toHaveLength(1);
-    expect(policies[0]?.metadata?.name).toBe('moca-egress');
+    expect(policies[0]?.metadata?.name).toBe('moca-harness-egress');
   });
 
   const np = policies[0] ?? {};

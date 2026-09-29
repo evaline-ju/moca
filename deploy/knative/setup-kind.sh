@@ -233,7 +233,7 @@ if [ "${SH_AUTHBRIDGE:-0}" = "1" ]; then
 
   kubectl apply -f "$SCRIPT_DIR/ibac-stub.yaml" -f "$SCRIPT_DIR/authbridge/ab1-deployment.yaml"
   # Applied AFTER any base egress policy so it overwrites the same NetworkPolicy name
-  # (moca-egress) rather than stacking with it.
+  # (moca-harness-egress) rather than stacking with it.
   kubectl apply -f "$SCRIPT_DIR/authbridge/harness-egress-ab1.yaml"
   kubectl -n default rollout status deploy/authbridge-ab1 --timeout=120s
   kubectl -n default rollout status deploy/ibac-stub --timeout=120s

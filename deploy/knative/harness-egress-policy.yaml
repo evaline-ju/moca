@@ -31,7 +31,7 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: moca-egress
+  name: moca-harness-egress
   namespace: default
 spec:
   # Knative stamps this label on the user pod; select it, not an app= label the
