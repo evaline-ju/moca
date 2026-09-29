@@ -85,7 +85,7 @@ export function sseExtension(
  * Anthropic wire's (`end_turn`, `max_tokens` -- run-turn.ts's own default when there is no message).
  * Matching only the wire's made every real, cleanly finished SSE turn end in an `error` frame.
  */
-const CLEAN_STOP_REASONS = new Set(['stop', 'length', 'end_turn', 'max_tokens']);
+export const CLEAN_STOP_REASONS = new Set(['stop', 'length', 'end_turn', 'max_tokens']);
 
 /**
  * Derive the terminal frame from the returned TurnResult (§3.4). `done` for a clean finish

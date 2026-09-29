@@ -8,8 +8,10 @@ import { trimTrailingSlashes } from './url.js';
  * A clean finish, as the harness's terminalFrame reads it (harness/src/turn-stream.ts): pi's
  * normalized reasons (`stop`, `length` -- what a real turn reports) and the Anthropic wire's
  * (`end_turn`, `max_tokens`). Checking only the wire's made every real clean reply read as an error.
+ * A copy, not an import -- this client takes no workspace dependency, so it never pulls in pi -- held
+ * equal to the harness's set by test/harness.test.ts.
  */
-const CLEAN_STOP_REASONS = new Set(['stop', 'length', 'end_turn', 'max_tokens']);
+export const CLEAN_STOP_REASONS = new Set(['stop', 'length', 'end_turn', 'max_tokens']);
 
 export class HarnessClient implements HarnessApi {
   private readonly base: string;
