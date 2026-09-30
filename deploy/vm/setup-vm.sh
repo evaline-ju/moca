@@ -49,7 +49,6 @@ cred_dir() { printf '%s' "${SH_CRED_DIR:-$SH_ENV_DIR/credentials}"; }
 # The MU1 secrets as systemd credentials: NAME (what LoadCredential= and credentialValue call it) and
 # the file under $SH_CRED_DIR that holds it. The units hardcode the default path; setup-vm.test.sh
 # checks each pair against both units.
-# shellcheck disable=SC2034  # read by setup-vm.test.sh today; the secret generation reads it next
 MU1_CREDENTIALS=(
   "SH_SESSION_TOKEN_PRIVATE_KEY:session-token-private-key"
   "SH_CREDENTIAL_KEK:credential-kek"
@@ -364,6 +363,128 @@ ensure_exec_listener() {
     "The supervisor must dial the port the relay serves SandboxExec on. Set both to the same" \
     "loopback address (the templates use $(env_file_value MOCA_RELAY_EXEC_ADDR "$SCRIPT_DIR/env/relay.env.example")), then re-run." >&2
   return 1
+}
+
+# set_env_line <file> <key> <value>: exactly one KEY=value line -- in place of the first KEY= line if
+# there is one, else of the first #KEY= (a template's commented slot), else appended on its own line;
+# any later KEY= duplicate is dropped (systemd and env_file_value both honour the LAST one, so a
+# leftover would win). Rewritten through a temp file and `cat >`, keeping the file's owner and mode,
+# as ensure_exec_listener does. awk reads the value from its environment, never from an argv.
+set_env_line() {
+  local file="$1" key="$2" tmp
+  tmp="$(mktemp)"
+  SET_ENV_VALUE="$3" awk -v k="$key" '
+    FNR == NR { if ($0 ~ "^" k "=") has = 1; next }
+    !done && $0 ~ (has ? "^" k "=" : "^#" k "=") { print k "=" ENVIRON["SET_ENV_VALUE"]; done = 1; next }
+    done && $0 ~ "^" k "=" { next }
+    { print }
+    END { if (!done) print k "=" ENVIRON["SET_ENV_VALUE"] }
+  ' "$file" "$file" >"$tmp"
+  cat "$tmp" >"$file"
+  rm -f "$tmp"
+}
+
+# The checkout's own key generator (packages/control-plane/src/genkeys.ts), run by the checkout's own
+# node -- require_build has already established the workspace is built. It prints the four MU1 secrets
+# as KEY=value lines on STDOUT only, so they never enter an argv or a file this script did not choose.
+# A function so the test can stand in for it without a built workspace.
+generate_mu1() {
+  local root="${SH_REPO_ROOT:-$SCRIPT_DIR/../..}"
+  (cd "$root/packages/control-plane" && node --import tsx src/genkeys.ts)
+}
+
+# mu1_value <KEY> <extended regex>: KEY's value in $GENERATED, which must match the regex in full, so
+# a truncated or garbled line can never be written as a secret (deploy/compose/install.sh's check).
+mu1_value() {
+  local v
+  v="$( (printf '%s\n' "$GENERATED" | sed -n "s/^$1=//p") | tail -1)"
+  if ! printf '%s\n' "$v" | grep -Eqx -- "$2"; then
+    echo "the key generator (packages/control-plane/src/genkeys.ts) produced no usable $1" >&2
+    return 1
+  fi
+  printf '%s' "$v"
+}
+
+# write_secret <file> <value>: whole or not at all, root-only -- a temp file in the same directory,
+# created under umask 077, renamed into place. printf is a builtin: the value never reaches an argv.
+write_secret() {
+  local dir tmp
+  dir="$(cred_dir)"
+  tmp="$(umask 077 && mktemp "$dir/.tmp.XXXXXX")"
+  printf '%s\n' "$2" >"$tmp"
+  mv -f "$tmp" "$dir/$1"
+}
+
+# The MU1 secrets (#366): the control plane's ed25519 signing key and credential KEK, and the exchange
+# token both tiers present -- root-only files under cred_dir, which the units load with LoadCredential=
+# (MI1 §6.7: secrets are files, never env vars). The public half of the signing key is not a secret; it
+# goes to supervisor.env as SH_SESSION_TOKEN_PUBLIC_KEYS. Generated once, only what is missing, and
+# NEVER replaced: a new KEK makes every stored credential undecryptable, a new signing key invalidates
+# every live session token. Sets MU1_NEW_KEYPAIR=1 when this run generated the keypair (Task 6 wiring).
+ensure_mu1_secrets() {
+  local sup="$SH_ENV_DIR/supervisor.env" cp="$SH_ENV_DIR/control-plane.env" dir pair name f
+  local priv_file have_pub missing=() priv='' pub='' kek='' xchg=''
+  dir="$(cred_dir)"
+  MU1_NEW_KEYPAIR=''
+  for pair in "${MU1_CREDENTIALS[@]}"; do
+    name="${pair%%:*}"
+    for f in "$sup" "$cp"; do
+      if grep -qE "^$name=" "$f" 2>/dev/null; then
+        echo "$f sets $name, which on this VM is a systemd credential ($dir/${pair#*:}): with both," \
+          "the unit refuses to boot. Move the value into that file (mode 0600), or delete the line to" \
+          "have a new one generated, then re-run. A control plane hosted elsewhere is not supported" \
+          "alongside the one setup-vm.sh installs." >&2
+        return 1
+      fi
+    done
+  done
+  for pair in "${MU1_CREDENTIALS[@]}"; do
+    if [[ -e "$dir/${pair#*:}" && ! -s "$dir/${pair#*:}" ]]; then
+      echo "$dir/${pair#*:} is empty. Restore ${pair%%:*} into it, or delete the file to have a new" \
+        "one generated -- for SH_CREDENTIAL_KEK that makes every stored credential undecryptable." >&2
+      return 1
+    fi
+  done
+  priv_file="$dir/session-token-private-key"
+  have_pub="$(env_file_value SH_SESSION_TOKEN_PUBLIC_KEYS "$sup")"
+  if [[ -s "$priv_file" && -z "$have_pub" ]] || [[ ! -e "$priv_file" && -n "$have_pub" ]]; then
+    echo "only one half of the control plane's signing keypair exists:" \
+      "$priv_file is $([[ -s "$priv_file" ]] && echo present || echo missing)," \
+      "SH_SESSION_TOKEN_PUBLIC_KEYS in $sup is $([[ -n "$have_pub" ]] && echo set || echo unset)." \
+      "They are one keypair: restore the missing half, or remove both to generate a fresh pair" \
+      "(every live session token then stops verifying), then re-run." >&2
+    return 1
+  fi
+  for pair in "${MU1_CREDENTIALS[@]}"; do
+    [[ -e "$dir/${pair#*:}" ]] || missing+=("${pair%%:*}")
+  done
+  ((${#missing[@]})) || return 0
+  install -d -m 0700 "$dir"
+  log "generating ${missing[*]} into $dir (once; a re-run never replaces one)"
+  GENERATED="$(generate_mu1)" || {
+    echo "could not run the key generator: (cd packages/control-plane && node --import tsx src/genkeys.ts)" >&2
+    return 1
+  }
+  # Every value extracted and checked BEFORE the first write, so a bad run leaves nothing half-written.
+  if [[ ! -e "$priv_file" ]]; then
+    priv="$(mu1_value SH_SESSION_TOKEN_PRIVATE_KEY '[A-Za-z0-9+/]+=*')" || { GENERATED=''; return 1; }
+    pub="$(mu1_value SH_SESSION_TOKEN_PUBLIC_KEYS '[0-9a-f]{16}:[A-Za-z0-9+/]+=*')" || { GENERATED=''; return 1; }
+  fi
+  if [[ ! -e "$dir/credential-kek" ]]; then
+    kek="$(mu1_value SH_CREDENTIAL_KEK '[A-Za-z0-9+/]{43}=')" || { GENERATED=''; return 1; }
+  fi
+  if [[ ! -e "$dir/exchange-token" ]]; then
+    xchg="$(mu1_value SH_EXCHANGE_TOKEN '[0-9a-f]{64}')" || { GENERATED=''; return 1; }
+  fi
+  GENERATED=''
+  if [[ -n "$priv" ]]; then
+    write_secret session-token-private-key "$priv"
+    set_env_line "$sup" SH_SESSION_TOKEN_PUBLIC_KEYS "$pub"
+    # shellcheck disable=SC2034  # read by setup-vm.test.sh today; wire_supervisor_mu1 reads it next
+    MU1_NEW_KEYPAIR=1
+  fi
+  [[ -z "$kek" ]] || write_secret credential-kek "$kek"
+  [[ -z "$xchg" ]] || write_secret exchange-token "$xchg"
 }
 
 # Sandboxes run on their OWN podman network (MI1 §5 R8), with a fixed subnet so the firewall below

@@ -74,6 +74,22 @@ export SH_UNIT_DIR="$TMP/units" SH_ENV_DIR="$TMP/etc" SH_SANDBOX_COUNT=3
 mkdir -p "$SH_UNIT_DIR"
 # shellcheck source=/dev/null
 source "$SCRIPT"
+# The real generator needs a built workspace (tsx); CI's deploy-scripts job has none. Keep it as
+# real_generate_mu1 for the one guarded live check below, and stand in a counter-backed fake that
+# emits values in each secret's exact form, distinct per call, so "never rotated" is observable.
+eval "$(declare -f generate_mu1 | sed '1s/^generate_mu1/real_generate_mu1/')"
+export GEN_COUNT="$TMP/gen.count"
+# shellcheck disable=SC2329  # invoked indirectly, by ensure_mu1_secrets
+generate_mu1() {
+  local n
+  n=$(($(cat "$GEN_COUNT" 2>/dev/null || echo 0) + 1))
+  echo "$n" >"$GEN_COUNT"
+  printf 'SH_SESSION_TOKEN_PRIVATE_KEY=PRIV%dAAAA\n' "$n"
+  printf 'SH_SESSION_TOKEN_PUBLIC_KEYS=%016x:PUB%dBBBB\n' "$n" "$n"
+  printf 'SH_CREDENTIAL_KEK=K%042d=\n' "$n"
+  printf 'SH_EXCHANGE_TOKEN=%064x\n' "$n"
+}
+gen_calls() { cat "$GEN_COUNT" 2>/dev/null || echo 0; }
 
 # --- sourcing must not touch the machine -------------------------------------------------
 [[ ! -s "$MOCK_LOG" ]] || fail "sourcing ran commands: $(cat "$MOCK_LOG")"
@@ -418,6 +434,140 @@ for case_ in "MOCA_RELAY_EXEC_ADDR=127.0.0.1:9444|SH_RELAY_ADDR=127.0.0.1:9443|1
 done
 pass "ensure_exec_listener: a half-migrated or disagreeing pair refuses, naming both values"
 rm -rf "$LST_DIR"
+
+# --- #366: the MU1 secrets are generated once, as root-only credential files, never rotated -------
+mu1_dir() { # a fresh SH_ENV_DIR with the three templates installed, as install_env leaves it
+  local d
+  d="$(mktemp -d)"
+  cp "$ENV_SRC_DIR/supervisor.env.example" "$d/supervisor.env"
+  cp "$ENV_SRC_DIR/control-plane.env.example" "$d/control-plane.env"
+  cp "$ENV_SRC_DIR/relay.env.example" "$d/relay.env"
+  printf '%s' "$d"
+}
+cred() { cat "$1/credentials/$2"; }
+mode_of() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; } # GNU, then BSD (macOS)
+
+M="$(mu1_dir)"
+: >"$GEN_COUNT"
+SH_ENV_DIR="$M" ensure_mu1_secrets || fail "ensure_mu1_secrets failed on a fresh install"
+[[ "$(gen_calls)" == 1 ]] || fail "a fresh install must run the generator exactly once, ran $(gen_calls)"
+[[ "$(mode_of "$M/credentials")" == 700 ]] || fail "credentials dir is $(mode_of "$M/credentials"), want 700"
+for pair in "${MU1_CREDENTIALS[@]}"; do
+  f="$M/credentials/${pair#*:}"
+  [[ -s "$f" ]] || fail "ensure_mu1_secrets did not write ${pair%%:*} to $f"
+  [[ "$(mode_of "$f")" == 600 ]] || fail "$f is mode $(mode_of "$f"), want 600"
+done
+[[ "$(cred "$M" session-token-private-key)" == PRIV1AAAA ]] || fail "private key is not the generator's"
+[[ "$(cred "$M" credential-kek)" == "K$(printf '%042d' 1)=" ]] || fail "KEK is not the generator's"
+[[ "$(cred "$M" exchange-token)" == "$(printf '%064x' 1)" ]] || fail "exchange token is not the generator's"
+# The public half lands in supervisor.env, from the SAME generator run as the private half.
+[[ "$(env_file_value SH_SESSION_TOKEN_PUBLIC_KEYS "$M/supervisor.env")" == "$(printf '%016x' 1):PUB1BBBB" ]] ||
+  fail "supervisor.env's public keyset is not the private key's pair: $(grep PUBLIC_KEYS "$M/supervisor.env")"
+[[ "$(grep -c '^SH_SESSION_TOKEN_PUBLIC_KEYS=' "$M/supervisor.env")" == 1 ]] ||
+  fail "the public keyset must replace the template's commented line, not be added beside it"
+grep -q '^#SH_SESSION_TOKEN_PUBLIC_KEYS=' "$M/supervisor.env" &&
+  fail "the template's commented #SH_SESSION_TOKEN_PUBLIC_KEYS= line was left behind"
+[[ "$MU1_NEW_KEYPAIR" == 1 ]] || fail "MU1_NEW_KEYPAIR must be 1 on the run that generates the keypair"
+# No secret in any env file, and none in any recorded argv.
+for pair in "${MU1_CREDENTIALS[@]}"; do
+  v="$(cred "$M" "${pair#*:}")"
+  grep -rqF -- "$v" "$M"/*.env && fail "${pair%%:*}'s value appears in an env file"
+  grep -qF -- "$v" "$MOCK_LOG" && fail "${pair%%:*}'s value reached a recorded argv"
+done
+pass "MU1 secrets: generated once into 0600 files under a 0700 dir; public half in supervisor.env"
+
+before="$(cat "$M"/credentials/* "$M/supervisor.env" | cksum)"
+SH_ENV_DIR="$M" ensure_mu1_secrets || fail "re-run failed"
+[[ "$(gen_calls)" == 1 ]] || fail "a re-run with every secret present must not run the generator"
+[[ "$(cat "$M"/credentials/* "$M/supervisor.env" | cksum)" == "$before" ]] || fail "a re-run rotated a secret"
+[[ -z "$MU1_NEW_KEYPAIR" ]] || fail "MU1_NEW_KEYPAIR must be empty on a run that generated no keypair"
+pass "MU1 secrets: a re-run never rotates one, and never runs the generator"
+
+# One missing secret is generated alone; the others, the keypair included, are never touched.
+priv_before="$(cred "$M" session-token-private-key)"
+kek_before="$(cred "$M" credential-kek)"
+pub_before="$(env_file_value SH_SESSION_TOKEN_PUBLIC_KEYS "$M/supervisor.env")"
+rm "$M/credentials/exchange-token"
+SH_ENV_DIR="$M" ensure_mu1_secrets || fail "regenerating a lone missing secret failed"
+[[ "$(cred "$M" exchange-token)" == "$(printf '%064x' 2)" ]] || fail "the missing exchange token was not regenerated"
+[[ "$(cred "$M" session-token-private-key)" == "$priv_before" ]] || fail "regenerating the exchange token replaced the private key"
+[[ "$(cred "$M" credential-kek)" == "$kek_before" ]] || fail "regenerating the exchange token replaced the KEK"
+[[ "$(env_file_value SH_SESSION_TOKEN_PUBLIC_KEYS "$M/supervisor.env")" == "$pub_before" ]] ||
+  fail "regenerating the exchange token replaced the public keyset"
+[[ -z "$MU1_NEW_KEYPAIR" ]] || fail "MU1_NEW_KEYPAIR set on a run that kept the keypair"
+pass "MU1 secrets: a lone missing secret is generated alone"
+rm -rf "$M"
+
+# Refusals: each names what it found, and writes nothing.
+refuses() { # <description> <expected message regex> -- runs ensure_mu1_secrets on $M, expects failure
+  local out sum_before
+  sum_before="$(find "$M" -type f -exec cat {} + 2>/dev/null | cksum)"
+  if out="$(SH_ENV_DIR="$M" ensure_mu1_secrets 2>&1)"; then fail "$1: ensure_mu1_secrets succeeded"; fi
+  grep -qE -- "$2" <<<"$out" || fail "$1: message does not match /$2/: $out"
+  [[ "$(find "$M" -type f -exec cat {} + 2>/dev/null | cksum)" == "$sum_before" ]] || fail "$1: it wrote something"
+}
+M="$(mu1_dir)"
+echo 'SH_EXCHANGE_TOKEN=hand-set' >>"$M/supervisor.env"
+refuses "a hand-set SH_EXCHANGE_TOKEN in supervisor.env" "$M/supervisor.env sets SH_EXCHANGE_TOKEN"
+rm -rf "$M"; M="$(mu1_dir)"
+echo 'SH_CREDENTIAL_KEK=hand-set' >>"$M/control-plane.env"
+refuses "a KEK as a control-plane.env line" "$M/control-plane.env sets SH_CREDENTIAL_KEK"
+rm -rf "$M"; M="$(mu1_dir)"
+echo 'SH_SESSION_TOKEN_PUBLIC_KEYS=0123456789abcdef:ELSEWHERE' >>"$M/supervisor.env"
+refuses "a public keyset with no private key (a control plane elsewhere)" \
+  "session-token-private-key.*SH_SESSION_TOKEN_PUBLIC_KEYS|SH_SESSION_TOKEN_PUBLIC_KEYS.*session-token-private-key"
+rm -rf "$M"; M="$(mu1_dir)"
+install -d -m 0700 "$M/credentials"; printf 'PRIVX\n' >"$M/credentials/session-token-private-key"
+refuses "a private key with no public keyset" "session-token-private-key.*SH_SESSION_TOKEN_PUBLIC_KEYS"
+rm -rf "$M"; M="$(mu1_dir)"
+install -d -m 0700 "$M/credentials"; : >"$M/credentials/credential-kek"
+refuses "an empty KEK file" "credential-kek is empty"
+rm -rf "$M"; M="$(mu1_dir)"
+generate_mu1_saved="$(declare -f generate_mu1)"
+# shellcheck disable=SC2329  # invoked indirectly, by ensure_mu1_secrets
+generate_mu1() { printf 'SH_SESSION_TOKEN_PRIVATE_KEY=PRIV\nSH_SESSION_TOKEN_PUBLIC_KEYS=trunc\n'; }
+refuses "a garbled generator" "no usable SH_SESSION_TOKEN_PUBLIC_KEYS"
+generate_mu1() { return 3; }
+refuses "a generator that fails" "could not run the key generator"
+eval "$generate_mu1_saved"
+rm -rf "$M"
+pass "MU1 secrets: env-line secrets, a half keypair, an empty file and a bad generator all refuse, writing nothing"
+
+# The REAL generator's two halves agree: the kid in the public keyset is the private key's own. Needs
+# tsx, so it runs only where the workspace is built (a dev box), and says so where it is not (CI).
+REAL_ROOT="$VM_DIR/../.."
+if [[ -x "$REAL_ROOT/packages/control-plane/node_modules/.bin/tsx" ]]; then
+  M="$(mu1_dir)"
+  eval "$(declare -f real_generate_mu1 | sed '1s/^real_generate_mu1/generate_mu1/')"
+  SH_REPO_ROOT="$REAL_ROOT" SH_ENV_DIR="$M" ensure_mu1_secrets || fail "the real generator failed"
+  kid="$(cd "$REAL_ROOT/packages/control-plane" && node --import tsx --input-type=module -e \
+    "import { readFileSync } from 'node:fs'; import { makeSigner } from './src/token.ts';
+     process.stdout.write(makeSigner(readFileSync(process.argv[1], 'utf8').trim()).kid);" \
+    "$M/credentials/session-token-private-key")"
+  pub="$(env_file_value SH_SESSION_TOKEN_PUBLIC_KEYS "$M/supervisor.env")"
+  [[ -n "$kid" && "${pub%%:*}" == "$kid" ]] || fail "public keyset kid '${pub%%:*}' is not the private key's '$kid'"
+  eval "$generate_mu1_saved"
+  rm -rf "$M"
+  pass "MU1 secrets: the real generator's public keyset carries the private key's own kid"
+else
+  echo "skip - real genkeys.ts kid check (workspace not built: no packages/control-plane tsx)"
+fi
+
+S="$(mktemp)"
+printf 'A=1\n#K=\nB=2' >"$S" # commented K, no final newline
+set_env_line "$S" K v1
+[[ "$(cat "$S")" == $'A=1\nK=v1\nB=2' ]] || fail "set_env_line must replace #K= in place: $(cat "$S")"
+printf 'K=old\n#K=\nK=older' >"$S"
+set_env_line "$S" K v2
+[[ "$(grep -c '^K=' "$S")" == 1 && "$(env_file_value K "$S")" == v2 ]] ||
+  fail "set_env_line must leave exactly one K=, the new value: $(cat "$S")"
+printf 'A=1' >"$S"
+set_env_line "$S" K v3
+[[ "$(cat "$S")" == $'A=1\nK=v3' ]] || fail "set_env_line must append on its own line: $(cat "$S")"
+chmod 0640 "$S"; set_env_line "$S" K v4
+[[ "$(mode_of "$S")" == 640 ]] || fail "set_env_line changed the file's mode"
+rm -f "$S"
+pass "set_env_line: replaces in place, collapses duplicates, appends on its own line, keeps the mode"
 
 # --- relay_token strips one matched pair of surrounding quotes (systemd's EnvironmentFile=
 # semantics) ----------------------------------------------------------------------------------
