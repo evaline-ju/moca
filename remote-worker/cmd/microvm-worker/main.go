@@ -196,7 +196,30 @@ func poolConfig(get func(string) string) (vmpool.Config, error) {
 			cfg.MemoryReserveBytes = v << 20
 		}
 	}
+	// SH_WORKSPACE_IDLE is the ONLY trigger that deletes a session's workspace (#338), and the
+	// 30-minute default reclaims a human-in-the-loop session that is merely waiting on a person.
+	// A deployment that serves interactive sessions sets it longer. It is not free: workspace disk
+	// is not admission-controlled (only VM memory is), so this timer is also the sole backstop
+	// against filling SH_WORKSPACE_ROOT. Unset keeps the default; Normalize still enforces
+	// StandbyIdle < WorkspaceIdle.
+	if v := get("SH_WORKSPACE_IDLE"); v != "" {
+		d, e := time.ParseDuration(v)
+		if (e != nil || d <= 0) && err == nil {
+			err = fmt.Errorf("SH_WORKSPACE_IDLE=%q must be a positive Go duration such as 8h or 90m", v)
+		} else if e == nil && d > 0 {
+			cfg.WorkspaceIdle = d
+		}
+	}
 	return cfg, err
+}
+
+// effectiveWorkspaceIdle is what the pool will use: poolConfig leaves the field zero when unset,
+// and Normalize fills the default on its own copy, so the banner reports the resolved value.
+func effectiveWorkspaceIdle(cfg vmpool.Config) time.Duration {
+	if cfg.WorkspaceIdle > 0 {
+		return cfg.WorkspaceIdle
+	}
+	return vmpool.DefaultWorkspaceIdle
 }
 
 // launcherFor maps a VMMKind to a Launcher.
@@ -687,9 +710,10 @@ func main() {
 	// nothing in journalctl naming the number, and /stats is gated behind the opt-in
 	// SH_DIAG_STATS_ADDR. cmd/worker logs the same thing as capacity=%d. #305's own thesis
 	// is that a run whose slots came from a typo must not look like a run that chose them.
-	log.Printf("microvm-worker: relay=%s sandbox_id=%s tls=%v vmm=%s D=%d guest=%dMiB budget=%dMiB slots=%d",
+	log.Printf("microvm-worker: relay=%s sandbox_id=%s tls=%v vmm=%s D=%d guest=%dMiB budget=%dMiB slots=%d workspace_idle=%s",
 		relayAddr, env(get, "SANDBOX_ID", "sbx-microvm-1"), useTLS, cfg.VMM,
-		cfg.StandbyDepth, cfg.GuestRAMBytes>>20, cfg.MaxCommittedBytes>>20, maxConcurrent)
+		cfg.StandbyDepth, cfg.GuestRAMBytes>>20, cfg.MaxCommittedBytes>>20, maxConcurrent,
+		effectiveWorkspaceIdle(cfg))
 	if w := slotBudgetWarning(cfg, maxConcurrent); w != "" {
 		log.Printf("microvm-worker: %s", w)
 	}

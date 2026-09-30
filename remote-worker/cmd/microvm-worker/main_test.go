@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rossoctl/moca/remote-worker/internal/session"
 	"github.com/rossoctl/moca/remote-worker/internal/vmpool"
@@ -397,5 +398,64 @@ func TestSlotBudgetWarningFiresOnlyWhenTheSlotCountOutrunsTheBudget(t *testing.T
 	reserved.MemoryReserveBytes = 24000 << 20
 	if slotBudgetWarning(reserved, 16) == "" {
 		t.Fatal("the reserve must be subtracted from the budget before comparing")
+	}
+}
+
+func baseEnv(extra map[string]string) func(string) string {
+	m := map[string]string{
+		"SH_VMM":              "firecracker",
+		"SH_SNAPSHOT_DIR":     "/srv/snapshots",
+		"SH_WORKSPACE_ROOT":   "/srv/workspaces",
+		"SH_MAX_COMMITTED_MB": "20480",
+	}
+	for k, v := range extra {
+		m[k] = v
+	}
+	return envFrom(m)
+}
+
+// #338: the 30-minute default reclaims an idle human-in-the-loop session's workspace. The
+// knob lets a deployment choose a longer lifetime; unset must keep today's behaviour.
+func TestPoolConfigReadsWorkspaceIdle(t *testing.T) {
+	cfg, err := poolConfig(baseEnv(map[string]string{"SH_WORKSPACE_IDLE": "8h"}))
+	if err != nil {
+		t.Fatalf("poolConfig: %v", err)
+	}
+	if cfg.WorkspaceIdle != 8*time.Hour {
+		t.Fatalf("WorkspaceIdle = %v, want 8h", cfg.WorkspaceIdle)
+	}
+}
+
+func TestPoolConfigLeavesWorkspaceIdleToTheDefaultWhenUnset(t *testing.T) {
+	cfg, err := poolConfig(baseEnv(nil))
+	if err != nil {
+		t.Fatalf("poolConfig: %v", err)
+	}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if cfg.WorkspaceIdle != vmpool.DefaultWorkspaceIdle {
+		t.Fatalf("WorkspaceIdle = %v, want the default %v", cfg.WorkspaceIdle, vmpool.DefaultWorkspaceIdle)
+	}
+}
+
+func TestPoolConfigRefusesABadWorkspaceIdle(t *testing.T) {
+	for _, v := range []string{"8", "soon", "0s", "-1h"} {
+		_, err := poolConfig(baseEnv(map[string]string{"SH_WORKSPACE_IDLE": v}))
+		if err == nil || !strings.Contains(err.Error(), "SH_WORKSPACE_IDLE") {
+			t.Fatalf("SH_WORKSPACE_IDLE=%q: err = %v, want a refusal naming the variable", v, err)
+		}
+	}
+}
+
+// A workspace lifetime shorter than the standby lifetime inverts spec §4.4's "RAM is urgent and
+// disk is not". poolConfig accepts the value; Normalize must refuse it.
+func TestAWorkspaceIdleBelowStandbyIdleIsRefusedAtNormalize(t *testing.T) {
+	cfg, err := poolConfig(baseEnv(map[string]string{"SH_WORKSPACE_IDLE": "60s"}))
+	if err != nil {
+		t.Fatalf("poolConfig: %v", err)
+	}
+	if err := cfg.Normalize(); err == nil || !strings.Contains(err.Error(), "WorkspaceIdle") {
+		t.Fatalf("Normalize err = %v, want the StandbyIdle < WorkspaceIdle refusal", err)
 	}
 }

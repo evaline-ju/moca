@@ -1551,5 +1551,18 @@ chmod -R u+rwX "$pub_tmproot" 2>/dev/null
 rm -rf "$pub_tmproot"
 trap - EXIT
 
+echo "== the guest probe asks for every capability the container tier advertises"
+# Parity is pinned against the container worker's OWN list, read from source, so a tool added
+# there without being added here fails this test instead of drifting silently (#369 scope 2).
+probe_line="$(grep -E 'for c in .*; do command -v' "$SCRIPT")"
+# `"bash", "rg", ...` -> `bash rg ...`
+container_caps="$(sed -nE 's/^var probed = \[\]string\{(.*)\}$/\1/p' \
+  "$DIR/../../remote-worker/cmd/worker/main.go" | tr -d '"' | tr ',' ' ')"
+check "container tier's probed list was found" "$([ -n "$container_caps" ] && echo yes || echo no)" "yes"
+for cap in $container_caps; do
+  check "guest probe includes '$cap'" \
+    "$(printf '%s' "$probe_line" | grep -qE "(^| )$cap( |;)" && echo yes || echo no)" "yes"
+done
+
 if [ "$fails" -eq 0 ]; then echo "PASS"; else echo "FAIL ($fails)"; fi
 exit "$fails"

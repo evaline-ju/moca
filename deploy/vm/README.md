@@ -5,6 +5,8 @@ Linux VM running the supervisor, the relay and the MU1 control plane under syste
 the sandbox containers as podman containers alongside them. `setup-vm.sh` is the sibling of
 `deploy/knative/setup-kind.sh` and `deploy/knative/setup-ocp.sh`.
 
+> P4 microVM tier on the same host: see [deploy/microvm/P4-ON-P6.md](../microvm/P4-ON-P6.md).
+
 ## Prerequisites
 
 - A Linux VM with systemd and [podman](https://podman.io/) installed, with a netavark network
