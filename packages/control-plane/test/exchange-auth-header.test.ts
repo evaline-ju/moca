@@ -96,7 +96,10 @@ describe('exchangeCredential: authHeader', () => {
     // No endpoint on the credential, and a deployment default of api.anthropic.com (compose
     // documents that default): Bearer there always 401s, and PUT could not know the default.
     const dflt = makeDeps({
-      config: { exchangeToken: 'shared-abc', defaultInferenceEndpoint: 'https://api.anthropic.com' }, // notsecret
+      config: {
+        exchangeToken: 'shared-abc',
+        defaultInferenceEndpoint: 'https://api.anthropic.com',
+      }, // notsecret
     });
     await seedCredential(dflt, 'github:1234', 'my-anthropic', {
       destination: { hosts: ['api.anthropic.com'] },
@@ -115,9 +118,15 @@ describe('exchangeCredential: authHeader', () => {
 
   it('lets an api-key credential with no endpoint use an api.anthropic.com default', async () => {
     const dflt = makeDeps({
-      config: { exchangeToken: 'shared-abc', defaultInferenceEndpoint: 'https://api.anthropic.com' }, // notsecret
+      config: {
+        exchangeToken: 'shared-abc',
+        defaultInferenceEndpoint: 'https://api.anthropic.com',
+      }, // notsecret
     });
-    await seedCredential(dflt, 'github:1234', 'my-anthropic', { ...anthropicKey, endpoint: undefined });
+    await seedCredential(dflt, 'github:1234', 'my-anthropic', {
+      ...anthropicKey,
+      endpoint: undefined,
+    });
     const res = await exchangeCredential(await sessionToken(dflt), dflt);
     expect(res.authHeader).toBe('x-api-key');
     expect(res.anthropicBaseUrl).toBe('https://api.anthropic.com');

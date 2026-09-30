@@ -197,7 +197,10 @@ async function exchange(token: string, deps: TurnAuthDeps): Promise<ExchangeResp
     body.authHeader !== 'authorization' &&
     body.authHeader !== 'x-api-key'
   ) {
-    throw new CpError('credential_unavailable', 'control plane returned an unknown credential header');
+    throw new CpError(
+      'credential_unavailable',
+      'control plane returned an unknown credential header',
+    );
   }
   return body as unknown as ExchangeResponse;
 }

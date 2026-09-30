@@ -29,16 +29,18 @@ const RAW_KEY = 'sk-ant-api03-not-a-real-key'; // notsecret
 
 describe('inferenceAuthHeader', () => {
   it('maps the two sendable shapes, case-insensitively on the header name', () => {
-    expect(inferenceAuthHeader({ header: 'Authorization', format: 'Bearer {token}' }, 'token')).toBe(
-      'authorization',
-    );
+    expect(
+      inferenceAuthHeader({ header: 'Authorization', format: 'Bearer {token}' }, 'token'),
+    ).toBe('authorization');
     expect(inferenceAuthHeader({ header: 'X-API-Key', format: '{key}' }, 'key')).toBe('x-api-key');
     expect(inferenceAuthHeader({ header: 'x-api-key', format: '{key}' }, 'key')).toBe('x-api-key');
   });
 
   it('returns undefined for anything else, including a format naming a different field', () => {
     expect(inferenceAuthHeader({ header: 'X-Custom', format: '{key}' }, 'key')).toBeUndefined();
-    expect(inferenceAuthHeader({ header: 'Authorization', format: 'Token {token}' }, 'token')).toBeUndefined();
+    expect(
+      inferenceAuthHeader({ header: 'Authorization', format: 'Token {token}' }, 'token'),
+    ).toBeUndefined();
     expect(inferenceAuthHeader({ header: 'x-api-key', format: '{token}' }, 'key')).toBeUndefined();
   });
 });
@@ -83,7 +85,10 @@ describe('parseCredentialBody: inference shapes', () => {
   it('refuses any Bearer credential to api.anthropic.com, whatever the value', () => {
     // Review Focus 3.
     const r = refusal(
-      inference({ destination: { hosts: ['api.anthropic.com'] }, endpoint: 'https://api.anthropic.com' }),
+      inference({
+        destination: { hosts: ['api.anthropic.com'] },
+        endpoint: 'https://api.anthropic.com',
+      }),
     );
     expect(r.code).toBe('invalid_request');
     expect(r.message).toContain('x-api-key');

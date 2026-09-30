@@ -68,13 +68,13 @@ function checkInferenceShape(
   // it a caller's credential that way (MI1 R2), so an OAuth token here always 401s.
   if (value.startsWith('sk-ant-oat')) {
     invalid(
-      "Anthropic OAuth tokens (sk-ant-oat…) are not supported as inference credentials; " +
+      'Anthropic OAuth tokens (sk-ant-oat…) are not supported as inference credentials; ' +
         "store an API key (sk-ant-api…) with kind 'api-key'",
     );
   }
   if (value.startsWith('sk-ant-api') && header === 'authorization') {
     invalid(
-      "an Anthropic API key (sk-ant-api…) is read from x-api-key, not Authorization: " +
+      'an Anthropic API key (sk-ant-api…) is read from x-api-key, not Authorization: ' +
         "store it with kind 'api-key'",
     );
   }
