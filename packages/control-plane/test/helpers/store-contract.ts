@@ -185,11 +185,11 @@ export function storeContract(label: string, backend: () => ContractBackend): vo
       await store.put(
         ALICE,
         parseCredentialBody('my-anthropic', {
-          kind: 'bearer',
+          kind: 'api-key',
           consumer: 'inference',
           destination: { hosts: ['api.anthropic.com'] },
           endpoint: 'https://api.anthropic.com',
-          secret: { token: 'sk-ant-fake' }, // notsecret
+          secret: { key: 'sk-ant-api03-fake' }, // notsecret
         }),
       );
       await store.put(ALICE, cred('github-work'));

@@ -234,7 +234,15 @@ export async function acquireTurnSandbox(
 }
 
 /**
- * What rides in `Authorization: Bearer …` upstream — TAGGED, because the same field carries two
+ * Which header a caller's credential travels in (#368), chosen by the control plane from the
+ * credential's binding. A gateway reads `Authorization: Bearer`; api.anthropic.com reads an API key
+ * only from `x-api-key`. Absent means `authorization`: what an older control plane sends, and what
+ * placeholder mode always uses (the injector picks the upstream header there).
+ */
+export type InferenceAuthHeader = 'authorization' | 'x-api-key';
+
+/**
+ * The caller's credential as it rides upstream — TAGGED, because the same field carries two
  * incompatible things (MU1 spec §3.6):
  *
  *   placeholder — an inert, subject-derived stand-in; RC1's `static-inject` rewrites it to the real
@@ -245,10 +253,12 @@ export async function acquireTurnSandbox(
  * A bare string would make the two indistinguishable, and both failure directions are silent: a
  * placeholder-mode deployment with a misconfigured injector sends the placeholder upstream and gets an
  * opaque auth error, while a direct-mode deployment that later grows an injector has its REAL key
- * rewritten. The tag makes the mode assertable rather than inferred.
+ * rewritten. The tag makes the mode assertable rather than inferred. `header` is which of the two
+ * headers it goes in (see InferenceAuthHeader).
  */
 export type UpstreamCredential =
-  { mode: 'placeholder'; value: string } | { mode: 'direct'; value: string };
+  | { mode: 'placeholder'; value: string; header?: InferenceAuthHeader }
+  | { mode: 'direct'; value: string; header?: InferenceAuthHeader };
 
 export interface TurnConfig {
   redisUrl?: string;
@@ -495,7 +505,8 @@ export interface TurnResult {
  *
  * When a gateway base URL or auth token is in play (config or env), rewrite the model to
  * call the gateway with Bearer auth and strip `x-api-key` (the gateway authenticates via
- * Authorization). Also seeds `ANTHROPIC_API_KEY` with a constant sentinel when unset, since some
+ * Authorization) -- or, for a caller credential whose header is `x-api-key` (a raw Anthropic API
+ * key, #368), send it as `x-api-key` and strip Authorization instead. Also seeds `ANTHROPIC_API_KEY` with a constant sentinel when unset, since some
  * pi-ai code paths still read the env var. Returns the base model unchanged when neither a
  * gateway base nor a token is configured (direct-key mode).
  *
@@ -526,10 +537,12 @@ export function applyModelGateway<M extends { headers?: Record<string, unknown> 
   }
   // `||` (not `??`) so an empty-string config value falls back to the env var rather than
   // suppressing it — "" is a "not set" sentinel here, not a meaningful credential.
+  const upstream = config?.upstreamCredential?.value ? config.upstreamCredential : undefined;
   const authToken =
-    config?.upstreamCredential?.value ||
-    config?.anthropicAuthToken ||
-    process.env.ANTHROPIC_AUTH_TOKEN;
+    upstream?.value || config?.anthropicAuthToken || process.env.ANTHROPIC_AUTH_TOKEN;
+  // Only a caller's own credential carries a header choice. The deployment's token is a gateway
+  // Bearer, so an empty upstream credential that falls through to it must not bring its header along.
+  const authHeader = upstream?.header ?? 'authorization';
   // Pi resolves the request key BY PROVIDER NAME, so ANTHROPIC_API_KEY must exist whenever a Bearer
   // token is in play. It is seeded with a constant that names no one, never with the caller's
   // token: no caller's credential becomes process-wide (MI1 §5 R2). The Bearer header below carries
@@ -558,11 +571,19 @@ export function applyModelGateway<M extends { headers?: Record<string, unknown> 
       : {}),
     ...(authToken
       ? {
-          headers: {
-            ...baseModel.headers,
-            Authorization: `Bearer ${authToken}`,
-            'x-api-key': null, // strip x-api-key when using gateway Bearer auth
-          } as unknown as Record<string, string>,
+          headers: (authHeader === 'x-api-key'
+            ? {
+                ...baseModel.headers,
+                // Replaces the sentinel the SDK would send from ANTHROPIC_API_KEY; the caller's key
+                // lives in this model's headers only, never in the environment (MI1 §5 R2).
+                'x-api-key': authToken,
+                Authorization: null,
+              }
+            : {
+                ...baseModel.headers,
+                Authorization: `Bearer ${authToken}`,
+                'x-api-key': null, // strip x-api-key when using gateway Bearer auth
+              }) as unknown as Record<string, string>,
         }
       : {}),
   };

@@ -207,4 +207,45 @@ describe('applyModelGateway', () => {
       expect(applyModelGateway(openaiModel, {})).toBe(openaiModel);
     });
   });
+
+  describe("an upstream credential's header (#368)", () => {
+    it("sends it as x-api-key and strips Authorization when the header is 'x-api-key'", () => {
+      const m = applyModelGateway(baseModel, {
+        anthropicBaseUrl: 'https://api.anthropic.com',
+        upstreamCredential: { mode: 'direct', value: 'sk-ant-api03-x', header: 'x-api-key' }, // notsecret
+      }) as any;
+      expect(m.headers['x-api-key']).toBe('sk-ant-api03-x'); // notsecret
+      expect(m.headers.Authorization).toBeNull();
+    });
+
+    it('keeps the caller key out of the environment on the x-api-key path too (MI1 R2)', () => {
+      applyModelGateway(baseModel, {
+        anthropicBaseUrl: 'https://api.anthropic.com',
+        upstreamCredential: { mode: 'direct', value: 'sk-ant-api03-x', header: 'x-api-key' }, // notsecret
+      });
+      expect(process.env.ANTHROPIC_API_KEY).toBe(AMBIENT_KEY_SENTINEL);
+      expect(JSON.stringify(process.env)).not.toContain('sk-ant-api03-x');
+    });
+
+    it("treats an explicit 'authorization' exactly like an absent header", () => {
+      const m = applyModelGateway(baseModel, {
+        anthropicBaseUrl: 'https://gw.example',
+        upstreamCredential: { mode: 'direct', value: 'gw', header: 'authorization' }, // notsecret
+      }) as any;
+      expect(m.headers.Authorization).toBe('Bearer gw');
+      expect(m.headers['x-api-key']).toBeNull();
+    });
+
+    it('never applies a header choice to the deployment token: only a caller credential carries one', () => {
+      // An empty-valued upstream credential falls through to the deployment token; its header must
+      // not ride along and turn the deployment's gateway Bearer into x-api-key.
+      const m = applyModelGateway(baseModel, {
+        anthropicBaseUrl: 'https://gw.example',
+        anthropicAuthToken: 'deploy-tok', // notsecret
+        upstreamCredential: { mode: 'direct', value: '', header: 'x-api-key' },
+      }) as any;
+      expect(m.headers.Authorization).toBe('Bearer deploy-tok'); // notsecret
+      expect(m.headers['x-api-key']).toBeNull();
+    });
+  });
 });

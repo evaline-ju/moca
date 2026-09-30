@@ -1,4 +1,5 @@
 import { timingSafeEqual } from 'node:crypto';
+import { inferenceAuthHeader, type InferenceAuthHeader } from './credential-store.js';
 import { CpError } from './errors.js';
 import type { CpDeps } from './handlers.js';
 import { verifyToken } from './token.js';
@@ -22,6 +23,15 @@ export interface ExchangeResponse {
   anthropicBaseUrl: string;
   sessionId: string;
   subject: string;
+  /**
+   * The header the data plane sends the credential in (#368), from its binding. Present ONLY in
+   * direct mode and only when it is not the default: absent means `Authorization: Bearer`, the wire
+   * shape an older data plane expects. An `api-key` kind (default binding `X-API-Key`) now goes as
+   * x-api-key in direct mode; before #368 every inference credential went as Bearer. In placeholder
+   * mode it is always absent: the injector picks the upstream header. Under MI1 S2 the grant carries
+   * the binding to moca-egress instead.
+   */
+  authHeader?: Exclude<InferenceAuthHeader, 'authorization'>;
 }
 
 /**
@@ -88,6 +98,7 @@ export async function exchangeCredential(
   let secretValue: string | undefined;
   let credentialName = rec.credentialName;
   let endpoint: string | null = null;
+  let authHeader: InferenceAuthHeader = 'authorization';
   let usedOperatorFallback = false;
 
   if (stored) {
@@ -98,6 +109,19 @@ export async function exchangeCredential(
     // spec.secretFields, so with exactly one field there is nothing to pick wrong.
     secretValue = Object.values(stored.secret)[0];
     endpoint = stored.descriptor.endpoint;
+    const [field] = Object.keys(stored.secret);
+    const header = field ? inferenceAuthHeader(stored.descriptor.binding, field) : undefined;
+    if (!header) {
+      // Written before parseCredentialBody refused unsendable bindings (#368). Falling back to Bearer
+      // would send the secret in a header its binding never named -- refuse, attributably.
+      throw new CpError(
+        'credential_required',
+        `credential '${rec.credentialName}' has a binding the inference path cannot send; store it ` +
+          "again as kind 'bearer' (gateway token) or 'api-key' (Anthropic API key)",
+        rec.sessionId,
+      );
+    }
+    authHeader = header;
   } else if (deps.config.allowOperatorFallback && deps.config.operatorInferenceToken) {
     // The operator fallback relocates rather than disappearing (spec §6.4): resolved HERE, by the
     // trusted tier, attributable to a subject and logged -- never as an env fallback in the harness.
@@ -135,6 +159,55 @@ export async function exchangeCredential(
   // it outright (spec §3.6).
   const mode: CredentialMode = deps.config.injectorConfigured ? 'placeholder' : 'direct';
 
+  // In DIRECT mode the harness sends the secret itself, in the header its binding names, so the
+  // header and the endpoint it resolves to must agree. PUT checks the credential's own endpoint but
+  // cannot see the deployment default it may resolve to here. In placeholder mode the injector, not
+  // the harness, picks the upstream header (AB1's `inject_header`), so none of this applies (#368).
+  if (mode === 'direct') {
+    const host = URL.parse(baseUrl)?.hostname;
+    // Which of the two mismatches this is, or undefined for none.
+    let mismatch: 'bearer-to-anthropic' | 'raw-key-elsewhere' | undefined;
+    if (authHeader === 'authorization' && host === 'api.anthropic.com') {
+      // Bearer there always 401s: it reads API keys from x-api-key only.
+      mismatch = 'bearer-to-anthropic';
+    } else if (secretValue.startsWith('sk-ant-api') && host !== 'api.anthropic.com') {
+      // A raw Anthropic key aimed anywhere else is a misdirected secret (spec §6.2) and a 401 there.
+      mismatch = 'raw-key-elsewhere';
+    }
+    if (mismatch && usedOperatorFallback) {
+      // The operator's token, not the caller's: the caller cannot re-store `operator-fallback`, so the
+      // message names the settings and the code blames the deployment (PR #372 review). The data
+      // plane shows the caller only "control plane returned 503" (turn-auth admits caller-attributable
+      // codes only), so the log line is how the operator finds out. It names settings, never the value.
+      const why =
+        mismatch === 'bearer-to-anthropic'
+          ? 'the operator fallback token (SH_OPERATOR_INFERENCE_TOKEN) is sent as Bearer, but ' +
+            'SH_DEFAULT_INFERENCE_ENDPOINT is api.anthropic.com, which reads API keys from ' +
+            'x-api-key; the deployment operator must point it at a gateway'
+          : 'the operator fallback token (SH_OPERATOR_INFERENCE_TOKEN) is an Anthropic API key, but ' +
+            `SH_DEFAULT_INFERENCE_ENDPOINT resolves to ${host ?? 'an unparseable URL'}; the ` +
+            'deployment operator must fix the pair, or you can store your own inference credential';
+      console.error(`[control-plane] operator fallback misconfigured: ${why}`);
+      throw new CpError('credential_unavailable', why, rec.sessionId);
+    }
+    if (mismatch === 'bearer-to-anthropic') {
+      throw new CpError(
+        'credential_required',
+        `credential '${credentialName}' is a Bearer token, but its endpoint resolves to ` +
+          "api.anthropic.com, which reads API keys from x-api-key: store the key with kind 'api-key'",
+        rec.sessionId,
+      );
+    }
+    if (mismatch === 'raw-key-elsewhere') {
+      throw new CpError(
+        'credential_required',
+        `credential '${credentialName}' is an Anthropic API key, but its endpoint resolves to ` +
+          `${host ?? 'an unparseable URL'}: set its endpoint to https://api.anthropic.com`,
+        rec.sessionId,
+      );
+    }
+  }
+
   await deps.index.audit({
     subject: rec.owner,
     sessionId: rec.sessionId,
@@ -148,5 +221,8 @@ export async function exchangeCredential(
     anthropicBaseUrl: baseUrl,
     sessionId: rec.sessionId,
     subject: rec.owner,
+    // Direct mode only: in placeholder mode the harness sends `Bearer <placeholder>` as it always did,
+    // and the injector decides the upstream header.
+    ...(mode === 'direct' && authHeader === 'x-api-key' ? { authHeader } : {}),
   };
 }

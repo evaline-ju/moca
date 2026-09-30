@@ -16,6 +16,7 @@ export { KEK_BYTES, credentialAad, keksFromBase64, open, seal, type Opened } fro
 export {
   CREDENTIAL_NAME_RE,
   InMemoryCredentialStore,
+  inferenceAuthHeader,
   kindSpec,
   parseCredentialBody,
   registerKind,
@@ -25,6 +26,7 @@ export {
   type CredentialBinding,
   type CredentialDescriptor,
   type CredentialStore,
+  type InferenceAuthHeader,
   type KindSpec,
   type StoredCredential,
 } from './credential-store.js';

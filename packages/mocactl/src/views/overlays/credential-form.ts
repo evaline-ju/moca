@@ -21,6 +21,42 @@ const LABELS: Record<string, string> = {
   accessToken: 'Access token',
 };
 
+// Kinds the server sends as `Authorization: Bearer`; `api-key` goes as x-api-key (#368).
+const BEARER_KINDS = new Set(['bearer', 'oauth2-token']);
+const ANTHROPIC_API_HOST = 'api.anthropic.com';
+
+/**
+ * The control plane's write-time inference checks (credential-store.ts, #368), mirrored so the form
+ * says what to change before submitting. The server stays authoritative; an unknown kind is left to
+ * it. Messages name key PREFIXES only, never the value.
+ */
+function inferenceShapeProblem(values: Record<string, string>): string | undefined {
+  const fields = KNOWN_KINDS[values.kind];
+  if (!fields || fields.length !== 1) return undefined;
+  const secret = values[fields[0]!] ?? '';
+  const bearer = BEARER_KINDS.has(values.kind);
+  const endpoint = values.endpoint?.trim() ?? '';
+  if (secret.startsWith('sk-ant-oat')) {
+    return 'Anthropic OAuth tokens (sk-ant-oat…) are not supported: use an API key (sk-ant-api…) with kind api-key';
+  }
+  if (bearer && secret.startsWith('sk-ant-api')) {
+    return 'an Anthropic API key (sk-ant-api…) is sent as x-api-key: choose kind api-key, endpoint https://api.anthropic.com';
+  }
+  if (!endpoint) return undefined;
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return 'endpoint must be an absolute URL, e.g. https://api.anthropic.com';
+  }
+  if (url.hostname !== ANTHROPIC_API_HOST) return undefined;
+  if (bearer) return `${ANTHROPIC_API_HOST} reads API keys from x-api-key: choose kind api-key`;
+  if (url.pathname !== '/' || url.search !== '') {
+    return `use https://${ANTHROPIC_API_HOST} as the endpoint (no /v1)`;
+  }
+  return undefined;
+}
+
 export function credentialFields(): FormField[] {
   const secretFields = [...new Set(Object.values(KNOWN_KINDS).flat())];
   return [
@@ -29,7 +65,13 @@ export function credentialFields(): FormField[] {
       label: 'Name',
       hint: 'lower-case letters, digits and dashes, e.g. anthropic-work',
     },
-    { key: 'kind', label: 'Kind', initial: 'bearer', suggestions: Object.keys(KNOWN_KINDS) },
+    {
+      key: 'kind',
+      label: 'Kind',
+      initial: 'bearer',
+      suggestions: Object.keys(KNOWN_KINDS),
+      hint: 'inference: bearer for a gateway token (LiteLLM etc.), api-key for an Anthropic API key (sk-ant-api…)',
+    },
     { key: 'consumer', label: 'Consumer', initial: 'inference', suggestions: CONSUMERS },
     {
       key: 'hosts',
@@ -40,7 +82,7 @@ export function credentialFields(): FormField[] {
       key: 'endpoint',
       label: 'Gateway endpoint',
       optional: true,
-      hint: 'the model gateway base URL, as for ANTHROPIC_BASE_URL — no /v1, e.g. https://litellm.internal; empty uses the deployment default',
+      hint: 'the model gateway base URL, as for ANTHROPIC_BASE_URL — no /v1, e.g. https://litellm.internal, or https://api.anthropic.com for kind api-key; empty uses the deployment default',
       visible: (v) => v.consumer === 'inference',
     },
     ...secretFields.map((key) => ({
@@ -95,7 +137,7 @@ export function validateCredential(values: Record<string, string>): string | und
       }
     }
   }
-  return undefined;
+  return values.consumer === 'inference' ? inferenceShapeProblem(values) : undefined;
 }
 
 export function toPutRequest(values: Record<string, string>): {

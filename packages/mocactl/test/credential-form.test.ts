@@ -116,3 +116,53 @@ describe('toPutRequest', () => {
     });
   });
 });
+
+describe('validateCredential: inference shapes that would 401 (#368)', () => {
+  const RAW_KEY = 'sk-ant-api03-not-a-real-key'; // notsecret
+  const anthropic = {
+    ...base,
+    kind: 'api-key',
+    endpoint: 'https://api.anthropic.com',
+    key: RAW_KEY,
+  };
+
+  it('accepts a raw Anthropic key as kind api-key to the bare origin', () => {
+    expect(validateCredential(anthropic)).toBeUndefined();
+  });
+
+  it('accepts a gateway token as kind bearer with the gateway endpoint', () => {
+    expect(
+      validateCredential({ ...base, endpoint: 'https://litellm.internal', token: 'gw' }),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    [{ ...base, token: RAW_KEY }, /kind api-key/],
+    [{ ...base, token: 'sk-ant-oat01-x' }, /sk-ant-oat/], // notsecret
+    [{ ...base, endpoint: 'https://api.anthropic.com', token: 'gw' }, /x-api-key/],
+    [{ ...anthropic, endpoint: 'https://api.anthropic.com/v1' }, /no \/v1/],
+    [{ ...anthropic, endpoint: 'not a url' }, /absolute URL/],
+  ])('refuses %o', (values, message) => {
+    expect(validateCredential(values)).toMatch(message);
+  });
+
+  it('leaves an api-key credential with no endpoint to the server, which knows the default', () => {
+    expect(validateCredential({ ...anthropic, endpoint: '' })).toBeUndefined();
+  });
+
+  it('never echoes the key in a message', () => {
+    expect(validateCredential({ ...base, token: RAW_KEY })).not.toContain(RAW_KEY);
+  });
+
+  it('leaves a sandbox-egress credential alone', () => {
+    expect(
+      validateCredential({ ...base, consumer: 'sandbox-egress', token: RAW_KEY }),
+    ).toBeUndefined();
+  });
+
+  it('names both working shapes in the kind hint', () => {
+    const hint = credentialFields().find((f) => f.key === 'kind')!.hint!;
+    expect(hint).toContain('bearer');
+    expect(hint).toContain('api-key');
+  });
+});

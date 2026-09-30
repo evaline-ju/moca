@@ -19,6 +19,85 @@ export interface CredentialBinding {
   format: string;
 }
 
+/**
+ * The two headers an INFERENCE credential can travel in (#368). A gateway (LiteLLM-style) reads
+ * `Authorization: Bearer`; api.anthropic.com reads an API key ONLY from `x-api-key` and answers a
+ * Bearer API key with an opaque 401. Lower-case because that is how they go on the wire.
+ */
+export type InferenceAuthHeader = 'authorization' | 'x-api-key';
+
+/**
+ * Which of the two headers a binding describes, or undefined when it is neither. `field` is the kind's
+ * single secret field, so `{header: 'x-api-key', format: '{token}'}` on an `api-key` kind (field
+ * `key`) is NOT sendable: its format names a field the secret does not have.
+ *
+ * Header names compare case-insensitively (HTTP), formats exactly: the format is a template, and a
+ * near-miss like `Token {token}` is a different scheme, not a typo to forgive.
+ */
+export function inferenceAuthHeader(
+  binding: CredentialBinding,
+  field: string,
+): InferenceAuthHeader | undefined {
+  const header = binding.header.toLowerCase();
+  if (header === 'authorization' && binding.format === `Bearer {${field}}`) return 'authorization';
+  if (header === 'x-api-key' && binding.format === `{${field}}`) return 'x-api-key';
+  return undefined;
+}
+
+const ANTHROPIC_API_HOST = 'api.anthropic.com';
+
+/**
+ * Refuse, at write time, the inference shapes known to 401 (#368, #362 item 3), so the failure lands
+ * on the person who can fix it with a message naming the fix, never as an opaque 401 three turns in.
+ * Messages name key PREFIXES only, never the value.
+ */
+function checkInferenceShape(
+  field: string,
+  binding: CredentialBinding,
+  endpoint: string | null,
+  value: string,
+): void {
+  const header = inferenceAuthHeader(binding, field);
+  if (!header) {
+    invalid(
+      `an inference credential is sent as 'Authorization: Bearer {${field}}' or ` +
+        `'x-api-key: {${field}}'; binding '${binding.header}: ${binding.format}' is neither`,
+    );
+  }
+  // pi-ai adds the OAuth beta headers only when ITS apiKey is the token, and the harness never hands
+  // it a caller's credential that way (MI1 R2), so an OAuth token here always 401s.
+  if (value.startsWith('sk-ant-oat')) {
+    invalid(
+      'Anthropic OAuth tokens (sk-ant-oat…) are not supported as inference credentials; ' +
+        "store an API key (sk-ant-api…) with kind 'api-key'",
+    );
+  }
+  if (value.startsWith('sk-ant-api') && header === 'authorization') {
+    invalid(
+      'an Anthropic API key (sk-ant-api…) is read from x-api-key, not Authorization: ' +
+        "store it with kind 'api-key'",
+    );
+  }
+  if (endpoint) {
+    const url = new URL(endpoint);
+    if (url.hostname === ANTHROPIC_API_HOST) {
+      if (header === 'authorization') {
+        invalid(
+          `${ANTHROPIC_API_HOST} reads API keys from x-api-key, not Authorization: ` +
+            "store the key with kind 'api-key'",
+        );
+      }
+      // The Anthropic client appends /v1/messages to its base URL, so `.../v1` becomes /v1/v1/messages.
+      if (url.pathname !== '/' || url.search !== '') {
+        invalid(
+          `the endpoint for ${ANTHROPIC_API_HOST} is the bare origin https://${ANTHROPIC_API_HOST} ` +
+            '(no /v1): the client adds /v1/messages itself',
+        );
+      }
+    }
+  }
+}
+
 export interface CredentialDescriptor {
   name: string;
   kind: string;
@@ -226,6 +305,12 @@ export function parseCredentialBody(name: string, body: unknown): StoredCredenti
     if (typeof v !== 'string' || v.length === 0)
       invalid(`secret.${field} must be a non-empty string`);
     secret[field] = v as string;
+  }
+
+  if (consumer === 'inference') {
+    // Exactly one secret field here: the single-field refusal above guarantees it.
+    const field = spec.secretFields[0]!;
+    checkInferenceShape(field, binding, endpoint, secret[field]!);
   }
 
   return {
