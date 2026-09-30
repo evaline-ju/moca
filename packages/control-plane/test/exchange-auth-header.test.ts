@@ -174,6 +174,25 @@ describe('exchangeCredential: authHeader', () => {
     });
   });
 
+  it('sends the operator fallback under SH_OPERATOR_INFERENCE_HEADER: a raw operator key goes as x-api-key', async () => {
+    const fb = makeDeps({
+      config: {
+        exchangeToken: 'shared-abc', // notsecret
+        allowOperatorFallback: true,
+        operatorInferenceToken: RAW_KEY,
+        operatorInferenceHeader: 'x-api-key',
+        defaultInferenceEndpoint: 'https://api.anthropic.com',
+      },
+    });
+    await seedCredential(fb);
+    const session = await sessionToken(fb, 'sid-op-xapi');
+    await fb.credentials.delete('github:1234', 'my-anthropic');
+    const res = await exchangeCredential(session, fb);
+    expect(res.authHeader).toBe('x-api-key');
+    expect(res.anthropicAuthToken).toBe(RAW_KEY);
+    expect(res.anthropicBaseUrl).toBe('https://api.anthropic.com');
+  });
+
   it('refuses a Bearer credential whose RESOLVED endpoint is api.anthropic.com', async () => {
     // No endpoint on the credential, and a deployment default of api.anthropic.com (compose
     // documents that default): Bearer there always 401s, and PUT could not know the default.

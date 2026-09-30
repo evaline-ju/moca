@@ -4,6 +4,7 @@ import {
   parseCredentialBody,
   validateCredentialName,
   type CredentialStore,
+  type InferenceAuthHeader,
 } from './credential-store.js';
 import { exchangeCredential } from './exchange.js';
 import type { RunKubectl } from './kubectl.js';
@@ -22,6 +23,11 @@ export interface CpConfig {
   defaultInferenceEndpoint?: string;
   /** The operator's own key, resolved at EXCHANGE time behind allowOperatorFallback (spec §6.4). */
   operatorInferenceToken?: string;
+  /**
+   * The header the operator's token travels in, in direct mode (#368): `authorization` (Bearer, a
+   * gateway token) or `x-api-key` (a raw Anthropic key). Absent means `authorization`.
+   */
+  operatorInferenceHeader?: InferenceAuthHeader;
   allowOperatorFallback: boolean;
   /** Placeholder mode wins whenever the deployment has an injector (spec §3.6). */
   injectorConfigured: boolean;

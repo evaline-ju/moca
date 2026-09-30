@@ -50,16 +50,20 @@ describe('configFromEnv', () => {
   });
 
   it('reads the operator fallback only from an explicit true', () => {
-    expect(
-      configFromEnv({ ...baseEnv, SH_ALLOW_OPERATOR_FALLBACK: 'true' }).allowOperatorFallback,
-    ).toBe(true);
+    const on = {
+      ...baseEnv,
+      SH_OPERATOR_INFERENCE_TOKEN: 'op-gw', // notsecret
+      SH_DEFAULT_INFERENCE_ENDPOINT: 'https://litellm.internal',
+    };
+    expect(configFromEnv({ ...on, SH_ALLOW_OPERATOR_FALLBACK: 'true' }).allowOperatorFallback).toBe(
+      true,
+    );
     for (const v of ['1', 'yes', 'TRUE', '', 'false']) {
       // Exactly 'true', because a typo must not silently switch on a fallback that lets one subject
       // spend the operator's key.
-      expect(
-        configFromEnv({ ...baseEnv, SH_ALLOW_OPERATOR_FALLBACK: v }).allowOperatorFallback,
-        v,
-      ).toBe(v === 'true');
+      expect(configFromEnv({ ...on, SH_ALLOW_OPERATOR_FALLBACK: v }).allowOperatorFallback, v).toBe(
+        v === 'true',
+      );
     }
   });
 
