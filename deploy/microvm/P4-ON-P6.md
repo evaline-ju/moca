@@ -65,13 +65,12 @@ cd /opt/serverless-harness && sudo ./deploy/vm/setup-vm.sh   # default SH_SANDBO
   the unit expects them. The verified run used Firecracker v1.17.0 from its release tarball.
 - **Go** on root's `PATH`. `build-snapshot.sh` builds the guest agent, and `setup-microvm.sh` builds
   the worker, unless `MICROVM_BIN` names a prebuilt one.
-- **The harness fix for a new session's first turn.** Without it, every tool call in a new session's
-  first `/turn` fails on this tier with
+- **A checkout that includes #375**, the harness fix for a new session's first turn. On a checkout
+  from before it, every tool call in a new session's first `/turn` fails on this tier with
   `invalid-workspace-key: workspace_key "anon:<uuid>" must match …`, and turn 1's work lands in a
   workspace no later turn opens.
-  - The fix is `fix/turn-new-session-workspace-key`, and it is not merged yet.
-  - The cause is that `executeTurn` leased the sandbox before using the new session's id.
-  - Authenticated `mocactl` turns are not affected: their session already exists.
+  - The cause was that `executeTurn` leased the sandbox before using the new session's id.
+  - Authenticated `mocactl` turns were not affected: their session already exists.
 
 ## Build the golden snapshot
 
