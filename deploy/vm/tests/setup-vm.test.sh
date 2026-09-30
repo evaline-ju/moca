@@ -1178,6 +1178,68 @@ pass "configured control plane (client id AND public harness URL): restarted on 
 SH_ENV_DIR="$TMP/etc"
 rm -rf "$SE"
 
+# --- #368: the operator fallback's token is a systemd credential, loaded by a drop-in iff it exists --
+OP="$(mu1_dir)"
+OP_UNITS="$(mktemp -d)"
+OP_DROPIN="$OP_UNITS/sh-control-plane.service.d/50-operator-inference-token.conf"
+op_run() { SH_ENV_DIR="$OP" SH_UNIT_DIR="$OP_UNITS" ensure_operator_fallback; }
+op_token() { install -d -m 0700 "$OP/credentials"; (umask 077 && printf '%s\n' "$1" >"$OP/credentials/operator-inference-token"); }
+OP_SECRET='sk-ant-api03-fabricated-operator' # notsecret
+
+# Default: no token, fallback off -> nothing installed, nothing refused.
+op_run || fail "ensure_operator_fallback refused a default install"
+[[ ! -e "$OP_DROPIN" ]] || fail "a drop-in was installed with no operator token"
+pass "operator fallback: a default install installs no drop-in"
+
+# Fallback on, token file forgotten -> refused, naming the file (Review Focus 1).
+echo 'SH_ALLOW_OPERATOR_FALLBACK=true' >>"$OP/control-plane.env"
+if op_err=$(op_run 2>&1); then fail "SH_ALLOW_OPERATOR_FALLBACK=true with no token file was accepted"; fi
+grep -qF "$OP/credentials/operator-inference-token" <<<"$op_err" || fail "the refusal must name the token file: $op_err"
+pass "operator fallback: on with no token file refuses, naming the file"
+
+# Token present -> the drop-in loads it from the hardcoded path the units use; the value is nowhere.
+op_token "$OP_SECRET"
+op_run || fail "ensure_operator_fallback refused a present token"
+grep -qxF 'LoadCredential=SH_OPERATOR_INFERENCE_TOKEN:/etc/serverless-harness/credentials/operator-inference-token' "$OP_DROPIN" ||
+  fail "the drop-in does not load the token: $(cat "$OP_DROPIN" 2>/dev/null)"
+grep -qxF '[Service]' "$OP_DROPIN" || fail "the drop-in has no [Service] section"
+grep -rqF -- "$OP_SECRET" "$OP_UNITS" "$OP"/*.env && fail "the operator token's value was copied out of its file"
+[[ "$(cat "$OP/credentials/operator-inference-token")" == "$OP_SECRET" ]] || fail "the token file was rewritten"
+before="$(cksum <"$OP_DROPIN")"
+op_run || fail "re-run failed"
+[[ "$(cksum <"$OP_DROPIN")" == "$before" ]] || fail "a re-run changed the drop-in"
+pass "operator fallback: a present token gets a LoadCredential= drop-in; the value never leaves its file"
+
+# A readable-by-others token file is refused (it is a secret, like the MU1 files).
+chmod 0644 "$OP/credentials/operator-inference-token"
+if op_err=$(op_run 2>&1); then fail "a 0644 operator token was accepted"; fi
+grep -qF '0600' <<<"$op_err" || fail "the refusal must say 0600: $op_err"
+chmod 0600 "$OP/credentials/operator-inference-token"
+pass "operator fallback: a token file readable by group or others refuses"
+
+# An empty token file is refused, not loaded.
+: >"$OP/credentials/operator-inference-token"
+if op_err=$(op_run 2>&1); then fail "an empty operator token was accepted"; fi
+grep -qF 'empty' <<<"$op_err" || fail "the refusal must say the file is empty: $op_err"
+pass "operator fallback: an empty token file refuses"
+
+# The token as an env line is refused, as the MU1 secrets are, and the value is not echoed.
+op_token "$OP_SECRET"
+echo "SH_OPERATOR_INFERENCE_TOKEN=$OP_SECRET" >>"$OP/control-plane.env"
+if op_err=$(op_run 2>&1); then fail "SH_OPERATOR_INFERENCE_TOKEN as an env line was accepted"; fi
+grep -qF 'systemd credential' <<<"$op_err" || fail "the refusal must say it is a systemd credential: $op_err"
+grep -qF -- "$OP_SECRET" <<<"$op_err" && fail "the refusal echoed the token"
+sed -i.bak '/^SH_OPERATOR_INFERENCE_TOKEN=/d' "$OP/control-plane.env" && rm -f "$OP/control-plane.env.bak"
+pass "operator fallback: the token as an env line refuses without echoing it"
+
+# Token removed later with the fallback off -> the drop-in goes too (Review Focus 4).
+sed -i.bak '/^SH_ALLOW_OPERATOR_FALLBACK=/d' "$OP/control-plane.env" && rm -f "$OP/control-plane.env.bak"
+rm "$OP/credentials/operator-inference-token"
+op_run || fail "removing the token with the fallback off was refused"
+[[ ! -e "$OP_DROPIN" ]] || fail "the drop-in outlived its token file: LoadCredential= would fail the unit"
+pass "operator fallback: removing the token removes the drop-in"
+rm -rf "$OP" "$OP_UNITS"
+
 # main() under errexit, as `sudo ./setup-vm.sh` runs it. `main || fail` would not do: bash ignores
 # set -e inside anything on the left of ||, so a failing step would be skipped, not reported. errexit
 # is suspended here only around a subshell that turns it back on; run_main <out> sets MAIN_RC.
@@ -1226,6 +1288,8 @@ for pair in "${MU1_CREDENTIALS[@]}"; do
   [[ -s "$SH_ENV_DIR/credentials/${pair#*:}" ]] || fail "main() did not generate ${pair%%:*}"
 done
 grep -qxF 'SH_REQUIRE_AUTH=true' "$SH_ENV_DIR/supervisor.env" || fail "main() left the supervisor unauthenticated"
+[[ ! -e "$SH_UNIT_DIR/sh-control-plane.service.d/50-operator-inference-token.conf" ]] ||
+  fail "main() installed an operator-token drop-in on a default install"
 mu1_line=$(declare -f main | grep -n 'ensure_mu1_secrets' | cut -d: -f1)
 wire_line=$(declare -f main | grep -n 'wire_supervisor_mu1' | cut -d: -f1)
 units_line=$(declare -f main | grep -n 'install_units' | cut -d: -f1)

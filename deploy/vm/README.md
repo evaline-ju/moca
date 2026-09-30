@@ -191,17 +191,18 @@ option and is not wired by `setup-vm.sh`: a follow-up (#362 item 1).
 
 ### Secrets
 
-All three live in `/etc/serverless-harness/credentials/` (directory `0700`, files `0600`, owner
+They all live in `/etc/serverless-harness/credentials/` (directory `0700`, files `0600`, owner
 root), and each unit loads its own with `LoadCredential=` under the setting's own name:
 
-| File                        | Setting                        | Loaded by                      |
-| --------------------------- | ------------------------------ | ------------------------------ |
-| `session-token-private-key` | `SH_SESSION_TOKEN_PRIVATE_KEY` | control plane                  |
-| `credential-kek`            | `SH_CREDENTIAL_KEK`            | control plane                  |
-| `exchange-token`            | `SH_EXCHANGE_TOKEN`            | control plane _and_ supervisor |
+| File                        | Setting                        | Loaded by                       |
+| --------------------------- | ------------------------------ | ------------------------------- |
+| `session-token-private-key` | `SH_SESSION_TOKEN_PRIVATE_KEY` | control plane                   |
+| `credential-kek`            | `SH_CREDENTIAL_KEK`            | control plane                   |
+| `exchange-token`            | `SH_EXCHANGE_TOKEN`            | control plane _and_ supervisor  |
+| `operator-inference-token`  | `SH_OPERATOR_INFERENCE_TOKEN`  | control plane, optional (below) |
 
 The public half of the signing key is not a secret: it is the `SH_SESSION_TOKEN_PUBLIC_KEYS` line
-in `supervisor.env`. Setting any of the three as an env line as well makes the unit refuse to boot
+in `supervisor.env`. Setting any of them as an env line as well makes the unit refuse to boot
 (and `setup-vm.sh` stops before that, naming the line).
 
 `setup-vm.sh` generates them once, with the checkout's own `packages/control-plane/src/genkeys.ts`,
@@ -219,18 +220,39 @@ inherit `CREDENTIALS_DIRECTORY` and the `harness` uid, so they can read the file
 boundary. All three units run as `harness`, so a compromise of the supervisor's uid can read the
 control plane's credentials. A dedicated control-plane user is a follow-up.
 
-**The operator-key fallback** (`SH_ALLOW_OPERATOR_FALLBACK=true`, off by default) needs the
-operator's key as a fourth credential, which `setup-vm.sh` does not create. Put it in a root-only
-file, add a drop-in, and set `SH_ALLOW_OPERATOR_FALLBACK=true` in `control-plane.env`:
+**The operator-key fallback** (`SH_ALLOW_OPERATOR_FALLBACK=true`, off by default) lets a user who
+has stored no inference credential spend the operator's key. Every such turn is audited as
+`operator_fallback_used`. The key is the one secret `setup-vm.sh` does not create: put it in its
+file yourself, set the fallback's settings in `control-plane.env`, and re-run the script. It sees
+the file and installs a drop-in (`sh-control-plane.service.d/50-operator-inference-token.conf`) that
+loads it with `LoadCredential=`. It never reads the value.
 
 ```bash
 sudo install -m 0600 /dev/null /etc/serverless-harness/credentials/operator-inference-token
 sudoedit /etc/serverless-harness/credentials/operator-inference-token   # the key; mode is kept
-sudo systemctl edit sh-control-plane.service
-#   [Service]
-#   LoadCredential=SH_OPERATOR_INFERENCE_TOKEN:/etc/serverless-harness/credentials/operator-inference-token
-sudo systemctl restart sh-control-plane.service
+sudoedit /etc/serverless-harness/control-plane.env
+#   SH_ALLOW_OPERATOR_FALLBACK=true
+#   A gateway token:        SH_DEFAULT_INFERENCE_ENDPOINT=https://<gateway>
+#   An Anthropic API key:   SH_DEFAULT_INFERENCE_ENDPOINT=https://api.anthropic.com
+#                           SH_OPERATOR_INFERENCE_HEADER=x-api-key
+cd /opt/serverless-harness && sudo ./deploy/vm/setup-vm.sh
 ```
+
+The control plane refuses to boot on a fallback that cannot work, naming the setting to fix:
+
+- no token;
+- no default endpoint;
+- an Anthropic key on the Bearer header, or aimed at anything but `https://api.anthropic.com`;
+- an `sk-ant-oat…` OAuth token.
+
+`journalctl -u sh-control-plane` shows which. `setup-vm.sh` itself stops on:
+
+- `SH_ALLOW_OPERATOR_FALLBACK=true` with no token file;
+- a token file that is empty or not mode 0600;
+- the token as a line in `control-plane.env`.
+
+To turn the fallback off, set `SH_ALLOW_OPERATOR_FALLBACK=false`. To remove the key as well, delete
+the file and re-run: the drop-in goes with it.
 
 ### Reaching it: the supported demo topology
 
