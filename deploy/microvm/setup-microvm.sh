@@ -76,7 +76,7 @@ preflight() {
   [[ "$(id -u)" == 0 ]] || die "must run as root (installs units under $SH_UNIT_DIR)"
   validate_sandbox_id "$MICROVM_SANDBOX_ID" || exit 1
   if [[ -n "${MICROVM_MAX_COMMITTED_MB:-}" ]] &&
-    ! { [[ "$MICROVM_MAX_COMMITTED_MB" =~ ^[0-9]+$ ]] && ((MICROVM_MAX_COMMITTED_MB > SHIPPED_RESERVE_MB)); }; then
+    ! { [[ "$MICROVM_MAX_COMMITTED_MB" =~ ^[1-9][0-9]*$ ]] && ((MICROVM_MAX_COMMITTED_MB > SHIPPED_RESERVE_MB)); }; then
     die "MICROVM_MAX_COMMITTED_MB='$MICROVM_MAX_COMMITTED_MB' must be a whole number of MiB above the unit's SH_MEMORY_RESERVE_MB ($SHIPPED_RESERVE_MB), or nothing is ever admitted"
   fi
   [[ -f "$SH_ENV_DIR/relay.env" && -f "$SH_UNIT_DIR/sh-relay.service" ]] ||
@@ -160,7 +160,11 @@ install_units() {
 # refuses to start -- correctly, since the budget would promise memory that is not there. A smaller
 # host gets a smaller budget AND a matching assertion, in the same 90%-of-budget band
 # systemd-units.test.sh holds the shipped values to. `AssertMemory=` (empty) resets the unit's list
-# first; without it the shipped >=23G would still apply alongside the new one.
+# first; without it the shipped >=23G would still apply alongside the new one. The reset clears EVERY
+# assertion, not just the memory one (systemd.unit(5); verified on a rig: a unit asserting a missing
+# path started once the reset was in a drop-in), so each other Assert*= of the shipped unit -- the
+# /dev/kvm guard above all -- is re-stated after it, read from the unit so a new one is carried too.
+# A leading zero is refused: bash arithmetic would read it as octal while Go parses it as decimal.
 install_memory_dropin() {
   local dst="$SH_UNIT_DIR/microvm-worker.service.d/$MEMORY_DROPIN"
   if [[ -z "${MICROVM_MAX_COMMITTED_MB:-}" ]]; then
@@ -170,8 +174,10 @@ install_memory_dropin() {
   printf '%s\n' \
     "# Written by deploy/microvm/setup-microvm.sh (MICROVM_MAX_COMMITTED_MB): a VM-memory budget" \
     "# for a host smaller than the shipped unit assumes, and the physical-memory assertion to match." \
-    "[Unit]" "AssertMemory=" "AssertMemory=>=$((MICROVM_MAX_COMMITTED_MB * 90 / 100))M" "" \
-    "[Service]" "Environment=SH_MAX_COMMITTED_MB=$MICROVM_MAX_COMMITTED_MB" >"$1/memory.conf"
+    "[Unit]" "AssertMemory=" "AssertMemory=>=$((MICROVM_MAX_COMMITTED_MB * 90 / 100))M" \
+    >"$1/memory.conf"
+  grep -E '^Assert[A-Za-z]+=' "$SCRIPT_DIR/microvm-worker.service" | grep -v '^AssertMemory=' >>"$1/memory.conf" || true
+  printf '%s\n' "" "[Service]" "Environment=SH_MAX_COMMITTED_MB=$MICROVM_MAX_COMMITTED_MB" >>"$1/memory.conf"
   install_if_changed "$1/memory.conf" "$dst" 0644
 }
 

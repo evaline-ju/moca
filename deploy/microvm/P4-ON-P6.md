@@ -36,6 +36,10 @@ again. A stopped container is not enough either: `setup-vm.sh` runs them with `-
 `podman-restart.service` brings them back at boot. `setup-microvm.sh` therefore refuses while **any**
 `sh-sandbox-*` container exists, running or stopped.
 
+On a host installed **before** the control plane (#366), that `setup-vm.sh` re-run also installs it.
+It generates the control plane's keypair and writes `SH_REQUIRE_AUTH=true` to `supervisor.env`,
+which closes the unauthenticated `/turn` that "Run a turn" below uses.
+
 **To go back to containers:**
 
 ```bash
@@ -46,6 +50,10 @@ cd /opt/serverless-harness && sudo ./deploy/vm/setup-vm.sh   # default SH_SANDBO
 
 ## Prerequisites
 
+- **`sudo` must find podman.** podman-static installs under `/usr/local/bin`, and on some hosts
+  sudo's `secure_path` leaves that out. If `sudo podman version` says `command not found`, run every
+  `sudo` command on this page as `sudo env PATH="/usr/local/bin:$PATH" …`, as `deploy/vm/README.md`
+  does for `setup-vm.sh`. The verified host's `secure_path` included `/usr/local/bin`.
 - **P6 installed and running** (`deploy/vm/README.md`). `setup-microvm.sh` needs its
   `relay.env`, `sh-relay.service` and the `sh-redis` container.
 - **`/dev/kvm`**, cgroups v2 and no swap. Bare metal, or an instance type with nested
@@ -92,10 +100,13 @@ then `podman export`, then removes the temporary container.
 ```bash
 cd /opt/serverless-harness
 sudo mkdir -p /srv/moca-369-build
-sudo deploy/microvm/build-rootfs.sh --out /srv/moca-369-build/rootfs   # default image: $SANDBOX_IMAGE
+sudo deploy/microvm/build-rootfs.sh --out /srv/moca-369-build/rootfs \
+  --image ghcr.io/rossoctl/moca-remote-worker:latest   # the image P6's setup-vm.sh runs
 ```
 
-It refuses an image missing any of `bash git rg python3 base64 file ls cat`. It strips the container
+Pass `--image` explicitly: `sudo` resets the environment, so a `SANDBOX_IMAGE` exported in your
+shell does not reach the script. Use whatever image P6 was installed with. It refuses an image missing
+any of `bash git rg python3 base64 file ls cat`. It strips the container
 worker binary and records the image and its digest in `/etc/moca-rootfs-source` inside the tree.
 
 **3. The snapshot:**
@@ -129,15 +140,15 @@ refused. It also checks that `sh-relay.service` is installed and that the golden
 
 **What it writes:**
 
-| File                                                              | Contents                                                                                                  |
-| ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `/usr/local/bin/microvm-worker`                                   | built from `remote-worker/cmd/microvm-worker` (or `MICROVM_BIN`)                                          |
-| `/etc/systemd/system/microvm-worker.service`, `microvm-vms.slice` | the shipped files, verbatim                                                                               |
-| `/etc/serverless-harness/microvm-worker.env` (0600)               | `RELAY_ADDR=127.0.0.1:<SH_RELAY_PORT>`, `SANDBOX_ID`, `SANDBOX_TOKEN`, `SH_WORKSPACE_IDLE=8h`             |
-| `/etc/serverless-harness/microvm-relay.env` (0600)                | `SH_RELAY_TOKEN_<sandbox id>=<the same token>`                                                            |
-| `sh-relay.service.d/50-moca-microvm.conf`                         | `EnvironmentFile=` the relay file above                                                                   |
-| `microvm-worker.service.d/50-moca-p6.conf`                        | `EnvironmentFile=` the worker file; `After=`/`Wants=sh-relay.service`                                     |
-| `microvm-worker.service.d/60-moca-memory.conf`                    | only with `MICROVM_MAX_COMMITTED_MB`: the budget, plus `AssertMemory=` reset and re-asserted at 90% of it |
+| File                                                              | Contents                                                                                                                                                                                                                                       |
+| ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/usr/local/bin/microvm-worker`                                   | built from `remote-worker/cmd/microvm-worker` (or `MICROVM_BIN`)                                                                                                                                                                               |
+| `/etc/systemd/system/microvm-worker.service`, `microvm-vms.slice` | the shipped files, verbatim                                                                                                                                                                                                                    |
+| `/etc/serverless-harness/microvm-worker.env` (0600)               | `RELAY_ADDR=127.0.0.1:<SH_RELAY_PORT>`, `SANDBOX_ID`, `SANDBOX_TOKEN`, `SH_WORKSPACE_IDLE=8h`                                                                                                                                                  |
+| `/etc/serverless-harness/microvm-relay.env` (0600)                | `SH_RELAY_TOKEN_<sandbox id>=<the same token>`                                                                                                                                                                                                 |
+| `sh-relay.service.d/50-moca-microvm.conf`                         | `EnvironmentFile=` the relay file above                                                                                                                                                                                                        |
+| `microvm-worker.service.d/50-moca-p6.conf`                        | `EnvironmentFile=` the worker file; `After=`/`Wants=sh-relay.service`                                                                                                                                                                          |
+| `microvm-worker.service.d/60-moca-memory.conf`                    | only with `MICROVM_MAX_COMMITTED_MB`: the budget, plus `AssertMemory=` reset and re-asserted at 90% of it. The reset clears **every** assertion, so the drop-in also re-states the shipped unit's others, `AssertPathExists=/dev/kvm` included |
 
 **The token:**
 
@@ -185,10 +196,26 @@ budget allows. Two or three sessions stay far below that. For more, raise the bu
 
 ## Run a turn
 
-These are single-user, unauthenticated `/turn` calls. They need `SH_REQUIRE_AUTH=false` in
-`supervisor.env`; see "Verified / not verified" for the control-plane caveat. A new session is created
-by **omitting** `sessionId`, and the response names it. A `sessionId` the backend has never seen gets
-a 404.
+These are single-user, **unauthenticated** `/turn` calls, and they need `SH_REQUIRE_AUTH=false` in
+`supervisor.env`.
+
+> **The supervisor listens on `0.0.0.0:8080`.** With auth off, anyone who can reach that port can
+> run code in your sandboxes and spend the model credential configured below. Turn auth off only on
+> a host where port 8080 is reachable from nowhere else: no security-group or firewall rule for it.
+> Use an SSH tunnel to reach it. Turn auth back on when you are done.
+
+On a host where `setup-vm.sh` installed the control plane, `SH_REQUIRE_AUTH=true` is the default:
+
+```bash
+sudo sed -i 's/^SH_REQUIRE_AUTH=.*/SH_REQUIRE_AUTH=false/' /etc/serverless-harness/supervisor.env
+sudo systemctl restart sh-supervisor
+# ... the turns below ...
+sudo sed -i 's/^SH_REQUIRE_AUTH=.*/SH_REQUIRE_AUTH=true/' /etc/serverless-harness/supervisor.env
+sudo systemctl restart sh-supervisor
+```
+
+A new session is created by **omitting** `sessionId`, and the response names it. A `sessionId` the
+backend has never seen gets a 404.
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/turn -H 'content-type: application/json' \
@@ -212,9 +239,15 @@ vmpool: exec req=… workspace_key="<session id>" vm=vm-6 cold="exhausted" exit=
 ```
 
 **A model with a direct Anthropic key:** a host with no gateway can use the public API with
-`ANTHROPIC_API_KEY` alone. Set **no** `ANTHROPIC_BASE_URL` and **no** `ANTHROPIC_AUTH_TOKEN`; either
-one switches the harness to gateway mode and replaces the key with a placeholder. This works only
-under `MOCA_TENANCY=single`, because `multi` scrubs ambient keys.
+`ANTHROPIC_API_KEY` alone. Set **no** `ANTHROPIC_BASE_URL` and **no** `ANTHROPIC_AUTH_TOKEN`
+(`applyModelGateway`, `harness/src/run-turn.ts`):
+
+- `ANTHROPIC_BASE_URL` sends requests, **with your key** in `x-api-key`, to that URL instead of
+  Anthropic.
+- `ANTHROPIC_AUTH_TOKEN` sends a Bearer token and strips `x-api-key`, so your key is not used.
+
+This works only under `MOCA_TENANCY=single`, the `deploy/vm` default; `multi` scrubs ambient keys at
+boot.
 
 Keep the key in a root-only env file, not in an `Environment=` line, which `systemctl show` would
 reveal to any user:
@@ -242,18 +275,26 @@ returns. `p4-turn-smoke.sh` drives real turns through the supervisor against it:
 ```bash
 sudo systemd-run --unit p4-mock-anthropic -p DynamicUser=yes \
   /usr/bin/node /opt/serverless-harness/deploy/microvm/mock-anthropic.mjs --port 18099
+printf 'SH_MODEL_CUSTOM=1\nSH_MODEL=mock-p4\nSH_MODEL_BASE_URL=http://127.0.0.1:18099\nANTHROPIC_AUTH_TOKEN=mock-not-a-secret\n' |
+  sudo tee /etc/serverless-harness/p4-smoke.env >/dev/null
 sudo mkdir -p /etc/systemd/system/sh-supervisor.service.d
-printf '[Service]\nEnvironment=SH_MODEL_CUSTOM=1 SH_MODEL=mock-p4 SH_MODEL_BASE_URL=http://127.0.0.1:18099 ANTHROPIC_AUTH_TOKEN=mock-not-a-secret\n' |
+printf '[Service]\nEnvironmentFile=/etc/serverless-harness/p4-smoke.env\n' |
   sudo tee /etc/systemd/system/sh-supervisor.service.d/90-p4-smoke.conf >/dev/null
 sudo systemctl daemon-reload && sudo systemctl restart sh-supervisor
 sudo deploy/microvm/p4-turn-smoke.sh --failure-paths --out /tmp/p4-smoke
 ```
 
+The settings go in an `EnvironmentFile=`, not an `Environment=` line. systemd lets values from
+`EnvironmentFile=` override `Environment=`, and a later file overrides an earlier one. So only a file
+loaded after `supervisor.env` wins over an `SH_MODEL` or `ANTHROPIC_*` already set there, or in the
+real-model file above. Remove the real-model drop-in during the check. The verified run used an
+`Environment=` drop-in, on a `supervisor.env` that set none of these keys.
+
 It exits 0 and prints `PASS` when every check held. Afterwards, point the supervisor back at the real
 model:
 
 ```bash
-sudo rm /etc/systemd/system/sh-supervisor.service.d/90-p4-smoke.conf
+sudo rm /etc/systemd/system/sh-supervisor.service.d/90-p4-smoke.conf /etc/serverless-harness/p4-smoke.env
 sudo systemctl daemon-reload && sudo systemctl restart sh-supervisor
 sudo systemctl stop p4-mock-anthropic
 ```
@@ -288,29 +329,27 @@ Verified on 2026-09-30:
 - **P6:** installed from `deploy/vm` **before the control plane landed** (#366), with
   `SH_SANDBOX_COUNT=0` and `SH_REQUIRE_AUTH=false`.
 
-| Claim                                                         | Evidence                                                                                                                                                                 |
-| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| The installer attaches the worker under its own relay token   | `moca_microvm_0 is attached to the relay`; worker `attached, serving execs`                                                                                              |
-| A re-run changes nothing                                      | second run: `nothing to change`, no restarts                                                                                                                             |
-| systemd drops a dashed env name                               | `Ignoring invalid environment assignment 'SH_RELAY_TOKEN_sbx-microvm-1=dashed'`                                                                                          |
-| The snapshot advertises the container tier's tools            | manifest `["base64","bash","curl","file","git","python3","rg"]`                                                                                                          |
-| Multi-tool turns run in microVMs, one VM per Exec             | scripted run: 29/29 checks; each journal Exec has a distinct `vm=`                                                                                                       |
-| The workspace survives between turns                          | turn 2 read turn 1's file and repo                                                                                                                                       |
-| A second session gets a separate workspace                    | session B saw neither; separate `/srv/workspaces/<id>`                                                                                                                   |
-| Worker restart mid-Exec ends the tool call with a named error | `worker disconnected`                                                                                                                                                    |
-| A killed VM ends the tool call with a named error             | `vsock-short-response: vmpool: guest closed before End: EOF`                                                                                                             |
-| A real model, two turns, one session                          | `claude-haiku-4-5` (direct key): turn 1 committed `5d6c21b`, turn 2 showed it; 12 Execs, 12 distinct VMs, one `workspace_key`; guest `uname -a`: `Linux (none) 6.18.44+` |
-| Per-session workspace disk                                    | 66 MiB actual / 2 GiB apparent                                                                                                                                           |
+| Claim                                                                         | Evidence                                                                                                                                                                                                                                                                                                |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The installer attaches the worker under its own relay token                   | `moca_microvm_0 is attached to the relay`; worker `attached, serving execs`                                                                                                                                                                                                                             |
+| A re-run changes nothing                                                      | second run: `nothing to change`, no restarts                                                                                                                                                                                                                                                            |
+| systemd drops a dashed env name                                               | a transient unit loading both names: `Ignoring invalid environment assignment 'SH_RELAY_TOKEN_sbx-microvm-1=dashed'`; only the underscore name reached the process                                                                                                                                      |
+| The snapshot advertises the container tier's tools                            | manifest `["base64","bash","curl","file","git","python3","rg"]`                                                                                                                                                                                                                                         |
+| Multi-tool turns run in microVMs, one VM per Exec                             | scripted run: 26/26 checks; each journal Exec has a distinct `vm=`                                                                                                                                                                                                                                      |
+| The workspace survives between turns                                          | turn 2 read turn 1's file and repo                                                                                                                                                                                                                                                                      |
+| A second session gets a separate workspace                                    | session B saw neither; separate `/srv/workspaces/<id>`                                                                                                                                                                                                                                                  |
+| Worker restart mid-Exec ends the tool call with a named error                 | `worker disconnected`                                                                                                                                                                                                                                                                                   |
+| A killed VM ends the tool call with a named error                             | `vsock-short-response: vmpool: guest closed before End: EOF`                                                                                                                                                                                                                                            |
+| A real model, two turns, one session                                          | direct `ANTHROPIC_API_KEY`, with `SH_MODEL=claude-haiku-4-5` as the owner configured it (the key file was never read back, so the model id is not in the logs): turn 1 committed `5d6c21b`, turn 2 showed it; 12 Execs, 12 distinct VMs, one `workspace_key`; guest `uname -a`: `Linux (none) 6.18.44+` |
+| A new session's first turn fails without the harness fix (failure reproduced) | before the fix: `invalid-workspace-key: workspace_key "anon:<uuid>" must match …` on every tool call of turn 1                                                                                                                                                                                          |
+| Per-session workspace disk                                                    | 66 MiB actual / 2 GiB apparent                                                                                                                                                                                                                                                                          |
 
 **Not verified:**
 
 - **Multi-user `mocactl run`** on the P4 tier (the control plane on `deploy/vm`, #366/#367). On a
   current `deploy/vm` install, `SH_REQUIRE_AUTH=true` is the default, which closes the
-  unauthenticated `/turn` used above. Running `p4-turn-smoke.sh` there means setting
-  `SH_REQUIRE_AUTH=false` in `supervisor.env` for the run and restoring it afterwards, on a host
-  nobody else can reach.
-- **The first turn of a session without the harness fix.** It fails as described in
-  "Prerequisites". The verified run had the fix applied to the host's checkout.
+  unauthenticated `/turn` used above. To run `p4-turn-smoke.sh` there, follow "Run a turn": turn
+  auth off, run it, turn auth back on.
 - **Cloud Hypervisor, density and throughput (#256, #261), a host reboot, and any host other than
   the one above.**
 
@@ -338,8 +377,16 @@ sudo rm -rf /etc/systemd/system/microvm-worker.service.d \
   /usr/local/bin/microvm-worker
 sudo rmdir /etc/systemd/system/sh-relay.service.d 2>/dev/null || true
 sudo systemctl daemon-reload && sudo systemctl restart sh-relay.service
+# the model and check settings from "Run a turn" and "Automated check", if present:
+sudo rm -f /etc/systemd/system/sh-supervisor.service.d/90-p4-smoke.conf \
+  /etc/systemd/system/sh-supervisor.service.d/91-p4-real-model.conf \
+  /etc/serverless-harness/p4-smoke.env /etc/serverless-harness/p4-real-model.env
+sudo systemctl daemon-reload && sudo systemctl restart sh-supervisor.service
+# DELETES every session's workspace (their files, repositories and work), not just the tier:
 sudo rm -rf /srv/snapshots/default /srv/workspaces/* /srv/jail/* /srv/moca-369-build
 ```
+
+The `p4-real-model.env` removal matters: it holds a live API key.
 
 Restarting the relay drops its copy of the worker's token. Deleting `microvm-relay.env` **without**
 removing its drop-in stops `sh-relay` from starting, because the drop-in's `EnvironmentFile=` is

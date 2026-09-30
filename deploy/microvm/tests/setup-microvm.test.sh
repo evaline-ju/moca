@@ -164,7 +164,17 @@ check "the budget reaches the worker" "$(grep -c '^Environment=SH_MAX_COMMITTED_
 # Same band systemd-units.test.sh holds the shipped unit to: AssertMemory at 90% of the budget.
 check "the shipped AssertMemory is reset first" "$(grep -c '^AssertMemory=$' "$M")" "1"
 check "then re-asserted at 90% of the budget" "$(grep -c '^AssertMemory=>=7372M$' "$M")" "1"
+# `AssertMemory=` (empty) resets the WHOLE assertion list, not just AssertMemory (systemd.unit(5),
+# verified on the rig: a unit asserting a missing path started once the reset was in a drop-in). So
+# every other assertion the shipped unit makes -- /dev/kvm above all -- must be re-stated after it.
+for a in $(grep -E '^Assert[A-Za-z]+=' "$DIR/microvm-worker.service" | grep -v '^AssertMemory='); do
+  check "the drop-in re-states the shipped $a" "$(grep -cxF "$a" "$M")" "1"
+done
+check "the shipped unit has a non-memory assertion to re-state (else this test proves nothing)" \
+  "$(grep -cE '^Assert[A-Za-z]+=' "$DIR/microvm-worker.service" | awk '{print ($1 > 1) ? "yes" : "no"}')" "yes"
 check "reset precedes the new assertion" "$(grep -nE '^AssertMemory=' "$M" | cut -d: -f1 | tr '\n' ' ')" "4 5 "
+check "the reset precedes every re-stated assertion" \
+  "$(awk '/^AssertMemory=$/{r=NR} /^Assert/ && !/^AssertMemory=$/{if (!r || NR < r) bad=1} END{print bad ? "no" : "yes"}' "$M")" "yes"
 check "daemon-reload" "$(grep -c '^systemctl daemon-reload$' "$MOCK_LOG")" "1"
 check "worker started with the new budget" "$(grep -c '^systemctl start microvm-worker.service$' "$MOCK_LOG")" "1"
 mem_before="$(hash_tree)"; : >"$MOCK_LOG"
@@ -175,7 +185,9 @@ check "re-run restarts nothing" "$(grep -cE 'restart|systemctl (stop|start)' "$M
 check "unset again: exit 0" "$(MICROVM_SANDBOX_ID=moca_microvm_1 run)" "0"
 check "unset again: the override is removed" "$([ -e "$M" ] && echo present || echo absent)" "absent"
 check "unset again: the worker picks up the shipped budget" "$(grep -c '^systemctl start microvm-worker.service$' "$MOCK_LOG")" "1"
-for bad in abc 0 4096 -1; do
+# 0100000: bash arithmetic reads a leading zero as octal (32768) while Go parses 100000 -- the
+# assertion and the budget would silently disagree.
+for bad in abc 0 4096 -1 0100000; do
   reset_host
   check "MICROVM_MAX_COMMITTED_MB=$bad refused" "$(MICROVM_MAX_COMMITTED_MB="$bad" run)" "1"
   check "MICROVM_MAX_COMMITTED_MB=$bad: nothing written" "$(find "$TMP/etc" -name '*microvm*' | wc -l | tr -d ' ')" "0"
