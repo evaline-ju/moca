@@ -177,6 +177,11 @@ describe('two minted subjects over HTTP (#367 scope item 3)', () => {
     const created = await createSession(ALICE, 'a-1');
     const rec = await d.index.get('a-1');
     expect(rec?.owner).toBe(ALICE); // the fixture is what we think it is before we break it
+    // The re-point deliberately leaves the owner zset stale: `create` zAdds to BOB's index without
+    // zRem-ing ALICE's, so a-1 sits in both sorted sets after this line. Production never reaches
+    // that state (a session is created once, under one owner); it is harmless here because the
+    // exchange goes through `index.get` (the hash), not `listByOwner`. Do NOT add a `listByOwner`
+    // assertion below the re-point without fixing the fake's zset bookkeeping first.
     await d.index.create({ ...rec!, owner: BOB });
     expect((await d.index.get('a-1'))?.owner).toBe(BOB);
 

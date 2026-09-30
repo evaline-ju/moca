@@ -10,8 +10,20 @@ import { keyIdFor, makeSigner, publicKeyToBase64 } from '@moca/control-plane';
 // proves the refusal happens BEFORE the credential exchange is consulted.
 
 vi.mock('@moca/harness/run-turn', () => ({
-  runTurn: vi.fn(async () => ({ sessionId: 'sid-1', response: 'ok', stopReason: 'end_turn' })),
-  executeTurn: vi.fn(async () => ({ sessionId: 'sid-1', response: 'ok', stopReason: 'end_turn' })),
+  // The mocks echo the sid the caller drove (every test in this file drives a-1 or b-1, never the
+  // hardcoded 'sid-1' turn-auth-route.test.ts uses), so a future assertion on a response body
+  // cannot be quietly right against a value no test uses. runTurn takes (prompt, sessionId?,
+  // config?); executeTurn takes the input object.
+  runTurn: vi.fn(async (_prompt: string, sessionId?: string) => ({
+    sessionId: sessionId ?? 'unset',
+    response: 'ok',
+    stopReason: 'end_turn',
+  })),
+  executeTurn: vi.fn(async (input: { sessionId?: string }) => ({
+    sessionId: input.sessionId ?? 'unset',
+    response: 'ok',
+    stopReason: 'end_turn',
+  })),
 }));
 
 import { startServer } from '../src/server.js';
