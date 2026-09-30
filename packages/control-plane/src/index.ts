@@ -48,6 +48,7 @@ export {
   type VaultStoreOptions,
 } from './vault-store.js';
 export { formatEnvLines, generateMu1Secrets } from './genkeys.js';
+export { credentialValue, withCredentials } from './systemd-credentials.js';
 export {
   AUDIT_STREAM,
   DEFAULT_PAGE_SIZE,
