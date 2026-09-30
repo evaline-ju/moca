@@ -407,12 +407,14 @@ mu1_value() {
 
 # write_secret <file> <value>: whole or not at all, root-only -- a temp file in the same directory,
 # created under umask 077, renamed into place. printf is a builtin: the value never reaches an argv.
+# Each step's failure is checked explicitly: a caller under `||` runs this with errexit suspended, and a
+# failed write (ENOSPC) followed by a successful rename would put an empty secret in place.
 write_secret() {
   local dir tmp
   dir="$(cred_dir)"
-  tmp="$(umask 077 && mktemp "$dir/.tmp.XXXXXX")"
-  printf '%s\n' "$2" >"$tmp"
-  mv -f "$tmp" "$dir/$1"
+  tmp="$(umask 077 && mktemp "$dir/.tmp.XXXXXX")" || return 1
+  printf '%s\n' "$2" >"$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$dir/$1" || { rm -f "$tmp"; return 1; }
 }
 
 # The MU1 secrets (#366): the control plane's ed25519 signing key and credential KEK, and the exchange
@@ -478,12 +480,12 @@ ensure_mu1_secrets() {
   fi
   GENERATED=''
   if [[ -n "$priv" ]]; then
-    write_secret session-token-private-key "$priv"
-    set_env_line "$sup" SH_SESSION_TOKEN_PUBLIC_KEYS "$pub"
+    write_secret session-token-private-key "$priv" || return 1
+    set_env_line "$sup" SH_SESSION_TOKEN_PUBLIC_KEYS "$pub" || return 1
     MU1_NEW_KEYPAIR=1
   fi
-  [[ -z "$kek" ]] || write_secret credential-kek "$kek"
-  [[ -z "$xchg" ]] || write_secret exchange-token "$xchg"
+  if [[ -n "$kek" ]]; then write_secret credential-kek "$kek" || return 1; fi
+  if [[ -n "$xchg" ]]; then write_secret exchange-token "$xchg" || return 1; fi
 }
 
 # The supervisor's side of MU1 (#366): dial this VM's control plane and require a session token.

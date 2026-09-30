@@ -528,11 +528,51 @@ generate_mu1_saved="$(declare -f generate_mu1)"
 # shellcheck disable=SC2329  # invoked indirectly, by ensure_mu1_secrets
 generate_mu1() { printf 'SH_SESSION_TOKEN_PRIVATE_KEY=PRIV\nSH_SESSION_TOKEN_PUBLIC_KEYS=trunc\n'; }
 refuses "a garbled generator" "no usable SH_SESSION_TOKEN_PUBLIC_KEYS"
+# Garbled in its LAST value only: the three before it are valid, so a check that ran after the first
+# write would already have written them. Every value is checked before anything is written.
+# shellcheck disable=SC2329  # invoked indirectly, by ensure_mu1_secrets
+generate_mu1() {
+  printf 'SH_SESSION_TOKEN_PRIVATE_KEY=PRIVAAAA\nSH_SESSION_TOKEN_PUBLIC_KEYS=0123456789abcdef:PUBBBBB\n'
+  printf 'SH_CREDENTIAL_KEK=K%042d=\nSH_EXCHANGE_TOKEN=zz\n' 7
+}
+sup_before="$(cksum <"$M/supervisor.env")"
+refuses "a generator garbled only in SH_EXCHANGE_TOKEN" "no usable SH_EXCHANGE_TOKEN"
+for f in session-token-private-key credential-kek exchange-token; do
+  [[ ! -e "$M/credentials/$f" ]] || fail "a generator garbled only in SH_EXCHANGE_TOKEN still wrote $f"
+done
+[[ "$(cksum <"$M/supervisor.env")" == "$sup_before" ]] ||
+  fail "a generator garbled only in SH_EXCHANGE_TOKEN still changed supervisor.env"
 generate_mu1() { return 3; }
 refuses "a generator that fails" "could not run the key generator"
 eval "$generate_mu1_saved"
 rm -rf "$M"
 pass "MU1 secrets: env-line secrets, a half keypair, an empty file and a bad generator all refuse, writing nothing"
+
+# A write that fails partway (ENOSPC on /etc, say) fails ensure_mu1_secrets and leaves no secret file,
+# empty or not, and no temp file behind -- even with errexit suspended, as it is under `|| rc=$?` here
+# and under the `[[ -z ... ]] || write_secret` forms inside. printf is a builtin, so it is stubbed as a
+# function that fails only when write_secret calls it (mu1_value's own printf calls still work).
+write_fails() { # <description> <stub>: ensure_mu1_secrets on a fresh $M, with <stub> (a function) in place
+  local rc=0 sup_before f
+  M="$(mu1_dir)"
+  sup_before="$(cksum <"$M/supervisor.env")"
+  eval "$2" # after mu1_dir, which needs the real mktemp
+  SH_ENV_DIR="$M" ensure_mu1_secrets 2>/dev/null || rc=$?
+  unset -f mktemp mv printf
+  ((rc != 0)) || fail "$1: ensure_mu1_secrets returned 0"
+  for f in session-token-private-key credential-kek exchange-token; do
+    [[ ! -e "$M/credentials/$f" ]] || fail "$1: $f exists anyway ($(wc -c <"$M/credentials/$f") bytes)"
+  done
+  [[ -z "$(find "$M/credentials" -name '.tmp.*' 2>/dev/null)" ]] || fail "$1: a temp file was left behind"
+  [[ "$(cksum <"$M/supervisor.env")" == "$sup_before" ]] || fail "$1: supervisor.env changed anyway"
+  rm -rf "$M"
+}
+# shellcheck disable=SC2016  # expanded by the stub itself, not here
+write_fails "a failing write of the secret's value" \
+  'printf() { [[ "${FUNCNAME[1]}" != write_secret ]] || return 1; builtin printf "$@"; }'
+write_fails "a failing mktemp" 'mktemp() { return 1; }'
+write_fails "a failing rename" 'mv() { return 1; }'
+pass "MU1 secrets: a failing mktemp, write or rename fails whole, leaving no secret and no temp file"
 
 # The REAL generator's two halves agree: the kid in the public keyset is the private key's own. Needs
 # tsx, so it runs only where the workspace is built (a dev box), and says so where it is not (CI).
