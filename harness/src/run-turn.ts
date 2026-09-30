@@ -721,7 +721,15 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
   // a normal return, a throw, and an abort (input.signal → session.abort(), which resolves the prompt
   // and unwinds through this finally). A leaked lease would hold a pool slot for its full TTL and, at
   // E8's concurrency, starve the pool it is meant to measure.
-  const acquired = await acquireTurnSandbox(input.sandbox, process.env, cwd, input.sessionId);
+  // The OPENED session's id, not input.sessionId: a /turn that omitted it has just been given one by
+  // openTurnSession, and leasing under `undefined` keyed the workspace by the per-turn lease holder
+  // (`anon:<uuid>`) -- a key the microVM tier refuses, and one no later turn of the session reuses.
+  const acquired = await acquireTurnSandbox(
+    input.sandbox,
+    process.env,
+    cwd,
+    opened.sessionManager.getSessionId(),
+  );
 
   // A null config would leave Pi's built-in tools running LOCALLY, in this process (MI1 §5 R3). Both
   // ways a turn gets here — no pool resolved, or a leaf's injected sandbox — meet at this line.

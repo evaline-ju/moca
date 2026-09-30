@@ -136,17 +136,22 @@ describe('executeTurn lease holder id', () => {
     expect(seen[0]).not.toBe(seen[1]);
   });
 
-  it('falls back to the unique holder as the workspace key for an ANONYMOUS turn', async () => {
-    // With no session there is no continuity to preserve, and sharing one 'anon' workspace across
-    // unrelated turns would be the cross-contamination §2.3 is about. An empty key is worse still:
-    // microvm-worker REFUSES it (§3.4). So the per-turn holder is the right key here.
+  it('keys a turn that names no session by the session it just CREATED, not the lease holder', async () => {
+    // Such a turn is not sessionless: executeTurn opens the session first, and a missing id means
+    // SessionManager.create gave it a fresh one -- the id the response returns and the client's next
+    // turn sends. That id, not the per-turn holder, is the workspace key, or turn 1 writes into a
+    // workspace turn 2 never opens. It still meets what the old holder fallback guarded: it is not a
+    // shared 'anon' workspace (every created session has its own id, §2.3) and it is not empty
+    // (microvm-worker refuses that, §3.4). The holder `anon:<uuid>` was also not a legal key at all --
+    // `:` is outside [A-Za-z0-9._-] -- so on the microVM tier every tool call of such a turn failed
+    // (#369, seen on the KVM rig). turn-new-session-workspace-key.test.ts covers the /turn path.
     seen.length = 0;
     seenSessionIds.length = 0;
     const { executeTurn } = await import('../src/run-turn.js');
     await executeTurn({ prompt: 'hi', createIfAbsent: true }).catch(() => {});
 
-    expect(seenSessionIds).toHaveLength(1);
-    expect(seenSessionIds[0]).toMatch(/^anon:[0-9a-f-]{36}$/);
-    expect(seenSessionIds[0]).toBe(seen[0]);
+    expect(seenSessionIds).toEqual(['sess-created']);
+    // The holder stays unique per turn, derived from that same id.
+    expect(seen[0]).toMatch(/^sess-created:[0-9a-f-]{36}$/);
   });
 });
