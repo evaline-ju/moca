@@ -229,7 +229,16 @@ export const HANDLERS: Record<string, Handler> = {
     // exists (spec §3.5): the deployment's own ANTHROPIC_AUTH_TOKEN is not consulted, so a
     // credential-less subject cannot get a session at all.
     const descriptors = await deps.credentials.list(p.sub);
-    const credentialName = resolveInferenceName(descriptors, requested);
+    // The operator fallback (spec §6.4) is for a subject with no inference credential of its own: such
+    // a session records NO credential name, and the exchange resolves the operator's key per turn,
+    // attributably. An explicitly requested name never falls back -- a typo must 400, not spend the
+    // operator's key.
+    const fallback =
+      requested === undefined &&
+      deps.config.allowOperatorFallback &&
+      !!deps.config.operatorInferenceToken &&
+      !descriptors.some((d) => d.consumer === 'inference');
+    const credentialName = fallback ? '' : resolveInferenceName(descriptors, requested);
 
     const sessionId = deps.newId();
     const rec: SessionRecord = {
@@ -246,7 +255,7 @@ export const HANDLERS: Record<string, Handler> = {
     await deps.index.audit({
       subject: p.sub,
       sessionId,
-      credential: credentialName,
+      credential: credentialName || 'operator-fallback',
       decision: 'session_created',
     });
     const iat = seconds(deps);
