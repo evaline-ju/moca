@@ -284,3 +284,12 @@ describe('buildHandler', () => {
     expect(typeof buildHandler(d)).toBe('function');
   });
 });
+
+describe('startControlPlane host', () => {
+  it('binds only the given host when one is passed (deploy/vm ships 127.0.0.1)', async () => {
+    const srv = startControlPlane(makeDeps(), 0, '127.0.0.1');
+    await new Promise<void>((r) => srv.once('listening', () => r()));
+    expect((srv.address() as { address: string }).address).toBe('127.0.0.1');
+    await new Promise<void>((r) => srv.close(() => r()));
+  });
+});

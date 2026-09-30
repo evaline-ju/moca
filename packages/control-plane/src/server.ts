@@ -132,7 +132,7 @@ export function buildHandler(deps: CpDeps): (req: IncomingMessage, res: ServerRe
   };
 }
 
-export function startControlPlane(deps: CpDeps, port = 8080): Server {
+export function startControlPlane(deps: CpDeps, port = 8080, host?: string): Server {
   const server = createServer(buildHandler(deps));
   const onSigterm = () => {
     server.close(() => process.exit(0));
@@ -143,10 +143,13 @@ export function startControlPlane(deps: CpDeps, port = 8080): Server {
   // life of the process, tripping Node's MaxListenersExceededWarning well before a real suite's tenth
   // test and masking a genuine future leak behind expected noise.
   server.once('close', () => process.removeListener('SIGTERM', onSigterm));
-  server.listen(port, () => {
+  const onListening = () => {
     const addr = server.address();
     const bound = typeof addr === 'object' && addr ? addr.port : port;
-    console.log(`sh-control-plane listening on :${bound}`);
-  });
+    console.log(`sh-control-plane listening on ${host ?? ''}:${bound}`);
+  };
+  // `listen(port, undefined, cb)` is not a documented overload; keep the two calls distinct.
+  if (host) server.listen(port, host, onListening);
+  else server.listen(port, onListening);
   return server;
 }

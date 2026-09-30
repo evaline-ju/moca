@@ -13,6 +13,7 @@ import { startControlPlane } from './server.js';
 import type { CpConfig, CpDeps } from './handlers.js';
 import { keyIdFor, makeSigner, parseKeyset, publicKeyFromBase64 } from './token.js';
 import { VaultCredentialStore, vaultTokenSource } from './vault-store.js';
+import { withCredentials } from './systemd-credentials.js';
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
   const v = env[name];
@@ -53,6 +54,22 @@ function urlEnv(env: NodeJS.ProcessEnv, name: string): string | undefined {
 export function portFromEnv(env: NodeJS.ProcessEnv): number {
   return intEnv(env, 'SH_CONTROL_PLANE_PORT', 8080);
 }
+
+/**
+ * `SH_CONTROL_PLANE_HOST`: the address to bind. Unset listens on every interface, as every existing
+ * deployment does (a Kubernetes pod IP, a compose container). deploy/vm ships 127.0.0.1: the control
+ * plane speaks plain HTTP, so on a VM it is reached through an SSH tunnel, not a public interface.
+ */
+export function hostFromEnv(env: NodeJS.ProcessEnv): string | undefined {
+  return env.SH_CONTROL_PLANE_HOST || undefined;
+}
+
+/**
+ * The settings that are secrets. On deploy/vm each arrives as a systemd credential
+ * (`LoadCredential=`, MI1 §6.7) rather than an env line; everywhere else, as today, from the env.
+ */
+// prettier-ignore
+export const CONTROL_PLANE_SECRETS = ['SH_SESSION_TOKEN_PRIVATE_KEY', 'SH_CREDENTIAL_KEK', 'SH_EXCHANGE_TOKEN', 'SH_OPERATOR_INFERENCE_TOKEN'] as const;
 
 export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
   required(env, 'SH_SESSION_TOKEN_PRIVATE_KEY');
@@ -158,5 +175,7 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
 
 const isMainModule = process.argv[1] === fileURLToPath(import.meta.url);
 if (isMainModule) {
-  startControlPlane(depsFromEnv(process.env), portFromEnv(process.env));
+  // Resolved once, into a copy: the secrets never enter process.env, which every kubectl child inherits.
+  const env = withCredentials(process.env, CONTROL_PLANE_SECRETS);
+  startControlPlane(depsFromEnv(env), portFromEnv(env), hostFromEnv(env));
 }

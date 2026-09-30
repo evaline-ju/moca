@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { projectResources, resolveSandbox } from '../src/resources.js';
 import { HANDLERS } from '../src/handlers.js';
 import { makeDeps, ctx, alice, bob, codeOf, seedCredential } from './helpers/deps.js';
 import type { RunKubectl } from '../src/kubectl.js';
+import { defaultRunKubectl } from '../src/kubectl.js';
 import type { SessionRecord } from '../src/ownership.js';
 
 const rec: SessionRecord = {
@@ -101,6 +105,25 @@ describe('resolveSandbox', () => {
       phase: 'unknown',
       tenant: 'github:1234',
     });
+  });
+
+  it('reports unknown, not a crash, on a host with no kubectl at all (deploy/vm)', async () => {
+    // The REAL runner, with a PATH that has no kubectl: spawn fails with ENOENT. On a VM this is every
+    // call to /v1/sessions/{id}/resources, so it must degrade exactly like a Kubernetes outage.
+    const saved = process.env.PATH;
+    process.env.PATH = mkdtempSync(join(tmpdir(), 'no-kubectl-'));
+    try {
+      expect(
+        await resolveSandbox(
+          { sandboxPod: 'sandbox-0-0' },
+          'default',
+          defaultRunKubectl,
+          'github:1234',
+        ),
+      ).toEqual({ podName: 'sandbox-0-0', phase: 'unknown', tenant: 'github:1234' });
+    } finally {
+      process.env.PATH = saved;
+    }
   });
 });
 

@@ -1,7 +1,7 @@
 import { generateKeyPairSync } from 'node:crypto';
 import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileCredentialStore } from '../src/file-store.js';
@@ -12,9 +12,12 @@ import {
   credentialStoreFromEnv,
   portFromEnv,
   verifyKeysFromEnv,
+  CONTROL_PLANE_SECRETS,
+  hostFromEnv,
 } from '../src/main.js';
 import { keyIdFor, makeSigner, parseKeyset, publicKeyToBase64, verifyToken } from '../src/token.js';
 import { VaultCredentialStore } from '../src/vault-store.js';
+import { withCredentials } from '../src/systemd-credentials.js';
 
 const { privateKey, publicKey } = generateKeyPairSync('ed25519');
 const PRIVATE_PEM = privateKey.export({ format: 'pem', type: 'pkcs8' }).toString();
@@ -239,5 +242,47 @@ describe('generateMu1Secrets (install.sh`s key generator)', () => {
     const a = generateMu1Secrets();
     const b = generateMu1Secrets();
     for (const k of Object.keys(a)) expect(a[k], k).not.toBe(b[k]);
+  });
+});
+
+describe('hostFromEnv (SH_CONTROL_PLANE_HOST)', () => {
+  it('is unset by default, so every existing deployment keeps listening on all interfaces', () => {
+    expect(hostFromEnv({})).toBeUndefined();
+    expect(hostFromEnv({ SH_CONTROL_PLANE_HOST: '' })).toBeUndefined();
+    expect(hostFromEnv({ SH_CONTROL_PLANE_HOST: '127.0.0.1' })).toBe('127.0.0.1');
+  });
+});
+
+describe('the control plane`s secrets as systemd credentials (deploy/vm)', () => {
+  it('names exactly the secrets main.ts reads, and nothing public', () => {
+    expect([...CONTROL_PLANE_SECRETS].sort()).toEqual([
+      'SH_CREDENTIAL_KEK',
+      'SH_EXCHANGE_TOKEN',
+      'SH_OPERATOR_INFERENCE_TOKEN',
+      'SH_SESSION_TOKEN_PRIVATE_KEY',
+    ]);
+  });
+
+  it('boots from credential files with none of the secrets in the environment', () => {
+    const s = generateMu1Secrets();
+    const dir = mkdtempSync(join(tmpdir(), 'sh-cp-creds-'));
+    for (const n of ['SH_SESSION_TOKEN_PRIVATE_KEY', 'SH_CREDENTIAL_KEK', 'SH_EXCHANGE_TOKEN'])
+      writeFileSync(join(dir, n), `${s[n]}\n`);
+    const env = withCredentials(
+      { CREDENTIALS_DIRECTORY: dir, SH_GITHUB_CLIENT_ID: 'Iv1.fake' }, // notsecret
+      CONTROL_PLANE_SECRETS,
+    );
+    const cfg = configFromEnv(env);
+    expect(cfg.exchangeToken).toBe(s.SH_EXCHANGE_TOKEN);
+    // The signer built from the file verifies against the public half setup-vm.sh gives the supervisor.
+    const signer = makeSigner(env.SH_SESSION_TOKEN_PRIVATE_KEY!);
+    const token = signer.mint({
+      sub: 'github:1',
+      tenant: 't',
+      roles: [],
+      scope: ['api'],
+      ttlSeconds: 60,
+    });
+    expect(verifyToken(token, parseKeyset(s.SH_SESSION_TOKEN_PUBLIC_KEYS)).sub).toBe('github:1');
   });
 });
