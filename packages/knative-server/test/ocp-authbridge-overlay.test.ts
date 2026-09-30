@@ -59,18 +59,18 @@ describe('ocp-authbridge overlay kustomization', () => {
     expect(images).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          name: 'dev.local/serverless-harness',
-          newName: 'ghcr.io/rossoctl/serverless-harness',
+          name: 'dev.local/moca',
+          newName: 'ghcr.io/rossoctl/moca',
           newTag: 'latest',
         }),
         expect.objectContaining({
           name: 'dev.local/echo-target',
-          newName: 'ghcr.io/rossoctl/serverless-harness-echo-target',
+          newName: 'ghcr.io/rossoctl/moca-echo-target',
           newTag: 'latest',
         }),
         expect.objectContaining({
           name: 'dev.local/sandbox-rc1',
-          newName: 'ghcr.io/rossoctl/serverless-harness-sandbox',
+          newName: 'ghcr.io/rossoctl/moca-sandbox',
           newTag: 'latest',
         }),
       ]),

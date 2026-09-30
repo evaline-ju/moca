@@ -45,7 +45,7 @@ spec:
             seccompProfile: { type: RuntimeDefault }
           containers:
             - name: cron-dispatch
-              image: dev.local/serverless-harness:local
+              image: dev.local/moca:local
               imagePullPolicy: IfNotPresent
               workingDir: /app/packages/knative-server
               command: ['node', '--import', 'tsx', 'src/cron-dispatch.ts']

@@ -13,8 +13,8 @@ import {
   type ExecEvent,
   type ServerFrame,
   type WorkerFrame,
-} from '@sh/k8s-sandbox';
-import type { RecordStore } from '@sh/harness';
+} from '@moca/k8s-sandbox';
+import type { RecordStore } from '@moca/harness';
 import { startRelay } from '../src/main.js';
 
 // The split shape compose and deploy/vm run by default (MI1 §5 R5): sandboxes attach on one

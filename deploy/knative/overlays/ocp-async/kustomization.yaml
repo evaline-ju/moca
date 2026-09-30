@@ -18,6 +18,6 @@ resources:
   - ../../leaf-scaledjob.yaml
 
 images:
-  - name: dev.local/serverless-harness
-    newName: ghcr.io/rossoctl/serverless-harness
+  - name: dev.local/moca
+    newName: ghcr.io/rossoctl/moca
     newTag: latest

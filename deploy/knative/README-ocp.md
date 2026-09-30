@@ -1,6 +1,6 @@
 # Deploying on OpenShift
 
-`deploy/knative/setup-ocp.sh` stands up the serverless-harness stack on
+`deploy/knative/setup-ocp.sh` stands up the moca stack on
 **OpenShift 4.20+** — the OpenShift-native sibling of [`setup-kind.sh`](setup-kind.sh).
 It installs OpenShift Serverless (Knative + Kourier), Redis, the sandbox pod, the
 LLM-credentials secret, and the harness Knative Service, reachable over its
@@ -18,7 +18,7 @@ Base bring-up only — see [Scope](#scope) for what is deferred.
   - `ANTHROPIC_API_KEY` (direct), **or**
   - `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL` (Bearer-token gateway, e.g. LiteLLM).
 - The harness image. By default the script pulls the published
-  `ghcr.io/rossoctl/serverless-harness:latest`; override with `--image`.
+  `ghcr.io/rossoctl/moca:latest`; override with `--image`.
 - **agent-sandbox controller** (kubernetes-sigs v0.5.0) is installed by the script
   (`sandboxes.agents.x-k8s.io`); it creates the `sandbox-0` pod from the Sandbox CR
   and provisions its durable `/workspace` PVC. The harness resolves the pod via the
@@ -28,8 +28,8 @@ Base bring-up only — see [Scope](#scope) for what is deferred.
 
 ```bash
 # 1. Clone (the Pi agent is a submodule)
-git clone --recurse-submodules https://github.com/kagenti/serverless-harness.git
-cd serverless-harness
+git clone --recurse-submodules https://github.com/rossoctl/moca.git
+cd moca
 
 # 2. Log in to your OpenShift 4.20+ cluster as cluster-admin
 oc login --token=... --server=https://api.<cluster>:6443
@@ -61,15 +61,15 @@ creates a real Route per Knative Service (`oc get ksvc serverless-harness -o jso
 
 ## What it installs
 
-| Component                   | How                                                                                                                                                                                                                                        |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Knative Serving (+ Kourier) | **Red Hat OpenShift Serverless Operator** (OLM Subscription in `openshift-serverless`) + a `KnativeServing` CR in `knative-serving`. Kourier is bundled.                                                                                   |
-| Knative config              | Autoscaler tuning + the `podspec-persistent-volume-claim`/`-write`/`-securitycontext` feature flags are set in the **`KnativeServing` CR spec** (the operator reverts direct `config-*` ConfigMap patches).                                |
-| Redis                       | Lightweight in-repo Deployment (`redis:7-alpine`), runs under `restricted-v2`.                                                                                                                                                             |
-| Sandbox                     | Pre-baked image ([`sandbox.Dockerfile`](sandbox.Dockerfile), `USER 65532`), pulled from GHCR (`ghcr.io/rossoctl/serverless-harness-sandbox:latest`, republished by `build.yaml` on every push to `main`; override with `--sandbox-image`). |
-| Sandbox `/workspace` PVC    | `ReadWriteOnce` (Sandbox CR `volumeClaimTemplates`), cluster-default StorageClass.                                                                                                                                                         |
-| Harness                     | Knative Service applied via the [`overlays/ocp`](overlays/ocp) kustomize overlay; SA granted the `nonroot-v2` SCC.                                                                                                                         |
-| Ingress                     | Auto-created OpenShift Route.                                                                                                                                                                                                              |
+| Component                   | How                                                                                                                                                                                                                          |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Knative Serving (+ Kourier) | **Red Hat OpenShift Serverless Operator** (OLM Subscription in `openshift-serverless`) + a `KnativeServing` CR in `knative-serving`. Kourier is bundled.                                                                     |
+| Knative config              | Autoscaler tuning + the `podspec-persistent-volume-claim`/`-write`/`-securitycontext` feature flags are set in the **`KnativeServing` CR spec** (the operator reverts direct `config-*` ConfigMap patches).                  |
+| Redis                       | Lightweight in-repo Deployment (`redis:7-alpine`), runs under `restricted-v2`.                                                                                                                                               |
+| Sandbox                     | Pre-baked image ([`sandbox.Dockerfile`](sandbox.Dockerfile), `USER 65532`), pulled from GHCR (`ghcr.io/rossoctl/moca-sandbox:latest`, republished by `build.yaml` on every push to `main`; override with `--sandbox-image`). |
+| Sandbox `/workspace` PVC    | `ReadWriteOnce` (Sandbox CR `volumeClaimTemplates`), cluster-default StorageClass.                                                                                                                                           |
+| Harness                     | Knative Service applied via the [`overlays/ocp`](overlays/ocp) kustomize overlay; SA granted the `nonroot-v2` SCC.                                                                                                           |
+| Ingress                     | Auto-created OpenShift Route.                                                                                                                                                                                                |
 
 Manifests are shared with Kind via the `overlays/ocp` overlay — OpenShift tweaks
 are kustomize patches, not forked YAMLs.
@@ -78,8 +78,8 @@ are kustomize patches, not forked YAMLs.
 
 ```
 --namespace <ns>         Target namespace (default: default)
---image <ref>            Harness image (default: ghcr.io/rossoctl/serverless-harness:latest)
---sandbox-image <ref>    Sandbox image to pull (default: ghcr.io/rossoctl/serverless-harness-sandbox:latest)
+--image <ref>            Harness image (default: ghcr.io/rossoctl/moca:latest)
+--sandbox-image <ref>    Sandbox image to pull (default: ghcr.io/rossoctl/moca-sandbox:latest)
 --serverless-channel <c> OpenShift Serverless subscription channel (default: stable)
 --with-keda              Install KEDA (Custom Metrics Autoscaler Operator) for async leaf
 --keda-channel <c>       Custom Metrics Autoscaler channel (default: stable)
@@ -194,7 +194,7 @@ two pullable images, since its defaults assume kind:
 
 ```bash
 KSVC_URL=$(oc get ksvc serverless-harness -n default -o jsonpath='{.status.url}') \
-RELAY_IMAGE=<registry>/serverless-harness:latest \
+RELAY_IMAGE=<registry>/moca:latest \
 WORKER_IMAGE=image-registry.openshift-image-registry.svc:5000/default/remote-worker:latest \
 RELAY_LIVE_SMOKE=1 bash deploy/knative/relay-leaf-smoke.sh
 # => Results: 6 passed, 0 failed
@@ -232,14 +232,14 @@ serverless-harness`). The sandbox image sets `USER 65532` itself and needs no gr
 ## Image delivery
 
 Both images default to the published GHCR builds. `build.yaml` republishes
-`ghcr.io/rossoctl/serverless-harness` **and**
-`ghcr.io/rossoctl/serverless-harness-sandbox` (from [`sandbox.Dockerfile`](sandbox.Dockerfile))
+`ghcr.io/rossoctl/moca` **and**
+`ghcr.io/rossoctl/moca-sandbox` (from [`sandbox.Dockerfile`](sandbox.Dockerfile))
 on every push to `main`, so OpenShift pulls them directly — no in-cluster build step.
 
-- **Harness:** pull the published `ghcr.io/rossoctl/serverless-harness` image; pin a
-  tag with `--image ghcr.io/rossoctl/serverless-harness:<tag>`.
-- **Sandbox:** pull the published `ghcr.io/rossoctl/serverless-harness-sandbox` image;
-  override with `--sandbox-image ghcr.io/rossoctl/serverless-harness-sandbox:<tag>`.
+- **Harness:** pull the published `ghcr.io/rossoctl/moca` image; pin a
+  tag with `--image ghcr.io/rossoctl/moca:<tag>`.
+- **Sandbox:** pull the published `ghcr.io/rossoctl/moca-sandbox` image;
+  override with `--sandbox-image ghcr.io/rossoctl/moca-sandbox:<tag>`.
 - **Build the harness from source in-cluster** (no external registry) against the
   OpenShift internal registry:
   ```bash

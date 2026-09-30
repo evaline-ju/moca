@@ -1,7 +1,7 @@
 import { generateKeyPairSync } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { CP_ERROR_CODES, CpError, statusFor, type CpErrorCode } from '@sh/control-plane';
-import { keyIdFor, makeSigner, publicKeyToBase64 } from '@sh/control-plane';
+import { CP_ERROR_CODES, CpError, statusFor, type CpErrorCode } from '@moca/control-plane';
+import { keyIdFor, makeSigner, publicKeyToBase64 } from '@moca/control-plane';
 
 // Fix round 1, Important 2: lets the retry test control connect() success/failure per attempt
 // without a live Redis. Nothing else in this file touches Redis (sharedRuntimeReporter's own test

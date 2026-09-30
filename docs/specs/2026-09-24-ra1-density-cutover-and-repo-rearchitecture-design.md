@@ -138,6 +138,56 @@ this amendment) as the authoritative record of what moved, not the original §3.
 is left as-is rather than rewritten, consistent with this repo's own "don't retro-edit, note the
 correction" convention for specs.
 
+## 0.9 Amendment — September 29, 2026 (Phase 1 executed)
+
+Phase 1 (the rename to MOCA) has executed in PR #365 (`rossoctl/moca`), which superseded the closed
+PR #351. This document's own §11 table describes exactly this rename, so it keeps its original
+pre-Phase-1 values. The rename is recorded here and in that PR, not by editing §11 or any other
+original text of this document, consistent with §0.7/§0.8.
+
+What Phase 1 renamed is display branding, the workspace package scope (`@sh/*` to `@moca/*`), the
+Go module path, the published image names (`ghcr.io/rossoctl/serverless-harness*` to
+`ghcr.io/rossoctl/moca*`), and repository URLs. The old `serverless-harness*` images stop receiving
+new `:latest` tags from the first post-merge `build.yaml` run; they are not deleted.
+
+Other specs and ADRs under `docs/specs/` and `docs/adrs/` were deliberately **not** edited. Both
+directories' READMEs make accepted records immutable, and §6's migration map schedules their only
+change (status updates) for Phase 4. They describe past decisions in the names of their time, so
+`@sh/*`, `serverless-harness` and similar in them are correct history, not missed renames. The
+split `moca-experiments` repository's package is also still `@sh/experiments`. The only files there
+that changed are the `docs/specs/README.md` registry (a living index) and this amendment.
+
+Deliberately **not** renamed, and expected to stay that way past this phase, are the identifiers
+that already exist on running installs. Renaming any of these strands live state or leaves a
+duplicate beside it, which is a live-migration concern §11 never asked for:
+
+- **Environment and process names:** every `SH_*` environment variable, the `sh-worker` and
+  `sh-supervisor` process labels in code comments and log lines, and the `sh-knative` default local
+  cluster name.
+- **Kubernetes objects:** the `serverless-harness` Knative Service (and so its
+  `serving.knative.dev/service` label, Route hostnames and in-cluster URL), the
+  `serverless-harness` and `serverless-harness-sandbox` ServiceAccounts, the
+  `serverless-harness-sandbox` Role and RoleBinding, and the `serverless-harness-egress`
+  NetworkPolicy. The AB1 lockdown variant replaces that policy by name, so a new name would leave the
+  old policy behind on a reused cluster. Also the control plane's `sh-control-plane` Deployment,
+  Service and ServiceAccount and its `sh-credentials` Namespace, and the default Shipwright Build
+  names (`serverless-harness-<tag>`) with their `app` labels, and the `serverless-harness`
+  BuildConfig that `README-ocp.md` has you create with `oc new-build`.
+- **Secrets:** `sh-relay-token`, `sh-credential-kek`, `sh-session-token-key` and
+  `sh-exchange-token`.
+- **Wire and storage names:** the `x-sh-session` header (and the design-only `x-sh-provider` and
+  `x-sh-model` headers), the `sh:sandbox:*`, `sh:cp:*` and `sh:workload:*` Redis key prefixes, and
+  the sandbox's `/workspace/.sh-config/` config-bundle cache directory.
+- **Compose:** the `serverless-harness` project name, which prefixes the credential volume's name,
+  and the `~/.serverless-harness` default install directory that holds the generated `.env`.
+- **VM (P6):** the `sh-supervisor.service` and `sh-relay.service` unit filenames, and the
+  `/opt/serverless-harness`, `/etc/serverless-harness` and `/var/lib/serverless-harness`
+  (`StateDirectory`) paths.
+
+MI1's own spec, landed on `main` after this rename was first drafted, notes in its naming header that
+existing `SH_*` names are "left for RA1 Phase 1's rename". This is that rename's answer: they are
+left alone, on purpose. A later rename of any of them needs its own migration step.
+
 ## 0. How this document came to be
 
 Written by an assistant session at the user's request, after: (a) reading the P4, P4.1, and P6

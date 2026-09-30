@@ -1,4 +1,4 @@
-# @sh/control-plane
+# @moca/control-plane
 
 The MU1 multi-user control plane: login (GitHub device flow), sessions and their ownership index,
 per-user credentials, and the session tokens the harness verifies. Design:

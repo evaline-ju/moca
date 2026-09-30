@@ -11,12 +11,12 @@
 # Usage:
 #   ./deploy/knative/setup-kind.sh [--skip-build] [--build] [--image <ref>] [--cluster-name <name>]
 #
-# Harness image (dev.local/serverless-harness:local, referenced by service.yaml):
+# Harness image (dev.local/moca:local, referenced by service.yaml):
 #   default      Pull the published image ($SH_IMAGE) and load it into kind; if the pull is
 #                unavailable (offline / image missing), transparently fall back to a local build.
 #                A first-time quickstart therefore needs no local Docker build.
 #   --build      Force a local build from this checkout (use when testing local source changes).
-#   --skip-build Do neither; assume dev.local/serverless-harness:local is already loaded.
+#   --skip-build Do neither; assume dev.local/moca:local is already loaded.
 #   --image <ref> / SH_IMAGE=<ref>  Override the published image to pull.
 
 set -euo pipefail
@@ -28,9 +28,9 @@ SKIP_BUILD="${SKIP_BUILD:-false}"
 FORCE_BUILD="${FORCE_BUILD:-false}"
 KNATIVE_VERSION="${KNATIVE_VERSION:-v1.14.0}"
 # Published harness image pulled by default (public GHCR package under the rossoctl org).
-SH_IMAGE="${SH_IMAGE:-ghcr.io/rossoctl/serverless-harness:latest}"
+SH_IMAGE="${SH_IMAGE:-ghcr.io/rossoctl/moca:latest}"
 # Local tag the Knative manifests reference; the pulled/built image is (re)tagged to this.
-LOCAL_IMAGE="${LOCAL_IMAGE:-dev.local/serverless-harness:local}"
+LOCAL_IMAGE="${LOCAL_IMAGE:-dev.local/moca:local}"
 
 # Parse args
 for arg in "$@"; do
@@ -66,7 +66,7 @@ ensure_harness_image() {
     fi
     echo "--- Pull unavailable ($SH_IMAGE); falling back to a local build ---"
   else
-    echo "--- Building serverless-harness image locally (--build) ---"
+    echo "--- Building moca image locally (--build) ---"
   fi
   docker build --load -t "$LOCAL_IMAGE" "$REPO_ROOT"
   echo "--- Loading built image into kind ---"
@@ -323,7 +323,7 @@ fi
 echo "--- Deploying serverless-harness Knative Service ---"
 kubectl apply -f "$SCRIPT_DIR/service.yaml"
 
-# The image tag (dev.local/serverless-harness:local) is mutable, so re-applying an unchanged
+# The image tag (dev.local/moca:local) is mutable, so re-applying an unchanged
 # service spec does NOT roll a new Revision — Knative would keep serving the previous Revision
 # (pinned to the OLD image digest) and a freshly built image would never be deployed. Force a new
 # Revision by stamping a build marker into the template so the (re)loaded image is always picked up.

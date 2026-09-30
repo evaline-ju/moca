@@ -26,8 +26,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ----------------------------------------------------------------------------
 DRY_RUN=false
 NAMESPACE="default"
-HARNESS_IMAGE="${HARNESS_IMAGE:-ghcr.io/rossoctl/serverless-harness:latest}"
-SANDBOX_IMAGE="${SANDBOX_IMAGE:-ghcr.io/rossoctl/serverless-harness-sandbox:latest}"
+HARNESS_IMAGE="${HARNESS_IMAGE:-ghcr.io/rossoctl/moca:latest}"
+SANDBOX_IMAGE="${SANDBOX_IMAGE:-ghcr.io/rossoctl/moca-sandbox:latest}"
 STORAGE_CLASS=""                       # empty => use the cluster's default StorageClass
 SKIP_KEDA=true                         # async-leaf / KEDA is opt-in (--with-keda)
 INGRESS="none"                         # none | nodeport
@@ -49,7 +49,7 @@ usage() {
   cat <<EOF
 Usage: $0 [OPTIONS]
 
-Stand up the serverless-harness stack on a generic Kubernetes cluster:
+Stand up the moca stack on a generic Kubernetes cluster:
 Knative Serving + Kourier, agent-sandbox controller, Redis, the sandbox pool,
 the LLM secret, and the harness Knative Service (reachable in-cluster; see --ingress).
 
@@ -115,7 +115,7 @@ case "$INGRESS" in none|nodeport) ;; *) log_error "--ingress must be none|nodepo
 KUBECTL=(kubectl)
 [ -n "$KUBECTL_CONTEXT" ] && KUBECTL=(kubectl --context "$KUBECTL_CONTEXT")
 
-log_info "serverless-harness setup on Kubernetes"
+log_info "moca setup on Kubernetes"
 log_info "context=$("${KUBECTL[@]}" config current-context) namespace=$NAMESPACE"
 log_info "harness=$HARNESS_IMAGE sandbox=$SANDBOX_IMAGE storage=${STORAGE_CLASS:-<default>} ingress=$INGRESS keda=$([ "$SKIP_KEDA" = true ] && echo off || echo on)"
 
@@ -134,8 +134,8 @@ log_info "harness=$HARNESS_IMAGE sandbox=$SANDBOX_IMAGE storage=${STORAGE_CLASS:
 render_base() {
   local file="$1"
   sed \
-    -e "s#dev.local/serverless-harness:local#${HARNESS_IMAGE}#g" \
-    -e "s#dev.local/serverless-harness-sandbox:local#${SANDBOX_IMAGE}#g" \
+    -e "s#dev.local/moca:local#${HARNESS_IMAGE}#g" \
+    -e "s#dev.local/moca-sandbox:local#${SANDBOX_IMAGE}#g" \
     -e "s#alpine:3.20#${SANDBOX_IMAGE}#g" \
     "$file" \
   | if [ "$NAMESPACE" != "default" ]; then

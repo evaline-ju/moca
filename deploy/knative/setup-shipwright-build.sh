@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # deploy/knative/setup-shipwright-build.sh
-# Builds the serverless-harness (and optionally sandbox) image IN-CLUSTER using
+# Builds the moca (and optionally sandbox) image IN-CLUSTER using
 # Shipwright, so you don't need a local Docker daemon or a registry reachable from
 # your laptop. Prints the resulting image ref(s) to feed into
 # setup-k8s.sh --image/--sandbox-image.
@@ -24,7 +24,7 @@
 #     Dockerfile you want built — this defaults to the current repo's origin/HEAD
 #
 # Usage:
-#   ./deploy/knative/setup-shipwright-build.sh --image-repo <registry>/serverless-harness [OPTIONS]
+#   ./deploy/knative/setup-shipwright-build.sh --image-repo <registry>/moca [OPTIONS]
 
 set -euo pipefail
 
@@ -59,11 +59,11 @@ usage() {
   cat <<EOF
 Usage: $0 --image-repo <ref> [OPTIONS]
 
-Build the serverless-harness image (and optionally the sandbox image) in-cluster
+Build the moca image (and optionally the sandbox image) in-cluster
 via Shipwright, then print the resulting image ref(s) for setup-k8s.sh.
 
 Required:
-  --image-repo <ref>     Registry + repo to push to, e.g. registry.example.com:5000/serverless-harness
+  --image-repo <ref>     Registry + repo to push to, e.g. registry.example.com:5000/moca
                          (the sandbox image is pushed to the same repo with "-sandbox" appended)
 
 Options:
@@ -87,7 +87,7 @@ Output:
     SANDBOX_IMAGE=<image-repo>-sandbox:<tag>   (only with --with-sandbox)
 
 Examples:
-  $0 --image-repo registry.cr-system.svc.cluster.local:5000/serverless-harness \\
+  $0 --image-repo registry.cr-system.svc.cluster.local:5000/moca \\
      --namespace serverless-harness --with-sandbox
 
   # Then:

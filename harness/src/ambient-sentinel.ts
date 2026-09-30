@@ -5,6 +5,6 @@
  * in play, or pi throws "No API key found" before any request is made. The value is identical for
  * every caller, so it asserts no identity; applyModelGateway sends `x-api-key: null` alongside the
  * Bearer header, so it never reaches the wire as auth. It lives in its own module so tests that mock
- * `@sh/harness/run-turn` wholesale still resolve it.
+ * `@moca/harness/run-turn` wholesale still resolve it.
  */
 export const AMBIENT_KEY_SENTINEL = 'sh-unused-see-authorization-header';

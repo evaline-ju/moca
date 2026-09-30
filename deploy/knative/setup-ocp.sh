@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # deploy/knative/setup-ocp.sh
-# One-shot setup of the serverless-harness stack on OpenShift (4.20+).
+# One-shot setup of the moca stack on OpenShift (4.20+).
 #
 # Sibling of setup-kind.sh, but OpenShift-native (see issue #41):
 #   - Knative Serving (+ Kourier) via the Red Hat OpenShift Serverless Operator
@@ -38,12 +38,12 @@ ASYNC_OVERLAY_DIR="$SCRIPT_DIR/overlays/ocp-async"    # only rendered/applied wh
 # ----------------------------------------------------------------------------
 DRY_RUN=false
 NAMESPACE="default"
-HARNESS_IMAGE="${HARNESS_IMAGE:-ghcr.io/rossoctl/serverless-harness:latest}"
-SANDBOX_IMAGE="${SANDBOX_IMAGE:-ghcr.io/rossoctl/serverless-harness-sandbox:latest}"  # pre-baked, pulled from GHCR
+HARNESS_IMAGE="${HARNESS_IMAGE:-ghcr.io/rossoctl/moca:latest}"
+SANDBOX_IMAGE="${SANDBOX_IMAGE:-ghcr.io/rossoctl/moca-sandbox:latest}"  # pre-baked, pulled from GHCR
 SKIP_KEDA=true             # base bring-up: async leaf / KEDA is opt-in (--with-keda)
 SERVERLESS_CHANNEL="stable"
 KEDA_CHANNEL="stable"
-LOG_DIR="${LOG_DIR:-/tmp/serverless-harness-ocp}"
+LOG_DIR="${LOG_DIR:-/tmp/moca-ocp}"
 
 # ----------------------------------------------------------------------------
 # Logging + command helpers
@@ -79,7 +79,7 @@ usage() {
   cat <<EOF
 Usage: $0 [OPTIONS]
 
-Stand up the serverless-harness stack on OpenShift (4.20+): OpenShift Serverless
+Stand up the moca stack on OpenShift (4.20+): OpenShift Serverless
 (Knative + Kourier), Redis, the sandbox pod, the LLM secret,
 and the harness Knative Service — reachable over its auto-created Route.
 
@@ -105,7 +105,7 @@ Environment:
 Examples:
   $0                                   # default namespace, GHCR harness + sandbox images
   $0 --namespace serverless-harness    # dedicated namespace
-  $0 --image ghcr.io/rossoctl/serverless-harness:v1.2.3 --dry-run
+  $0 --image ghcr.io/rossoctl/moca:v1.2.3 --dry-run
 EOF
 }
 
@@ -521,8 +521,8 @@ render_overlay_dir() {
   local dir="$1"
   $KUBECTL kustomize --load-restrictor LoadRestrictionsNone "$dir" \
     | sed \
-        -e "s#ghcr.io/rossoctl/serverless-harness:latest#${HARNESS_IMAGE}#g" \
-        -e "s#ghcr.io/rossoctl/serverless-harness-sandbox:latest#${SANDBOX_IMAGE}#g" \
+        -e "s#ghcr.io/rossoctl/moca:latest#${HARNESS_IMAGE}#g" \
+        -e "s#ghcr.io/rossoctl/moca-sandbox:latest#${SANDBOX_IMAGE}#g" \
     | if [ "$NAMESPACE" != "default" ]; then
         sed -e "s#namespace: default#namespace: ${NAMESPACE}#g" \
             -e "s#redis.default.svc#redis.${NAMESPACE}.svc#g"

@@ -299,7 +299,7 @@ reads at startup) — just be aware that adding an uncommented `SH_ADMIN_PORT` l
 change what `deploy/vm/tests/setup-vm.test.sh` expects if the test is ever extended to check
 for it.
 
-**`SANDBOX_IMAGE`** (default `ghcr.io/rossoctl/serverless-harness-remote-worker:latest`) is the
+**`SANDBOX_IMAGE`** (default `ghcr.io/rossoctl/moca-remote-worker:latest`) is the
 image `setup-vm.sh` runs sandbox containers from. It is a variable for the script, not an env-file
 setting: `sudo SANDBOX_IMAGE=<image> ./deploy/vm/setup-vm.sh`. The same name means the
 Kubernetes sandbox pod image to `setup-k8s.sh`, and compose spells this concept

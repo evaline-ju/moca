@@ -1,5 +1,5 @@
 # deploy/knative/overlays/ocp/kustomization.yaml
-# OpenShift overlay for the serverless-harness data plane (issue #41).
+# OpenShift overlay for the moca data plane (issue #41).
 #
 # Divergences from the Kind base, all expressed as patches/transformers so the
 # base YAMLs stay shared:
@@ -31,8 +31,8 @@ resources:
   - ../../relay-deployment.yaml
 
 images:
-  - name: dev.local/serverless-harness
-    newName: ghcr.io/rossoctl/serverless-harness
+  - name: dev.local/moca
+    newName: ghcr.io/rossoctl/moca
     newTag: latest
 
 patches:

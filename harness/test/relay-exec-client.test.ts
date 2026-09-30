@@ -1,6 +1,6 @@
 import { Server, ServerCredentials, type ServerWritableStream } from '@grpc/grpc-js';
 import { afterEach, describe, expect, it } from 'vitest';
-import { SandboxExecService } from '@sh/k8s-sandbox';
+import { SandboxExecService } from '@moca/k8s-sandbox';
 import { makeRelayExecClient } from '../src/select-sandbox.js';
 
 const servers: Server[] = [];

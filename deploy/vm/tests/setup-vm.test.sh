@@ -217,11 +217,11 @@ pass "the supervisor dials the relay's loopback exec listener, on the port it bi
 # --- SANDBOX_IMAGE default is the remote-worker image ------------------------------------------
 # Sandboxes here attach to the relay (SH_REMOTE_SANDBOX=1, SH_SANDBOX_DISCOVERY=records), so the
 # container must run remote-worker -- the image compose's sandbox service uses. The Kubernetes
-# scripts' serverless-harness-sandbox image is a pod the harness execs into; it never dials the
+# scripts' moca-sandbox image is a pod the harness execs into; it never dials the
 # relay, so with it every turn finds no sandbox presence records.
-[[ "$SANDBOX_IMAGE" == "ghcr.io/rossoctl/serverless-harness-remote-worker:latest" ]] ||
+[[ "$SANDBOX_IMAGE" == "ghcr.io/rossoctl/moca-remote-worker:latest" ]] ||
   fail "SANDBOX_IMAGE default is '$SANDBOX_IMAGE', expected" \
-    "ghcr.io/rossoctl/serverless-harness-remote-worker:latest (the image that attaches to the relay)"
+    "ghcr.io/rossoctl/moca-remote-worker:latest (the image that attaches to the relay)"
 compose_sandbox_image=$(grep -oE 'SH_SANDBOX_IMAGE:-[^}]+' "$VM_DIR/../compose/docker-compose.yml" | head -1)
 [[ "${compose_sandbox_image#SH_SANDBOX_IMAGE:-}" == "$SANDBOX_IMAGE" ]] ||
   fail "SANDBOX_IMAGE default ('$SANDBOX_IMAGE') must match compose's sandbox image ('$compose_sandbox_image')"

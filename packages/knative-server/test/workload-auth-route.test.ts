@@ -1,7 +1,7 @@
 import { generateKeyPairSync } from 'node:crypto';
 import http from 'node:http';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { keyIdFor, makeSigner, publicKeyToBase64 } from '@sh/control-plane';
+import { keyIdFor, makeSigner, publicKeyToBase64 } from '@moca/control-plane';
 
 // The /workloads lifecycle under caller authentication (PR #350 review): every verb authenticates,
 // a workload is owned by the subject that created it, and a run can only inherit the pool selector
@@ -14,14 +14,14 @@ const { records, runLeaf, createWorkload, getWorkload, deleteWorkload } = vi.hoi
   getWorkload: vi.fn(),
   deleteWorkload: vi.fn(),
 }));
-vi.mock('@sh/work-queue', () => ({
+vi.mock('@moca/work-queue', () => ({
   RedisWorkQueue: class {
     ensureGroup = async () => {};
     enqueue = async () => '1-0';
   },
 }));
-vi.mock('@sh/harness/leaf-result-store', async (orig) => {
-  const actual = await orig<typeof import('@sh/harness/leaf-result-store')>();
+vi.mock('@moca/harness/leaf-result-store', async (orig) => {
+  const actual = await orig<typeof import('@moca/harness/leaf-result-store')>();
   class FakeStore {
     async set(key: string, value: string) {
       records.set(key, value);
@@ -32,7 +32,7 @@ vi.mock('@sh/harness/leaf-result-store', async (orig) => {
   }
   return { ...actual, RedisResultStore: FakeStore };
 });
-vi.mock('@sh/harness/run-leaf', () => ({
+vi.mock('@moca/harness/run-leaf', () => ({
   runLeaf: (...args: any[]) => runLeaf(...args),
   validateItem: (item: any) => item,
   leafSessionId: (env: any) => env.sessionId,

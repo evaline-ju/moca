@@ -22,7 +22,7 @@ spec:
         fsGroup: 65532
         seccompProfile: { type: RuntimeDefault }
       containers:
-        - image: dev.local/serverless-harness:local
+        - image: dev.local/moca:local
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

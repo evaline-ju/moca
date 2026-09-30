@@ -19,15 +19,15 @@ Two differentiators, two acts:
 ## Act 0: Install
 
 ```bash
-git clone --recurse-submodules https://github.com/rossoctl/serverless-harness.git && cd serverless-harness
+git clone --recurse-submodules https://github.com/rossoctl/moca.git && cd moca
 ./deploy/knative/setup-kind.sh
 ```
 
 > By default `setup-kind.sh` **pulls the published image**
-> (`ghcr.io/rossoctl/serverless-harness:latest`) and loads it into the cluster — a first-time
+> (`ghcr.io/rossoctl/moca:latest`) and loads it into the cluster — a first-time
 > run needs no local Docker build (it falls back to a build only if the pull is unavailable).
 > Testing local source changes? Pass `--build` to build from this checkout; `--skip-build`
-> reuses an image you already loaded as `dev.local/serverless-harness:local`.
+> reuses an image you already loaded as `dev.local/moca:local`.
 > See [`deploy/knative/README-kind.md`](../../deploy/knative/README-kind.md) for more setup options.
 
 `setup-kind.sh` installs everything Act 1 needs (Knative + Kourier, Redis, the

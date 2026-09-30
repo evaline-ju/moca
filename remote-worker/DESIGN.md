@@ -1,6 +1,6 @@
 # remote-worker — SandboxTransport reference worker (Go)
 
-A thin Go static binary that connects to the serverless-harness **relay** and runs
+A thin Go static binary that connects to the moca **relay** and runs
 the commands it receives in a local `bash -c`, streaming stdout and stderr back as
 `Chunk` frames and terminating every exec with `End` or `ExecError`.
 
@@ -84,7 +84,7 @@ then ride _back down_ the worker-initiated stream through the same tunnel.
 ```
 
 Prereqs: harness + relay already deployed in ykt1 `default` (they are — see the
-project CLAUDE.md "Serverless Harness" section). Then:
+project CLAUDE.md "MOCA" section). Then:
 
 ```bash
 export KUBECONFIG=.kube/config-ykt1
