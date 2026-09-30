@@ -193,7 +193,13 @@ func TestAnExecWaitingOnTheRunGateCanStillBeCancelled(t *testing.T) {
 		}()
 		waitingOnTheGate(t, done)
 
-		clk.Advance(6 * time.Second)
+		// Advance EXACTLY to the deadline, not past it: fakeClock.Advance fires every
+		// timer due at-or-before its target, including ones armed by callbacks while
+		// it loops. The timed-out Exec's destroy arms a replenish timer ReplenishDelay
+		// out, and an overshoot of a second or more lets Advance fire that refill (and
+		// its chained second slot) mid-loop — minting standbys the liveCount assertion
+		// below then reads as a leak. Same convention as pool_test.go's timeout tests.
+		clk.Advance(5 * time.Second)
 		select {
 		case err := <-done:
 			// Not ErrAborted: the timer cancels runCtx, so classify must report the

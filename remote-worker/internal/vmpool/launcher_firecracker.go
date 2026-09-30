@@ -704,6 +704,22 @@ var socketProbe = func(path string) bool {
 	return true
 }
 
+// socketSleep parks the poll loop for one interval, returning nil when the interval
+// elapsed or the context's error if it ended the wait instead. A variable for the same
+// reason socketProbe is: the pacing test pins the schedule by recording the intervals
+// the loop ASKS to sleep, which no probe-count or wall-clock assertion can do on a
+// shared CI runner -- there, time.Sleep overshoot is larger than the intervals being
+// pinned (CI recorded 97 probes against a nominal ~197 with the schedule intact), so
+// only the requested durations are deterministic.
+var socketSleep = func(ctx context.Context, d time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
+		return nil
+	}
+}
+
 // waitForUnixSocket returns once something ANSWERS at path, or on timeout/cancellation.
 // File existence alone is not enough: Firecracker creates the socket file before it is
 // actually accept()ing on it.
@@ -745,10 +761,8 @@ func waitForUnixSocketObserved(ctx context.Context, path string, timeout time.Du
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timed out after %s waiting for %s", timeout, path)
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(wait):
+		if err := socketSleep(ctx, wait); err != nil {
+			return err
 		}
 		// Grown after the sleep, so the FIRST retry is always the fine one -- that is the
 		// case the measured distribution says matters, since every restore's socket appeared
