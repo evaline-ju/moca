@@ -16,7 +16,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 export MOCK_LOG="$TMP/mock.log"
 mkdir -p "$TMP/bin"
-for cmd in podman systemctl getent pnpm nft; do
+for cmd in podman getent pnpm nft; do
   cat >"$TMP/bin/$cmd" <<'MOCK'
 #!/usr/bin/env bash
 printf '%s %s\n' "$(basename "$0")" "$*" >>"$MOCK_LOG"
@@ -53,6 +53,22 @@ if [[ "$1" == "network" && "$2" == "inspect" ]]; then
 fi
 MOCK
 chmod +x "$TMP/bin/podman"
+
+# systemctl logs its argv like the others and answers --version as a systemd new enough for
+# LoadCredential= (MOCK_SYSTEMCTL_VERSION overrides the first line, as `systemctl --version` prints it).
+# <extra> is one more line of mock body; the podman-restart test below uses it to fail one unit.
+write_systemctl_mock() {
+  {
+    cat <<'MOCK'
+#!/usr/bin/env bash
+printf '%s %s\n' "$(basename "$0")" "$*" >>"$MOCK_LOG"
+if [[ "${1:-}" == --version ]]; then printf '%s\n+PAM +AUDIT +SELINUX\n' "${MOCK_SYSTEMCTL_VERSION-systemd 252 (252.22-1)}"; fi
+MOCK
+    printf '%s\n' "${1:-}"
+  } >"$TMP/bin/systemctl"
+  chmod +x "$TMP/bin/systemctl"
+}
+write_systemctl_mock
 
 # id needs real stdout (the caller parses `id -u`), not just a log line, so it gets its own
 # mock rather than joining the log-only loop above. It reports uid 0 -- main() end to end
@@ -898,6 +914,28 @@ if PATH="/nonexistent" require_cmds podman 2>/dev/null; then
 fi
 pass "require_cmds reports missing tools"
 
+# --- systemd 247+: LoadCredential= (#366) ----------------------------------------------------------
+# An older systemd (RHEL 8's 239) ignores LoadCredential= with a warning: the control plane dies on a
+# missing SH_SESSION_TOKEN_PRIVATE_KEY and the supervisor runs with SH_REQUIRE_AUTH=true and no
+# exchange token. The mock's default answer is a 252.
+require_systemd 247 || fail "require_systemd refused systemd 252"
+export MOCK_SYSTEMCTL_VERSION='systemd 239 (239-78.el8)'
+out="$(require_systemd 247 2>&1)" && fail "require_systemd accepted systemd 239"
+for want in 239 247 LoadCredential=; do
+  grep -qF "$want" <<<"$out" || fail "require_systemd's refusal of systemd 239 must name $want: $out"
+done
+for garbled in 'not systemd at all' ''; do
+  export MOCK_SYSTEMCTL_VERSION="$garbled"
+  out="$(require_systemd 247 2>&1)" && fail "require_systemd accepted a --version of '$garbled'"
+  grep -q '247' <<<"$out" || fail "require_systemd's refusal of an unreadable version must name 247: $out"
+done
+unset MOCK_SYSTEMCTL_VERSION
+cmds_line=$(declare -f main | grep -n 'require_cmds' | cut -d: -f1)
+systemd_line=$(declare -f main | grep -n 'require_systemd 247' | cut -d: -f1)
+[[ -n "$cmds_line" && -n "$systemd_line" ]] || fail "main() must run require_cmds and require_systemd 247"
+((systemd_line == cmds_line + 1)) || fail "main() must run require_systemd right after require_cmds"
+pass "require_systemd: 252 passes; 239 and an unreadable version refuse, naming 247; main() checks it"
+
 # --- pnpm is a required command (B2) ---------------------------------------------------------
 # node --import tsx src/main.ts needs tsx (a devDependency) and the workspace link: targets
 # resolved -- both are products of `pnpm install`, which require_cmds never checked for.
@@ -1009,12 +1047,8 @@ pass "podman-restart.service enabled, so the containers survive a reboot"
 # ...and it must not be fatal when that unit is unavailable: it is one podman package's unit name,
 # and a host without it still has a working bring-up plus a documented reboot gap. `set -e` would
 # otherwise abort the whole script on an older podman.
-cat >"$TMP/bin/systemctl" <<'MOCK'
-#!/usr/bin/env bash
-printf '%s %s\n' "$(basename "$0")" "$*" >>"$MOCK_LOG"
-[[ "$*" != *podman-restart* ]] || exit 1
-MOCK
-chmod +x "$TMP/bin/systemctl"
+# shellcheck disable=SC2016  # expanded by the mock, not here
+write_systemctl_mock '[[ "$*" != *podman-restart* ]] || exit 1'
 : >"$MOCK_LOG"
 if ! warn_out=$(enable_container_restart 2>&1); then
   fail "enable_container_restart must not fail the bring-up when podman-restart.service is absent"
@@ -1023,11 +1057,7 @@ echo "$warn_out" | grep -qi 'reboot' ||
   fail "the warning must name the reboot consequence, not just the failed command: $warn_out"
 pass "a missing podman-restart.service warns about the reboot gap instead of aborting"
 # Restore the plain mock for the rest of the file (main() below asserts on systemctl argv).
-cat >"$TMP/bin/systemctl" <<'MOCK'
-#!/usr/bin/env bash
-printf '%s %s\n' "$(basename "$0")" "$*" >>"$MOCK_LOG"
-MOCK
-chmod +x "$TMP/bin/systemctl"
+write_systemctl_mock
 
 # --- Redis's missing volume is stated, not left to be discovered on a reboot -------------------
 # start_redis runs with no -v, so sessions, the ownership index and the lease store are lost on

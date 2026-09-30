@@ -11,6 +11,8 @@ the sandbox containers as podman containers alongside them. `setup-vm.sh` is the
   backend that enforces `isolate=strict`. `setup-vm.sh` refuses a podman that rejects the option,
   but cannot detect one that stores it without enforcing it. Isolation was verified live on
   netavark 1.17.2.
+- systemd 247 or newer (`LoadCredential=`). `setup-vm.sh` checks and refuses an older one (RHEL 8
+  ships 239), which would ignore the key and leave the control plane without its secrets.
 - `nft` (nftables), which loads the sandbox network's firewall
 - Node.js 22+ and pnpm 9+ on the VM (the supervisor and relay run directly via
   `node --import tsx`, not containerized)

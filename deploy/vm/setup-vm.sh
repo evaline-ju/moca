@@ -3,7 +3,7 @@
 # Sibling of deploy/knative/setup-kind.sh and setup-ocp.sh (spec §4.4).
 #
 # Prerequisites:
-#   - a Linux VM with systemd and podman, Node 22+
+#   - a Linux VM with systemd 247+ (LoadCredential=) and podman, Node 22+
 #   - run as a user that can sudo to root (installs units under /etc/systemd/system)
 #
 # Usage:
@@ -62,6 +62,26 @@ require_cmds() {
   for c in "$@"; do command -v "$c" >/dev/null 2>&1 || missing+=("$c"); done
   if ((${#missing[@]})); then
     echo "missing required commands: ${missing[*]}" >&2
+    return 1
+  fi
+}
+
+# require_systemd <min>: the units load the MU1 secrets with LoadCredential=, new in systemd 247. An older
+# systemd (RHEL 8 ships 239) ignores the key with a warning, so the control plane dies on a missing
+# SH_SESSION_TOKEN_PRIVATE_KEY and the supervisor requires auth with no exchange token to verify it by.
+# The version is the first integer after "systemd" on `systemctl --version`'s first line.
+require_systemd() {
+  local min="$1" line re='^systemd[[:space:]]+([0-9]+)'
+  line="$(systemctl --version 2>/dev/null | head -1)" || true
+  if [[ ! "$line" =~ $re ]]; then
+    echo "could not read systemd's version from 'systemctl --version' (first line: '$line'): the units" \
+      "need systemd $min or newer for LoadCredential=, which loads the control plane's secrets." >&2
+    return 1
+  fi
+  if ((BASH_REMATCH[1] < min)); then
+    echo "systemd ${BASH_REMATCH[1]} is too old: the units need systemd $min or newer for LoadCredential=," \
+      "which loads the control plane's secrets (an older systemd ignores it, and neither the control" \
+      "plane nor an authenticating supervisor can start)." >&2
     return 1
   fi
 }
@@ -689,6 +709,7 @@ start_services() {
 
 main() {
   require_cmds podman systemctl install node getent pnpm nft
+  require_systemd 247
   require_root
   require_build
   require_user harness
