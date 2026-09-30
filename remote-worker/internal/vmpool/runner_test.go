@@ -3,6 +3,8 @@ package vmpool
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -159,5 +161,56 @@ func TestRunnerSurfacesARefusalAsAnError(t *testing.T) {
 	// survive into the message so an operator can tell the ceilings apart.
 	if got := ReasonOf(err); got != RefuseEmptyKey {
 		t.Fatalf("ReasonOf = %q, want %q", got, RefuseEmptyKey)
+	}
+}
+
+// #369 acceptance: the worker's journal must show which session's workspace each Exec used and
+// which VM ran it. One line per Exec, always on, and never the command text.
+func TestRunnerLogsTheWorkspaceKeyAndVMOfEveryExec(t *testing.T) {
+	p, lc, _ := testPool(t)
+	var restoredID string
+	lc.setBeforeRestore(func(r RestoreRequest) { restoredID = r.ID })
+	lc.setRunFn(func(_ *fakeVM, _ Command, _ Sink) (Result, error) { return Result{ExitCode: 3}, nil })
+
+	var lines []string
+	prev := execLog
+	execLog = func(format string, a ...any) { lines = append(lines, fmt.Sprintf(format, a...)) }
+	t.Cleanup(func() { execLog = prev })
+
+	_, _ = Runner{Pool: p}.Run(context.Background(), wexec.Spec{
+		ReqID: 9, Command: "echo SECRET-VALUE", WorkspaceKey: "sess-abc",
+	}, newFrameSink())
+
+	if len(lines) != 1 {
+		t.Fatalf("got %d exec log lines, want exactly 1: %q", len(lines), lines)
+	}
+	l := lines[0]
+	for _, want := range []string{`req=9`, `workspace_key="sess-abc"`, "vm=" + restoredID, "exit=3", "err=<nil>"} {
+		if !strings.Contains(l, want) {
+			t.Fatalf("exec log %q lacks %q", l, want)
+		}
+	}
+	if restoredID == "" {
+		t.Fatal("the fake launcher restored no VM, so vm= proves nothing")
+	}
+	if strings.Contains(l, "SECRET-VALUE") {
+		t.Fatalf("exec log leaked the command text: %q", l)
+	}
+}
+
+func TestRunnerLogsAFailedExecWithoutAVM(t *testing.T) {
+	p, _, _ := testPool(t)
+	var lines []string
+	prev := execLog
+	execLog = func(format string, a ...any) { lines = append(lines, fmt.Sprintf(format, a...)) }
+	t.Cleanup(func() { execLog = prev })
+
+	// An empty key is refused before any VM is acquired (checkKey, spec §3.4).
+	_, err := Runner{Pool: p}.Run(context.Background(), wexec.Spec{ReqID: 2, Command: "true"}, newFrameSink())
+	if err == nil {
+		t.Fatal("an empty workspace_key must be refused")
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], "vm= ") || strings.Contains(lines[0], "err=<nil>") {
+		t.Fatalf("exec log = %q, want one line with an empty vm and the error", lines)
 	}
 }

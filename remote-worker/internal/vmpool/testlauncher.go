@@ -61,6 +61,7 @@ type fakeHostVM struct {
 }
 
 func (v *fakeHostVM) Key() string { return v.key }
+func (v *fakeHostVM) ID() string  { return v.id }
 
 // FakeVMResumeUs, FakeVsockDialUs and FakeMountUs are the sub-phase durations fakeHostVM
 // reports, exported so a test in another package can assert against them rather than

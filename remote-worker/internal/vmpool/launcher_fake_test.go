@@ -136,6 +136,7 @@ type fakeVM struct {
 }
 
 func (v *fakeVM) Key() string { return v.key }
+func (v *fakeVM) ID() string  { return v.id }
 
 func (v *fakeVM) Resume(ctx context.Context) error {
 	v.mu.Lock()

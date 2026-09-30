@@ -1145,6 +1145,9 @@ type chvVM struct {
 
 func (v *chvVM) Key() string { return v.key }
 
+// ID is the per-VM id that names the run dir and the scope (read by vmID for the exec audit line).
+func (v *chvVM) ID() string { return v.id }
+
 // Resume unpauses the VM via ch-remote. It does NOT mount the workspace — round 8
 // moved that into Run, deliberately, not as an oversight this comment used to claim
 // the opposite of (see chvWrapCommand's doc comment for the full reasoning: a

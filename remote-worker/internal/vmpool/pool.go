@@ -216,6 +216,7 @@ type Phases struct {
 	Run     time.Duration
 	Destroy time.Duration
 	Cold    ColdCause // "" when the acquire was warm
+	VMID    string    // the VM that ran this Exec; "" when acquire failed
 
 	// Resume's three sub-phases, populated only by a launcher implementing
 	// resumePhaser (Firecracker does; CHV does not, and reports zeros). They sum to
@@ -289,6 +290,9 @@ func (p *pool) ExecPhased(ctx context.Context, key string, e Exec, out Sink, ph 
 			return Result{}, cErr
 		}
 		return Result{}, err
+	}
+	if ph != nil {
+		ph.VMID = vmID(vm)
 	}
 	// One identical teardown for abort, timeout and success (spec §4.1). Named rather
 	// than written inline as a defer because the gate below has one path that must run
@@ -577,6 +581,15 @@ func (p *pool) runLocked(key string) (*runPool, bool, error) {
 // the stem of the Cloud Hypervisor arm's scope name, both of which SweepOrphans'
 // fail-closed filter must recognise. Sharing the constant is what stops that filter from
 // silently narrowing to nothing if the id shape ever changes (final review H1).
+// vmID reads a VM's id through an optional accessor rather than widening the VM interface: every
+// launcher's VM has one (it names the jail and the cgroup), but only the exec audit line needs it.
+func vmID(vm VM) string {
+	if v, ok := vm.(interface{ ID() string }); ok {
+		return v.ID()
+	}
+	return ""
+}
+
 func (p *pool) nextIDLocked() string {
 	p.seq++
 	return vmIDPrefix + strconv.FormatUint(p.seq, 10)

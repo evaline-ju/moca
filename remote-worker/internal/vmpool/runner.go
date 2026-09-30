@@ -3,6 +3,7 @@ package vmpool
 import (
 	"context"
 	"errors"
+	"log"
 
 	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
 	wexec "github.com/rossoctl/moca/remote-worker/internal/exec"
@@ -15,6 +16,11 @@ import (
 // conformance battery. Everything session owns — Hello, heartbeats, the dispatch
 // pool, req_id dedup, frame emission, the Abort wiring — is reused untouched.
 type Runner struct{ Pool Pool }
+
+// execLog is the per-Exec audit line: which workspace (the session id) and which VM. Always on --
+// it is the evidence that a session's commands ran in microVMs (#369) -- and deliberately without
+// the command, which can carry secrets. A variable so tests can capture it.
+var execLog = log.Printf
 
 func (r Runner) Run(ctx context.Context, s wexec.Spec, sink wexec.Sink) (int32, error) {
 	// ExecPhased, not Exec: Exec delegates to it with a throwaway Phases, so this costs
@@ -29,6 +35,8 @@ func (r Runner) Run(ctx context.Context, s wexec.Spec, sink wexec.Sink) (int32, 
 		Streaming: s.Streaming,
 	}, &sinkAdapter{sink: sink}, &ph)
 	logPhases(&ph)
+	execLog("vmpool: exec req=%d workspace_key=%q vm=%s cold=%q exit=%d err=%v",
+		s.ReqID, s.WorkspaceKey, ph.VMID, string(ph.Cold), res.ExitCode, err)
 
 	// Report dropped bytes even on a failure path: an aborted exec still delivered
 	// whatever the guest had already sent, and declaring that untruncated is a false

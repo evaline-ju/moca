@@ -825,6 +825,9 @@ func (v *firecrackerVM) stashResumePhases(vmResume, vsockDial, mount time.Durati
 
 func (v *firecrackerVM) Key() string { return v.key }
 
+// ID is the per-VM id that names the jail and the cgroup (read by vmID for the exec audit line).
+func (v *firecrackerVM) ID() string { return v.id }
+
 // Resume unpauses the VM and mounts the workspace over a fresh vsock connection —
 // see launcher.go's VM.Resume doc comment, which is authoritative over this
 // package's own design draft on where the mount happens: mount-at-acquire, not
