@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { exchangeCredential } from '../src/exchange.js';
 import { HANDLERS, type CpDeps } from '../src/handlers.js';
 import { makeDeps, ctx, alice, codeOf, seedCredential } from './helpers/deps.js';
@@ -117,6 +117,61 @@ describe('exchangeCredential: authHeader', () => {
     const res = await exchangeCredential(token, fb);
     expect(res.anthropicAuthToken).toBe('op-gw-token'); // notsecret
     expect(res).not.toHaveProperty('authHeader');
+  });
+
+  describe('a misconfigured operator fallback (PR #372 review)', () => {
+    // Both direct-mode endpoint checks see the fallback's token too. The refusal is right, but the
+    // user does not own `operator-fallback` and cannot re-store it: the message must send them to
+    // the operator, name the settings, and the code must blame the deployment, not the caller.
+    const fallback = async (token: string, endpoint: string) => {
+      const fb = makeDeps({
+        config: {
+          exchangeToken: 'shared-abc', // notsecret
+          allowOperatorFallback: true,
+          operatorInferenceToken: token,
+          defaultInferenceEndpoint: endpoint,
+        },
+      });
+      await seedCredential(fb);
+      const session = await sessionToken(fb);
+      await fb.credentials.delete('github:1234', 'my-anthropic');
+      // The data plane maps a 5xx to a generic "control plane returned 503" (turn-auth PASSTHROUGH
+      // admits caller-attributable codes only), so the operator learns of this from the log.
+      const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        await exchangeCredential(session, fb);
+      } catch (e) {
+        return {
+          code: (e as { code: string }).code,
+          message: (e as Error).message,
+          logged: log.mock.calls.map((c) => c.join(' ')).join('\n'),
+        };
+      } finally {
+        log.mockRestore();
+      }
+      throw new Error('expected a refusal');
+    };
+
+    it('a raw Anthropic operator key on a gateway default: operator-facing, not caller-facing', async () => {
+      const r = await fallback(RAW_KEY, 'https://litellm.internal');
+      expect(r.code).toBe('credential_unavailable');
+      expect(r.message).toContain('SH_OPERATOR_INFERENCE_TOKEN');
+      expect(r.message).toContain('SH_DEFAULT_INFERENCE_ENDPOINT');
+      expect(r.message).not.toContain('set its endpoint');
+      expect(r.message).not.toContain(RAW_KEY);
+      expect(r.logged).toContain('SH_OPERATOR_INFERENCE_TOKEN');
+      expect(r.logged).not.toContain(RAW_KEY);
+    });
+
+    it('a Bearer operator token on an api.anthropic.com default: operator-facing too', async () => {
+      const r = await fallback('op-gw-token', 'https://api.anthropic.com'); // notsecret
+      expect(r.code).toBe('credential_unavailable');
+      expect(r.message).toContain('SH_OPERATOR_INFERENCE_TOKEN');
+      expect(r.message).not.toContain("store the key with kind 'api-key'");
+      expect(r.message).not.toContain('op-gw-token');
+      expect(r.logged).toContain('SH_DEFAULT_INFERENCE_ENDPOINT');
+      expect(r.logged).not.toContain('op-gw-token');
+    });
   });
 
   it('refuses a Bearer credential whose RESOLVED endpoint is api.anthropic.com', async () => {

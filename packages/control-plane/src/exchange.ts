@@ -165,8 +165,32 @@ export async function exchangeCredential(
   // the harness, picks the upstream header (AB1's `inject_header`), so none of this applies (#368).
   if (mode === 'direct') {
     const host = URL.parse(baseUrl)?.hostname;
+    // Which of the two mismatches this is, or undefined for none.
+    let mismatch: 'bearer-to-anthropic' | 'raw-key-elsewhere' | undefined;
     if (authHeader === 'authorization' && host === 'api.anthropic.com') {
       // Bearer there always 401s: it reads API keys from x-api-key only.
+      mismatch = 'bearer-to-anthropic';
+    } else if (secretValue.startsWith('sk-ant-api') && host !== 'api.anthropic.com') {
+      // A raw Anthropic key aimed anywhere else is a misdirected secret (spec §6.2) and a 401 there.
+      mismatch = 'raw-key-elsewhere';
+    }
+    if (mismatch && usedOperatorFallback) {
+      // The operator's token, not the caller's: the caller cannot re-store `operator-fallback`, so the
+      // message names the settings and the code blames the deployment (PR #372 review). The data
+      // plane shows the caller only "control plane returned 503" (turn-auth admits caller-attributable
+      // codes only), so the log line is how the operator finds out. It names settings, never the value.
+      const why =
+        mismatch === 'bearer-to-anthropic'
+          ? 'the operator fallback token (SH_OPERATOR_INFERENCE_TOKEN) is sent as Bearer, but ' +
+            'SH_DEFAULT_INFERENCE_ENDPOINT is api.anthropic.com, which reads API keys from ' +
+            'x-api-key; the deployment operator must point it at a gateway'
+          : 'the operator fallback token (SH_OPERATOR_INFERENCE_TOKEN) is an Anthropic API key, but ' +
+            `SH_DEFAULT_INFERENCE_ENDPOINT resolves to ${host ?? 'an unparseable URL'}; the ` +
+            'deployment operator must fix the pair, or you can store your own inference credential';
+      console.error(`[control-plane] operator fallback misconfigured: ${why}`);
+      throw new CpError('credential_unavailable', why, rec.sessionId);
+    }
+    if (mismatch === 'bearer-to-anthropic') {
       throw new CpError(
         'credential_required',
         `credential '${credentialName}' is a Bearer token, but its endpoint resolves to ` +
@@ -174,8 +198,7 @@ export async function exchangeCredential(
         rec.sessionId,
       );
     }
-    if (secretValue.startsWith('sk-ant-api') && host !== 'api.anthropic.com') {
-      // A raw Anthropic key aimed anywhere else is a misdirected secret (spec §6.2) and a 401 there.
+    if (mismatch === 'raw-key-elsewhere') {
       throw new CpError(
         'credential_required',
         `credential '${credentialName}' is an Anthropic API key, but its endpoint resolves to ` +
