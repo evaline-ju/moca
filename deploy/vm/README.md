@@ -254,6 +254,11 @@ The control plane refuses to boot on a fallback that cannot work, naming the set
 To turn the fallback off, set `SH_ALLOW_OPERATOR_FALLBACK=false`. To remove the key as well, delete
 the file and re-run: the drop-in goes with it.
 
+A session's credential is fixed when the session is created. So a session started on the fallback
+keeps spending the operator's key after its user stores a credential of their own, and only a new
+session picks that credential up. Turning the fallback off ends those sessions' turns with a message
+saying to start a new one.
+
 ### Reaching it: the supported demo topology
 
 Both the control plane and the supervisor speak **plain HTTP**; TLS termination is out of scope

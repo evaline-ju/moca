@@ -71,6 +71,12 @@ export function checkExchangeAuth(
   if (a.length !== b.length || !timingSafeEqual(a, b)) deny();
 }
 
+/**
+ * The name the audit gives the operator's key (spec §6.4). Reserved: PUT /v1/credentials refuses it,
+ * so an operator-fallback audit line is never a subject's own credential.
+ */
+export const OPERATOR_FALLBACK_NAME = 'operator-fallback';
+
 /** The two direct-mode (header, secret, endpoint) triples known to 401 upstream (#368). */
 export type DirectModeMismatch = 'bearer-to-anthropic' | 'raw-key-elsewhere';
 
@@ -147,7 +153,7 @@ export async function exchangeCredential(
     // The operator fallback relocates rather than disappearing (spec §6.4): resolved HERE, by the
     // trusted tier, attributable to a subject and logged -- never as an env fallback in the harness.
     secretValue = deps.config.operatorInferenceToken;
-    credentialName = 'operator-fallback';
+    credentialName = OPERATOR_FALLBACK_NAME;
     usedOperatorFallback = true;
     authHeader = deps.config.operatorInferenceHeader ?? 'authorization';
   }
@@ -157,7 +163,12 @@ export async function exchangeCredential(
     // points that make MU1 fail closed before P5's sentinel lands (spec §3.5).
     throw new CpError(
       'credential_required',
-      `subject has no usable inference credential '${rec.credentialName}'`,
+      rec.credentialName
+        ? `subject has no usable inference credential '${rec.credentialName}'`
+        : // A session created on the operator fallback records no credential of its own (handlers.ts
+          // createSession); with the fallback since turned off it has nothing to spend.
+          'this session was started on the operator fallback, which is now off: store an ' +
+            'inference credential and start a new session',
       rec.sessionId,
     );
   }

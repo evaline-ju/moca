@@ -59,3 +59,57 @@ describe('createSession under the operator fallback', () => {
     );
   });
 });
+
+describe('a fallback session, later (#368 review)', () => {
+  it('stays on the operator key after the subject stores its own: resolved at creation, like any session', async () => {
+    // Spec §6.4: a session's credential is resolved once, at creation, so a credential added later
+    // cannot change a running session. A new session picks the subject's own credential up.
+    const d = makeDeps({ config: fallbackConfig });
+    const token = ((await create(d)).body as { token: string }).token;
+    await seedCredential(d);
+    expect((await exchangeCredential(token, d)).anthropicAuthToken).toBe('op-gw-token'); // notsecret
+    const fresh = (
+      (
+        await HANDLERS.createSession!(ctx({ principal: alice, body: {} }), {
+          ...d,
+          newId: () => 'sid-own',
+        })
+      ).body as { token: string }
+    ).token;
+    expect((await exchangeCredential(fresh, d)).anthropicAuthToken).not.toBe('op-gw-token'); // notsecret
+  });
+
+  it('says to start a new session once the fallback is turned off, not "credential \'\'"', async () => {
+    const d = makeDeps({ config: fallbackConfig });
+    const token = ((await create(d)).body as { token: string }).token;
+    d.config.allowOperatorFallback = false;
+    let message = '';
+    try {
+      await exchangeCredential(token, d);
+    } catch (e) {
+      message = (e as Error).message;
+      expect((e as { code: string }).code).toBe('credential_required');
+    }
+    expect(message).toContain('operator fallback');
+    expect(message).toContain('new session');
+    expect(message).not.toContain("''");
+  });
+
+  it("refuses to store a credential named 'operator-fallback', the name the audit gives the operator's key", async () => {
+    const res = HANDLERS.putCredential!(
+      ctx({
+        principal: alice,
+        params: { name: 'operator-fallback' },
+        body: {
+          kind: 'bearer',
+          consumer: 'inference',
+          destination: { hosts: ['gateway.example'] },
+          endpoint: 'https://gateway.example',
+          secret: { token: 'mine' }, // notsecret
+        },
+      }),
+      makeDeps(),
+    );
+    await expect(res).rejects.toMatchObject({ code: 'invalid_request' });
+  });
+});

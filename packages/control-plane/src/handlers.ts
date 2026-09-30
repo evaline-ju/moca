@@ -6,7 +6,7 @@ import {
   type CredentialStore,
   type InferenceAuthHeader,
 } from './credential-store.js';
-import { exchangeCredential } from './exchange.js';
+import { exchangeCredential, OPERATOR_FALLBACK_NAME } from './exchange.js';
 import type { RunKubectl } from './kubectl.js';
 import { DEFAULT_PAGE_SIZE, type OwnershipIndex, type SessionRecord } from './ownership.js';
 import type { IdentityProvider } from './identity.js';
@@ -227,7 +227,7 @@ export const HANDLERS: Record<string, Handler> = {
     // in, and a credential added later cannot turn a running session ambiguous (spec §6.4, gap #4).
     // This is also the first of the two policy points that make MU1 fail closed before P5's sentinel
     // exists (spec §3.5): the deployment's own ANTHROPIC_AUTH_TOKEN is not consulted, so a
-    // credential-less subject cannot get a session at all.
+    // credential-less subject gets a session only through the operator fallback below.
     const descriptors = await deps.credentials.list(p.sub);
     // The operator fallback (spec §6.4) is for a subject with no inference credential of its own: such
     // a session records NO credential name, and the exchange resolves the operator's key per turn,
@@ -255,7 +255,7 @@ export const HANDLERS: Record<string, Handler> = {
     await deps.index.audit({
       subject: p.sub,
       sessionId,
-      credential: credentialName || 'operator-fallback',
+      credential: credentialName || OPERATOR_FALLBACK_NAME,
       decision: 'session_created',
     });
     const iat = seconds(deps);
@@ -354,6 +354,11 @@ export const HANDLERS: Record<string, Handler> = {
   putCredential: async (ctx, deps) => {
     const p = requirePrincipal(ctx);
     const name = validateCredentialName(ctx.params.name ?? '');
+    if (name === OPERATOR_FALLBACK_NAME) {
+      // The audit names the operator's key this way (exchange.ts, createSession): a subject's own
+      // credential under the same name would make the two indistinguishable in the audit.
+      throw new CpError('invalid_request', `credential name '${name}' is reserved`);
+    }
     const cred = parseCredentialBody(name, ctx.body);
     await deps.credentials.put(p.sub, cred);
     await auditBestEffort(deps, 'putCredential', name, {
