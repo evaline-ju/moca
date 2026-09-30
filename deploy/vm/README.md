@@ -423,6 +423,66 @@ the platform. On EC2, require IMDSv2 with a hop limit of 1 (`aws ec2 modify-inst
 obtain a token. On other clouds, use the equivalent, or drop `169.254.0.0/16` from `moca-sandbox0`
 in your own forward-hook table. The in-product fix is tracked in rossoctl/moca#357.
 
+## A research turn: curl and git in the sandbox
+
+**Sandbox egress is open in this round.** The firewall above filters only traffic _to the host_.
+Forwarded traffic isn't filtered, so the agent's bash tool reaches the whole internet from a sandbox
+container: any host, any port, with no proxy and no allowlist. That includes cloud instance metadata:
+close it at the platform first (above, #357). Egress control is MI1 S5's `moca-egress`, not this
+round. The container image guarantees `git`, `curl` and CA certificates (#368), and `HOME` is a
+writable `/home/sandbox`, so `git config --global` works.
+
+Pi shows the model only the last 2000 lines or 50 KB of a command's output, so the prompt steers the
+agent to `curl -o` a file and read it with `grep`/`head`, rather than printing it. The demo's prompt,
+for `mocactl run` or the interactive UI:
+
+```text
+This is a research task. Use your bash tool for every step, and do not answer from memory.
+1. Run: git clone --depth 1 https://github.com/rossoctl/moca /workspace/research-demo/moca
+2. Run: curl -fsSL -o /workspace/research-demo/node-releases.json https://nodejs.org/dist/index.json
+   The file is large: do not print it. Read what you need from it with head, grep or python3.
+3. Find the commit the clone checked out, and the newest Node.js release in the fetched file (its
+   first entry) with its release date.
+Reply with one short paragraph saying what you found, then end with exactly these three lines:
+COMMIT=<the first 12 characters of the commit hash>
+NODE_VERSION=<the version, for example v1.2.3>
+NODE_DATE=<its date, YYYY-MM-DD>
+```
+
+Neither answer can come from a model's memory: the clone's HEAD changes with every merge, and the
+newest Node.js release every few weeks. Check them with `git ls-remote https://github.com/rossoctl/moca HEAD`
+and https://nodejs.org/dist/index.json.
+
+On the container tier, every session shares one `/workspace` per container
+(`remote-worker/internal/exec/runner.go` ignores the workspace key). So a second user's turn can see
+the first user's `research-demo` directory if both land on the same container. It is not a security
+boundary in this round (epic #370).
+
+**The automated check.** `deploy/vm/research-smoke.sh` runs that prompt as a freshly minted user,
+in a per-run directory. It passes only if:
+
+- `git clone` and `curl -o` both appear in the turn's `tool_use` frames and succeed;
+- the answer's three values equal what the **sandbox's own copy** of the fetched files says;
+- the control plane's audit shows the intended credential was spent.
+
+Run it on the VM, as root, on a host with container sandboxes. It refuses to run while a microVM
+worker is in the pool, because that tier has no network (#277).
+
+```bash
+# The user's own credential, from a root-only file (an sk-ant-api… key goes as x-api-key to
+# https://api.anthropic.com; anything else as Bearer to RESEARCH_ENDPOINT):
+sudo install -m 0600 /dev/null /root/inference-key && sudoedit /root/inference-key
+cd /opt/serverless-harness
+sudo VM_RESEARCH_SMOKE=1 RESEARCH_CREDENTIAL_FILE=/root/inference-key ./deploy/vm/research-smoke.sh
+sudo VM_RESEARCH_SMOKE=1 RESEARCH_CREDENTIAL_FILE=/root/gw-token \
+  RESEARCH_ENDPOINT=https://<gateway> ./deploy/vm/research-smoke.sh
+# Or no credential of its own, on the operator-key fallback ("The operator-key fallback", above):
+sudo VM_RESEARCH_SMOKE=1 RESEARCH_USE_OPERATOR_FALLBACK=1 ./deploy/vm/research-smoke.sh
+```
+
+It deletes its credential, session and fetched files afterwards (`KEEP=1` leaves them). A failed run
+keeps its SSE transcript in the directory it names.
+
 ## Reboots
 
 All three units are `WantedBy=multi-user.target`, so systemd brings the relay, the control plane
@@ -508,3 +568,5 @@ Nor does it claim, for the control plane:
   not out of reach of a compromised `harness` process.
 - **Multi-host credentials.** The file store is single-host. Vault, the multi-host store, is not
   wired by `setup-vm.sh`.
+- **Sandbox egress control.** A sandbox container reaches the internet and the cloud's instance
+  metadata ("A research turn" above). Filtering it is MI1 S5.

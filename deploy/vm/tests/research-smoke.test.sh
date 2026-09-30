@@ -231,6 +231,13 @@ run errframe RESEARCH_CREDENTIAL_FILE="$TMP/raw.key" MOCK_SCENARIO=error-frame
 check "an error frame: fails" "$(rc errframe)" "1"
 check "an error frame: shows its message" "$(said errframe '401 invalid x-api-key')" "yes"
 
+echo "== the README carries the script's prompt, for the demo runbook"
+readme_prompt="$(sed -n '/^```text$/,/^```$/p' "$VM_DIR/README.md" | sed '1d;$d')"
+# The script's own research_prompt function, extracted and run with the README's directory.
+script_prompt="$(REPO_URL=https://github.com/rossoctl/moca PAGE_URL=https://nodejs.org/dist/index.json bash -c \
+  "$(sed -n '/^research_prompt() {/,/^}/p' "$SCRIPT"); research_prompt /workspace/research-demo")"
+check "README prompt == research_prompt /workspace/research-demo" "$readme_prompt" "$script_prompt"
+check "the README holds exactly one text block" "$(grep -c '^```text$' "$VM_DIR/README.md")" "1"
 echo
 if [[ "$fails" -eq 0 ]]; then echo "all research-smoke.sh tests passed"; else echo "FAIL: $fails check(s)"; fi
 exit "$fails"
