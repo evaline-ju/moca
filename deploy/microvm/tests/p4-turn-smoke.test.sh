@@ -44,34 +44,79 @@ if [ -n "$sock" ]; then # Firecracker GET /: only vm-7 is running; the rest are 
   case "$sock" in */vm-7/*) echo '{"state":"Running"}' ;; *) echo '{"state":"Paused"}' ;; esac
   exit 0
 fi
-sid="$(node -e 'const b=JSON.parse(process.argv[1]); process.stdout.write(b.sessionId ?? "")' "$body")"
-prompt="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).prompt)' "$body")"
-mkdir -p "$STATE/ws"
-code=200
-if [ -n "$sid" ] && [ ! -d "$STATE/ws/$sid" ]; then
-  code=404; resp=""
-  printf '{"error":"session_not_found"}' >"$out"
+if [ "$url" != "${url%/v1/credentials/*}" ]; then # PUT /v1/credentials/<name>, as a minted subject
+  echo "credential-put $url" >>"$MOCK_LOG"; code=204; : >"$out" # putCredential's real code
+elif [ "$url" != "${url%/v1/sessions/*}" ]; then # GET /v1/sessions/<id>: every caller here is a foreigner
+  code=404; printf '{"error":"session_not_found"}' >"$out"
+elif [ "$url" != "${url%/healthz}" ]; then
+  code=200; printf 'ok' >"$out"
 else
-  if [ -z "$sid" ]; then sid="sess-$(ls "$STATE/ws" | wc -l | tr -d ' ')"; mkdir -p "$STATE/ws/$sid"; fi
-  ws="$STATE/ws/$sid"
-  logexec() { n=$(( $(cat "$STATE/vmseq" 2>/dev/null || echo 0) + 1 )); echo "$n" >"$STATE/vmseq"
-    echo "vmpool: exec req=$n workspace_key=\"$sid\" vm=vm-$n cold=\"\" exit=0 err=<nil>" >>"$STATE/journal"; }
-  case "$prompt" in
-  P4-SMOKE-WRITE) logexec; logexec; touch "$ws/proof" "$ws/repo"
-    resp="done-write\n6.1.0-guest\nimage=ghcr.io/x\n/workspace\n## No commits yet on main\n42\nripgrep 15.2.0" ;;
-  P4-SMOKE-READ) logexec
-    if [ -e "$ws/proof" ]; then resp="done-read\np4-proof\ncontinuity-ok"
-    else resp="done-read\ncat: proof.txt: No such file or directory\ncontinuity-missing"; fi ;;
-  P4-SMOKE-SLEEP) # ends when the worker restarts or the running VM is killed
-    for _ in $(seq 50); do [ -e "$STATE/interrupted" ] && break; sleep 0.1; done
-    why="$(cat "$STATE/interrupted" 2>/dev/null)"; rm -f "$STATE/interrupted"
-    resp="done-sleep\n${why:-slept}" ;;
-  esac
-  [ -n "${MOCK_EMPTY_RESPONSE:-}" ] && resp=""
-  printf '{"sessionId":"%s","response":"%s","stopReason":"end_turn"}' "$sid" "$resp" >"$out"
+  sid="$(node -e 'const b=JSON.parse(process.argv[1]); process.stdout.write(b.sessionId ?? "")' "$body")"
+  prompt="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).prompt)' "$body")"
+  code=200
+  if resp="$(fake-turn "$sid" "$prompt")"; then
+    printf '{"sessionId":"%s","response":"%s","stopReason":"end_turn"}' "$(cat "$STATE/last-sid")" "$resp" >"$out"
+  else
+    code=404; printf '{"error":"session_not_found"}' >"$out"
+  fi
 fi
 [ -n "$wfmt" ] && printf '%s' "$code"
 exit 0
+MOCK
+cat >"$TMP/bin/fake-turn" <<'MOCK'
+#!/usr/bin/env bash
+# fake-turn <session id, or "" for new> <prompt>: the supervisor's turn, shared by the curl mock
+# (/turn) and the mocactl mock (/v1/turn). Prints the response text with \n escapes and writes the
+# session id to $STATE/last-sid. Exit 4 = session_not_found.
+sid="$1" prompt="$2"
+mkdir -p "$STATE/ws"
+if [ -n "$sid" ] && [ ! -d "$STATE/ws/$sid" ]; then exit 4; fi
+if [ -z "$sid" ]; then sid="sess-$(ls "$STATE/ws" | wc -l | tr -d ' ')"; mkdir -p "$STATE/ws/$sid"; fi
+ws="$STATE/ws/$sid"
+logexec() { n=$(( $(cat "$STATE/vmseq" 2>/dev/null || echo 0) + 1 )); echo "$n" >"$STATE/vmseq"
+  echo "vmpool: exec req=$n workspace_key=\"$sid\" vm=vm-$n cold=\"\" exit=0 err=<nil>" >>"$STATE/journal"; }
+case "$prompt" in
+P4-SMOKE-WRITE) logexec; logexec; touch "$ws/proof" "$ws/repo"
+  resp="done-write\n6.1.0-guest\nimage=ghcr.io/x\n/workspace\n## No commits yet on main\n42\nripgrep 15.2.0" ;;
+P4-SMOKE-READ) logexec
+  if [ -e "$ws/proof" ]; then resp="done-read\np4-proof\ncontinuity-ok"
+  else resp="done-read\ncat: proof.txt: No such file or directory\ncontinuity-missing"; fi ;;
+P4-SMOKE-SLEEP) # ends when the worker restarts or the running VM is killed
+  for _ in $(seq 50); do [ -e "$STATE/interrupted" ] && break; sleep 0.1; done
+  why="$(cat "$STATE/interrupted" 2>/dev/null)"; rm -f "$STATE/interrupted"
+  resp="done-sleep\n${why:-slept}" ;;
+esac
+[ -n "${MOCK_EMPTY_RESPONSE:-}" ] && resp=""
+echo "$sid" >"$STATE/last-sid"
+printf '%s' "$resp"
+MOCK
+cat >"$TMP/bin/mocactl" <<'MOCK'
+#!/usr/bin/env bash
+# mocactl run PROMPT --control-plane-url U --harness-url H [--session ID | --option K=V]. Logged in only
+# if $XDG_CONFIG_HOME/mocactl/auth.json holds a token minted for a p4smoke subject; the subject is
+# read from the token itself, so a driver that wrote a wrong or unsigned-looking file fails here.
+echo "mocactl $*" >>"$MOCK_LOG"
+[ "$1" = run ] || exit 2
+prompt="$2"; shift 2
+sid="" opt=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+  --session) sid="$2"; shift 2 ;;
+  --option) opt="$2"; shift 2 ;;
+  *) shift 2 ;;
+  esac
+done
+sub="$(node -e 'const a = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+  const c = JSON.parse(Buffer.from(a.apiToken.split(".")[1], "base64url"));
+  process.stdout.write(c.sub === a.subject && c.scope.includes("api") ? c.sub : "")' \
+  "$XDG_CONFIG_HOME/mocactl/auth.json" 2>/dev/null)"
+case "$sub" in p4smoke:a | p4smoke:b) ;; *) echo "not logged in — run \`mocactl login\` first" >&2; exit 2 ;; esac
+if [ -z "$sid" ] && [ "$opt" != "inferenceCredential=p4-smoke-mock" ]; then
+  echo "choose the inference credential with --option inferenceCredential=<value>" >&2; exit 2
+fi
+resp="$(fake-turn "$sid" "$prompt")" || { echo "session not found" >&2; exit 1; }
+echo "session $(cat "$STATE/last-sid")" >&2
+printf '%b\n' "$resp"
 MOCK
 cat >"$TMP/bin/podman" <<'MOCK'
 #!/usr/bin/env bash
@@ -128,6 +173,30 @@ check "b1's 'did not see A's file' is a FAIL, not a vacuous ok" \
   "$(grep -c "FAIL: b1 did not see A's file" "$TMP/out2/SUMMARY")" "1"
 check "a1's 'guest kernel is not the host's' is a FAIL, not a vacuous ok" \
   "$(grep -c "FAIL: a1 guest kernel is not the host's" "$TMP/out2/SUMMARY")" "1"
+
+echo "== --auth: two minted subjects drive mocactl run"
+rm -rf "$STATE"; : >"$MOCK_LOG"
+mkdir -p "$TMP/cred"
+(cd "$DIR/../../packages/control-plane" && node --import tsx src/genkeys.ts) |
+  sed -n 's/^SH_SESSION_TOKEN_PRIVATE_KEY=//p' >"$TMP/cred/session-token-private-key"
+check "a signing key was generated for the test" \
+  "$([ -s "$TMP/cred/session-token-private-key" ] && echo yes || echo no)" "yes"
+MOCA_CRED_DIR="$TMP/cred" MOCACTL=mocactl bash "$SCRIPT" --auth --failure-paths --out "$TMP/out3" \
+  >"$TMP/run3.log" 2>&1
+rc=$?
+check "exit 0" "$rc" "0"
+[ "$rc" = 0 ] || sed -n '/FAIL/p' "$TMP/run3.log"
+check "session B was subject b's" "$(grep -c 'ok: subject b cannot read subject a' "$TMP/out3/SUMMARY")" "1"
+check "each subject stored the mock credential" "$(grep -c '^credential-put .*/v1/credentials/p4-smoke-mock$' "$MOCK_LOG")" "2"
+check "every turn went through mocactl" "$(grep -c '^mocactl run ' "$MOCK_LOG")" "5"
+check "no api token on any argv" "$(grep -c 'eyJ' "$MOCK_LOG")" "0"
+check "auth.json is 0600" "$(node -e 'process.stdout.write((require("fs").statSync(process.argv[1]).mode & 0o777).toString(8))' "$TMP/out3/xdg-a/mocactl/auth.json")" "600"
+
+echo "== --auth without a readable signing key fails at the mint, by name"
+rm -rf "$STATE"
+MOCA_CRED_DIR="$TMP/nowhere" MOCACTL=mocactl bash "$SCRIPT" --auth --out "$TMP/out4" >"$TMP/run4.log" 2>&1
+check "exit non-zero" "$([ $? -ne 0 ] && echo yes || echo no)" "yes"
+check "the mint failure is named" "$(grep -c "FAIL: minted subject a's api token" "$TMP/out4/SUMMARY")" "1"
 
 if [ "$fails" -eq 0 ]; then echo "PASS"; else echo "FAIL ($fails)"; fi
 exit "$fails"

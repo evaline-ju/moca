@@ -4,7 +4,14 @@
 # Drives real harness turns through the P6 supervisor on a P4-only host and checks that they ran in
 # microVMs (#369 acceptance). Needs the supervisor pointed at a model that follows the P4-SMOKE-*
 # scripts -- deploy/microvm/mock-anthropic.mjs via SH_MODEL_CUSTOM/SH_MODEL_BASE_URL (P4-ON-P6.md).
-# Unauthenticated /turn, so it is for the single-user P6 install (SH_REQUIRE_AUTH=false).
+# By default it posts unauthenticated /turn calls, for a P6 install with SH_REQUIRE_AUTH=false.
+#
+# --auth drives every turn through the real `mocactl run` instead, on a host with the control plane
+# (#366) and SH_REQUIRE_AUTH=true. It stands in for `mocactl login` the way deploy/compose/smoke.sh
+# does: it mints an api token per subject with the control plane's own signing key, into a private
+# XDG_CONFIG_HOME, and stores a bearer inference credential that points at the loopback mock model.
+# Session B belongs to a second subject. The token is written by node straight into 0600 files, never
+# onto an argv or into a shell variable.
 #
 # The /turn contract it relies on (packages/knative-server/src/server.ts, harness/src/run-turn.ts):
 #   - a NEW session is created by omitting sessionId; the response names it. A sessionId the backend
@@ -14,9 +21,12 @@
 #     what ran in the sandbox.
 #
 #   sudo deploy/microvm/p4-turn-smoke.sh [--supervisor URL] [--out DIR] [--failure-paths]
+#                                        [--auth [--control-plane URL]]
 set -uo pipefail
 
 SUP="http://127.0.0.1:8080"
+CP="http://127.0.0.1:8090"
+AUTH=0
 OUT="/tmp/p4-smoke-$(date +%s)"
 FAILURE_PATHS=0
 : "${MICROVM_SANDBOX_ID:=moca_microvm_0}"
@@ -25,12 +35,22 @@ FAILURE_PATHS=0
 : "${SH_JAIL_BASE:=/srv/jail}"
 # Seconds a failure-path turn runs before the fault is injected (long enough to be inside the Exec).
 : "${SMOKE_FAIL_DELAY:=10}"
+# --auth only: the checkout (for the token signer and mocactl), the control plane's systemd credentials
+# (deploy/vm/setup-vm.sh's SH_CRED_DIR), the client, and where the stored credential sends the model.
+: "${MOCA_ROOT:=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+: "${MOCA_CRED_DIR:=/etc/serverless-harness/credentials}"
+: "${MOCACTL:=node $MOCA_ROOT/packages/mocactl/bin/mocactl.mjs}"
+: "${SMOKE_MODEL_URL:=http://127.0.0.1:18099}"
+SMOKE_CREDENTIAL="p4-smoke-mock"
 while [ $# -gt 0 ]; do
   case "$1" in
   --supervisor) SUP="$2"; shift 2 ;;
   --out) OUT="$2"; shift 2 ;;
   --failure-paths) FAILURE_PATHS=1; shift ;;
-  *) echo "usage: $0 [--supervisor URL] [--out DIR] [--failure-paths]" >&2; exit 2 ;;
+  --auth) AUTH=1; shift ;;
+  --control-plane) CP="$2"; shift 2 ;;
+  *) echo "usage: $0 [--supervisor URL] [--out DIR] [--failure-paths] [--auth [--control-plane URL]]" >&2
+    exit 2 ;;
   esac
 done
 mkdir -p "$OUT"
@@ -43,9 +63,54 @@ json_field() {
   node -e 'try { const v = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))[process.argv[2]];
     process.stdout.write(typeof v === "string" ? v : "") } catch {}' "$1" "$2"
 }
-# turn <name> <session id, or "" for a new session> <prompt>: writes <name>.json, <name>.code and
-# <name>.txt (the response text), and prints nothing.
+# login_as <subject>: the api token a device-flow login would return, minted with the control plane's
+# own key, written as mocactl's auth.json under $OUT/xdg-<subject> and as a curl header file. Both
+# 0600 under a 0700 dir; node reads the key file and writes the token, so it never passes the shell.
+login_as() {
+  local dir="$OUT/xdg-$1"
+  install -d -m 0700 "$dir" "$dir/mocactl" || return 1
+  (cd "$MOCA_ROOT/packages/control-plane" && umask 077 &&
+    MINT_KEY_FILE="$MOCA_CRED_DIR/session-token-private-key" MINT_SUB="p4smoke:$1" MINT_DIR="$dir" \
+      MINT_CP="$CP" node --import tsx --input-type=module -e '
+    import { readFileSync, writeFileSync } from "node:fs";
+    import { makeSigner } from "./src/token.ts";
+    const e = process.env, ttl = 3600, now = Math.floor(Date.now() / 1000);
+    const token = makeSigner(readFileSync(e.MINT_KEY_FILE, "utf8"))
+      .mint({ sub: e.MINT_SUB, tenant: e.MINT_SUB, roles: [], scope: ["api"], ttlSeconds: ttl });
+    writeFileSync(`${e.MINT_DIR}/mocactl/auth.json`, JSON.stringify({ apiToken: token, subject: e.MINT_SUB,
+      roles: [], expiresAt: now + ttl, controlPlaneUrl: e.MINT_CP }), { mode: 0o600 });
+    writeFileSync(`${e.MINT_DIR}/api.hdr`, `Authorization: Bearer ${token}\n`, { mode: 0o600 });')
+}
+# store_credential <subject>: a bearer inference credential aimed at the loopback mock model. Direct
+# mode sends it as the model's Authorization; the mock ignores it. Prints the PUT's HTTP code (204).
+store_credential() {
+  local body
+  body="$(node -e 'const u = new URL(process.argv[1]); process.stdout.write(JSON.stringify({ kind: "bearer",
+    consumer: "inference", destination: { hosts: [u.hostname] }, endpoint: u.origin,
+    secret: { token: "mock-not-a-secret" } }))' "$SMOKE_MODEL_URL")"
+  curl -sS --max-time 10 -o "$OUT/credential-$1.json" -w '%{http_code}' -X PUT \
+    -H @"$OUT/xdg-$1/api.hdr" -H 'content-type: application/json' -d "$body" \
+    "$CP/v1/credentials/$SMOKE_CREDENTIAL" 2>>"$OUT/credential-$1.err"
+}
+# turn <name> <session id, or "" for a new session> <prompt> [subject]: writes <name>.code, <name>.txt
+# (the response text) and <name>.sid (the session id), and prints nothing. Without --auth it posts
+# /turn and <name>.code is the HTTP code; with --auth it runs `mocactl run` as <subject> (default a)
+# and <name>.code is 200 for a clean exit, exit-<n> otherwise, with mocactl's stderr in <name>.err.
 turn() {
+  if [ "$AUTH" = 1 ]; then turn_mocactl "$@"; else turn_http "$@"; fi
+}
+turn_mocactl() {
+  local dir="$OUT/xdg-${4:-a}" rc cmd
+  local args=(run "$3" --control-plane-url "$CP" --harness-url "$SUP")
+  if [ -n "$2" ]; then args+=(--session "$2"); else args+=(--option "inferenceCredential=$SMOKE_CREDENTIAL"); fi
+  read -ra cmd <<<"$MOCACTL"
+  XDG_CONFIG_HOME="$dir" XDG_STATE_HOME="$dir/state" "${cmd[@]}" "${args[@]}" >"$OUT/$1.txt" 2>"$OUT/$1.err"
+  rc=$?
+  if [ "$rc" = 0 ]; then echo 200; else echo "exit-$rc"; fi >"$OUT/$1.code"
+  # mocactl names the session on stderr before the turn starts: "session <id>".
+  sed -n 's/^session \([^ ]*\)$/\1/p' "$OUT/$1.err" | head -1 >"$OUT/$1.sid"
+}
+turn_http() {
   local body
   # Built by JSON.stringify, not interpolated: a prompt with a quote, backslash or newline would
   # otherwise be malformed JSON and a 400 that reads like a server fault. node is already required.
@@ -54,6 +119,7 @@ turn() {
   curl -sS --max-time 300 -o "$OUT/$1.json" -w '%{http_code}' -X POST "$SUP/turn" \
     -H 'content-type: application/json' -d "$body" >"$OUT/$1.code" 2>"$OUT/$1.err"
   json_field "$OUT/$1.json" response >"$OUT/$1.txt"
+  json_field "$OUT/$1.json" sessionId >"$OUT/$1.sid"
 }
 has() { grep -qF -- "$2" "$OUT/$1.txt" && echo yes || echo no; }
 # absent <name> <needle> <proof>: "absent" only if the response is demonstrably there (it contains
@@ -88,12 +154,23 @@ check "the microVM worker is in the pool" \
 check "no container sandbox exists (P4-only host)" \
   "$(podman ps -a --format '{{.Names}}' --filter 'name=^sh-sandbox-' | wc -l | tr -d ' ')" "0"
 
+if [ "$AUTH" = 1 ]; then
+  echo "== control plane: two subjects, each a stand-in for mocactl login" | tee -a "$OUT/SUMMARY"
+  check "the control plane answers" \
+    "$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "$CP/healthz" 2>/dev/null)" "200"
+  for s in a b; do
+    if login_as "$s" 2>"$OUT/login-$s.err"; then check "minted subject $s's api token" yes yes
+    else check "minted subject $s's api token (see login-$s.err; run as root?)" no yes; fi
+    check "stored subject $s's inference credential" "$(store_credential "$s")" "204"
+  done
+fi
+
 since="$(date '+%Y-%m-%d %H:%M:%S')"
 host_kernel="$(uname -r)"
 
 echo "== session A, turn 1: write a file, git, python, rg" | tee -a "$OUT/SUMMARY"
 turn a1 "" "P4-SMOKE-WRITE"
-A="$(json_field "$OUT/a1.json" sessionId)"
+A="$(cat "$OUT/a1.sid")"
 echo "$A" >"$OUT/session-a"
 check "a1 HTTP 200" "$(code a1)" "200"
 check "a1 named its new session" "$([ -n "$A" ] && echo yes || echo no)" "yes"
@@ -109,13 +186,18 @@ check "a2 read turn 1's file" "$(has a2 p4-proof)" "yes"
 check "a2 saw turn 1's repo" "$(has a2 continuity-ok)" "yes"
 
 echo "== session B: a different workspace" | tee -a "$OUT/SUMMARY"
-turn b1 "" "P4-SMOKE-READ"
-B="$(json_field "$OUT/b1.json" sessionId)"
+turn b1 "" "P4-SMOKE-READ" b
+B="$(cat "$OUT/b1.sid")"
 echo "$B" >"$OUT/session-b"
 check "b1 HTTP 200" "$(code b1)" "200"
 check "b1 is a different session" "$([ -n "$B" ] && [ "$B" != "$A" ] && echo yes || echo no)" "yes"
 check "b1 did not see A's file" "$(absent b1 p4-proof continuity-missing)" "absent"
 check "b1 did not see A's repo" "$(has b1 continuity-missing)" "yes"
+if [ "$AUTH" = 1 ]; then
+  # Session B is a second subject's, not a second session of one: B's owner cannot even read A's.
+  check "subject b cannot read subject a's session (404)" "$(curl -sS --max-time 10 -o /dev/null \
+    -w '%{http_code}' -H @"$OUT/xdg-b/api.hdr" "$CP/v1/sessions/$A" 2>/dev/null)" "404"
+fi
 
 echo "== evidence on the host" | tee -a "$OUT/SUMMARY"
 journalctl -u microvm-worker --since "$since" --no-pager >"$OUT/journal.log" 2>&1
