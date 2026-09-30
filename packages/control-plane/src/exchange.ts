@@ -1,4 +1,5 @@
 import { timingSafeEqual } from 'node:crypto';
+import { inferenceAuthHeader, type InferenceAuthHeader } from './credential-store.js';
 import { CpError } from './errors.js';
 import type { CpDeps } from './handlers.js';
 import { verifyToken } from './token.js';
@@ -22,6 +23,13 @@ export interface ExchangeResponse {
   anthropicBaseUrl: string;
   sessionId: string;
   subject: string;
+  /**
+   * The header the data plane sends the credential in (#368). Present ONLY when it is not the
+   * default: absent means `Authorization: Bearer`, which is every credential stored before #368 and
+   * the wire shape an older data plane expects. Under MI1 S2 the grant carries the binding to
+   * moca-egress instead, and this names where the harness puts the grant placeholder.
+   */
+  authHeader?: Exclude<InferenceAuthHeader, 'authorization'>;
 }
 
 /**
@@ -88,6 +96,7 @@ export async function exchangeCredential(
   let secretValue: string | undefined;
   let credentialName = rec.credentialName;
   let endpoint: string | null = null;
+  let authHeader: InferenceAuthHeader = 'authorization';
   let usedOperatorFallback = false;
 
   if (stored) {
@@ -98,6 +107,19 @@ export async function exchangeCredential(
     // spec.secretFields, so with exactly one field there is nothing to pick wrong.
     secretValue = Object.values(stored.secret)[0];
     endpoint = stored.descriptor.endpoint;
+    const [field] = Object.keys(stored.secret);
+    const header = field ? inferenceAuthHeader(stored.descriptor.binding, field) : undefined;
+    if (!header) {
+      // Written before parseCredentialBody refused unsendable bindings (#368). Falling back to Bearer
+      // would send the secret in a header its binding never named -- refuse, attributably.
+      throw new CpError(
+        'credential_required',
+        `credential '${rec.credentialName}' has a binding the inference path cannot send; store it ` +
+          "again as kind 'bearer' (gateway token) or 'api-key' (Anthropic API key)",
+        rec.sessionId,
+      );
+    }
+    authHeader = header;
   } else if (deps.config.allowOperatorFallback && deps.config.operatorInferenceToken) {
     // The operator fallback relocates rather than disappearing (spec §6.4): resolved HERE, by the
     // trusted tier, attributable to a subject and logged -- never as an env fallback in the harness.
@@ -135,6 +157,27 @@ export async function exchangeCredential(
   // it outright (spec §3.6).
   const mode: CredentialMode = deps.config.injectorConfigured ? 'placeholder' : 'direct';
 
+  // PUT refuses Bearer to an api.anthropic.com ENDPOINT, but cannot see the deployment default the
+  // endpoint may resolve to here. Bearer there always 401s (it reads API keys from x-api-key only).
+  if (authHeader === 'authorization' && URL.parse(baseUrl)?.hostname === 'api.anthropic.com') {
+    throw new CpError(
+      'credential_required',
+      `credential '${credentialName}' is a Bearer token, but its endpoint resolves to ` +
+        "api.anthropic.com, which reads API keys from x-api-key: store the key with kind 'api-key'",
+      rec.sessionId,
+    );
+  }
+  if (mode === 'placeholder' && authHeader === 'x-api-key') {
+    // The injector rewrites `Bearer <placeholder>` only (RC1/P5), so a placeholder in x-api-key would
+    // reach upstream unrewritten: an opaque 401. Refused until MI1 S2's grants honour the binding.
+    throw new CpError(
+      'credential_required',
+      `credential '${credentialName}' is sent as x-api-key, which this deployment's credential ` +
+        'injector cannot rewrite; use a gateway token (kind bearer) here',
+      rec.sessionId,
+    );
+  }
+
   await deps.index.audit({
     subject: rec.owner,
     sessionId: rec.sessionId,
@@ -148,5 +191,6 @@ export async function exchangeCredential(
     anthropicBaseUrl: baseUrl,
     sessionId: rec.sessionId,
     subject: rec.owner,
+    ...(authHeader === 'x-api-key' ? { authHeader } : {}),
   };
 }

@@ -190,6 +190,15 @@ async function exchange(token: string, deps: TurnAuthDeps): Promise<ExchangeResp
     // environment and send this subject's gateway token to the wrong endpoint (spec §6.2).
     throw new CpError('endpoint_unresolved', 'control plane returned no gateway endpoint');
   }
+  // Absent means Authorization: Bearer (a pre-#368 control plane). An unknown value must not default
+  // to either header: guessing wrong sends the secret where its binding never said (#368).
+  if (
+    body.authHeader !== undefined &&
+    body.authHeader !== 'authorization' &&
+    body.authHeader !== 'x-api-key'
+  ) {
+    throw new CpError('credential_unavailable', 'control plane returned an unknown credential header');
+  }
   return body as unknown as ExchangeResponse;
 }
 
@@ -232,7 +241,11 @@ export async function resolveTurnAuth(
   return {
     subject: claims.sub,
     sessionId: claims.sid,
-    credential: { mode: resolved.mode, value: resolved.anthropicAuthToken },
+    credential: {
+      mode: resolved.mode,
+      value: resolved.anthropicAuthToken,
+      ...(resolved.authHeader === 'x-api-key' ? { header: resolved.authHeader } : {}),
+    },
     anthropicBaseUrl: resolved.anthropicBaseUrl,
   };
 }

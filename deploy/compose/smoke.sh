@@ -184,13 +184,19 @@ TURN_HDR="$PROJ/turn.hdr"
      process.stdout.write(s.mint({ sub: 'smoke:1', tenant: 'smoke:1', roles: [], scope: ['api'], ttlSeconds: 900 }));" \
     2>/dev/null)" >"$API_HDR"
 )
-# The caller's inference credential: a Bearer for the gateway this smoke was given (MU1 delivers an
-# inference credential as `Authorization: Bearer`, spec §6.2).
-INFERENCE_TOKEN="${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-}}"
+# The caller's inference credential. A gateway token goes as `Authorization: Bearer` (kind bearer); a
+# raw Anthropic API key is read from x-api-key only, so it is stored as kind api-key -- the control
+# plane refuses it as bearer (#368).
+if [[ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]]; then
+  INFERENCE_TOKEN="$ANTHROPIC_AUTH_TOKEN" CRED_KIND=bearer CRED_FIELD=token
+else
+  INFERENCE_TOKEN="${ANTHROPIC_API_KEY:-}" CRED_KIND=api-key CRED_FIELD=key
+fi
 ENDPOINT="${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
 HOST="$(sed -E 's#^[a-z]+://([^/:]+).*#\1#' <<<"$ENDPOINT")"
 CRED_BODY="$(SMOKE_TOKEN="$INFERENCE_TOKEN" jq -nc --arg ep "$ENDPOINT" --arg host "$HOST" \
-  '{kind: "bearer", consumer: "inference", destination: {hosts: [$host]}, endpoint: $ep, secret: {token: env.SMOKE_TOKEN}}')"
+  --arg kind "$CRED_KIND" --arg field "$CRED_FIELD" \
+  '{kind: $kind, consumer: "inference", destination: {hosts: [$host]}, endpoint: $ep, secret: {($field): env.SMOKE_TOKEN}}')"
 PUT_STATUS="$(curl -s -o "$PROJ/put.json" -w '%{http_code}' -X PUT -H @"$API_HDR" -H 'Content-Type: application/json' \
   --data-binary @- "$CP/v1/credentials/smoke-inference" <<<"$CRED_BODY" || true)"
 # One authenticated turn: a new session on the stored credential, its session token, and an SSE
