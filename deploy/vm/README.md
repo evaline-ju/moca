@@ -458,6 +458,11 @@ Neither answer can come from a model's memory: the clone's HEAD changes with eve
 newest Node.js release every few weeks. Check them with `git ls-remote https://github.com/rossoctl/moca HEAD`
 and https://nodejs.org/dist/index.json.
 
+`git clone` refuses a destination that already exists, so to run the prompt a second time on the same
+container, remove `/workspace/research-demo` first (for example
+`sudo podman exec sh-sandbox-0 rm -rf /workspace/research-demo`, on each container), or change the
+directory name in the prompt.
+
 On the container tier, every session shares one `/workspace` per container
 (`remote-worker/internal/exec/runner.go` ignores the workspace key). So a second user's turn can see
 the first user's `research-demo` directory if both land on the same container. It is not a security

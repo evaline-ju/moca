@@ -111,6 +111,11 @@ NODE_DATE=2026-09-21"
     frame '{"type":"done","sessionId":"sess-1","stopReason":"stop"}'
   } >"$out"
   exit 0 ;;
+"DELETE /v1/sessions/sess-1")
+  # MOCK_SESSION_DELETE_BUSY=N: the first N deletes are refused as the turn still in flight.
+  n=$(( $(cat "$STATE/sdel" 2>/dev/null || echo 0) + 1 )); echo "$n" >"$STATE/sdel"
+  if [[ "$n" -le "${MOCK_SESSION_DELETE_BUSY:-0}" ]]; then reply 409 '{"error":"turn_in_flight"}'; fi
+  reply 204 '' ;;
 DELETE*) reply 204 '' ;;
 esac
 reply 404 '{"error":"not_found"}'
@@ -138,7 +143,7 @@ exec)
 esac
 MOCK
 chmod +x "$TMP/bin/"*
-export PATH="$TMP/bin:$PATH" HEAD_SHA SH_ENV_DIR="$TMP/etc" SH_INSTALL_DIR="$REPO" TMPDIR="$TMP/tmp"
+export RESEARCH_DELETE_WAIT=0 PATH="$TMP/bin:$PATH" HEAD_SHA SH_ENV_DIR="$TMP/etc" SH_INSTALL_DIR="$REPO" TMPDIR="$TMP/tmp"
 
 # run <name> [VAR=value ...]: one smoke run in a fresh mock state; <name>.log and <name>.rc.
 run() {
@@ -196,6 +201,20 @@ check "exit 0" "$(rc fb)" "0"
 check "stored no credential" "$(logged '^PUT ')" "no"
 check "deleted no credential" "$(logged '^DELETE /v1/credentials')" "no"
 check "audit: operator_fallback_used" "$(said fb 'audit: operator_fallback_used')" "yes"
+
+echo "== a key file with more than one line"
+printf '# my key\n%s\n' "$RAW_KEY" >"$TMP/multi.key"
+run multi RESEARCH_CREDENTIAL_FILE="$TMP/multi.key"
+check "refused" "$(rc multi)" "2"
+check "says one line" "$(said multi 'exactly one line')" "yes"
+check "before any request" "$(wc -l <"$MOCK_LOG" | tr -d ' ')" "0"
+
+echo "== the session delete is retried, and a failure to delete is reported"
+run busy1 RESEARCH_CREDENTIAL_FILE="$TMP/raw.key" MOCK_SESSION_DELETE_BUSY=1
+check "a delete refused once is retried: exit 0" "$(rc busy1)" "0"
+check "two session deletes" "$(grep -c '^DELETE /v1/sessions/sess-1$' "$MOCK_LOG")" "2"
+run busy9 RESEARCH_CREDENTIAL_FILE="$TMP/raw.key" MOCK_SESSION_DELETE_BUSY=9
+check "a session that cannot be deleted is reported" "$(said busy9 'could not delete session sess-1')" "yes"
 
 echo "== no key at all"
 run nokey

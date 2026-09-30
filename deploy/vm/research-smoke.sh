@@ -32,6 +32,7 @@
 #   RESEARCH_TURN_TIMEOUT             Seconds the turn may take (default 900).
 #   SH_ENV_DIR, SH_INSTALL_DIR        As setup-vm.sh (default /etc/serverless-harness, /opt/serverless-harness).
 #   SH_CRED_DIR                       TEST-ONLY, as setup-vm.sh (default $SH_ENV_DIR/credentials).
+#   RESEARCH_DELETE_WAIT              Seconds between tries at deleting the session (default 2).
 #   KEEP=1                            Leave the credential, session, fetched files and evidence in place.
 set -uo pipefail
 
@@ -111,7 +112,17 @@ cleanup() {
     return
   fi
   if [[ -s "$OUT/api.hdr" ]]; then
-    [[ -z "$SID" ]] || curl -sS -o /dev/null -X DELETE -H @"$OUT/api.hdr" "$CP/v1/sessions/$SID" || true
+    if [[ -n "$SID" ]]; then
+      # The worker may still be reporting the turn's end, and the control plane refuses to delete a
+      # session with a turn in flight: retry a few times, then say so rather than leave it silently.
+      for _ in 1 2 3 4 5; do
+        code="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE -H @"$OUT/api.hdr" "$CP/v1/sessions/$SID" 2>/dev/null || true)"
+        [[ "$code" == 2* || "$code" == 404 ]] && break
+        sleep "${RESEARCH_DELETE_WAIT:-2}"
+      done
+      [[ "$code" == 2* || "$code" == 404 ]] ||
+        echo "warning: could not delete session $SID (last answer HTTP ${code:-none}); it stays in the control plane" >&2
+    fi
     [[ -z "$STORED" ]] || curl -sS -o /dev/null -X DELETE -H @"$OUT/api.hdr" "$CP/v1/credentials/$CRED_NAME" || true
   fi
   if [[ -n "$TURNED" ]]; then
@@ -127,6 +138,9 @@ if [[ -z "$FALLBACK" ]]; then
     die "set RESEARCH_CREDENTIAL_FILE (a file holding the user's inference key), or RESEARCH_USE_OPERATOR_FALLBACK=1"
   [[ -s "$RESEARCH_CREDENTIAL_FILE" && -r "$RESEARCH_CREDENTIAL_FILE" ]] ||
     die "RESEARCH_CREDENTIAL_FILE ($RESEARCH_CREDENTIAL_FILE) is missing, empty or unreadable"
+  # One line, so the kind detected here and the secret node sends below are the same string.
+  [[ "$(grep -c . "$RESEARCH_CREDENTIAL_FILE")" == 1 ]] ||
+    die "RESEARCH_CREDENTIAL_FILE must hold exactly one line: the key, and nothing else"
   if grep -q '^sk-ant-api' "$RESEARCH_CREDENTIAL_FILE"; then
     CRED_KIND=api-key
   else
