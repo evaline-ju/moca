@@ -18,7 +18,9 @@
 # Usage: sudo ./deploy/microvm/setup-microvm.sh      (re-running changes nothing)
 #
 # Env overrides: SH_UNIT_DIR, SH_ENV_DIR, SH_BIN_DIR, MICROVM_SANDBOX_ID, MICROVM_WORKSPACE_IDLE,
-# MICROVM_SNAPSHOT_DIR, MICROVM_BIN, MICROVM_ATTACH_TIMEOUT -- defaults below.
+# MICROVM_SNAPSHOT_DIR, MICROVM_BIN, MICROVM_ATTACH_TIMEOUT -- defaults below -- and
+# MICROVM_MAX_COMMITTED_MB (unset by default): a VM-memory budget in MiB for a host smaller than the
+# shipped unit's 24 GiB, written as a drop-in that also lowers the unit's AssertMemory to match.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,6 +35,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 RELAY_DROPIN="50-moca-microvm.conf"
 WORKER_DROPIN="50-moca-p6.conf"
+MEMORY_DROPIN="60-moca-memory.conf"
+# The shipped unit's SH_MEMORY_RESERVE_MB: a budget at or below it admits nothing (Config.Normalize).
+SHIPPED_RESERVE_MB=4096
 CHANGED=() # destination paths this run actually rewrote
 
 log() { printf '==> %s\n' "$*"; }
@@ -70,6 +75,10 @@ relay_port() {
 preflight() {
   [[ "$(id -u)" == 0 ]] || die "must run as root (installs units under $SH_UNIT_DIR)"
   validate_sandbox_id "$MICROVM_SANDBOX_ID" || exit 1
+  if [[ -n "${MICROVM_MAX_COMMITTED_MB:-}" ]] &&
+    ! { [[ "$MICROVM_MAX_COMMITTED_MB" =~ ^[0-9]+$ ]] && ((MICROVM_MAX_COMMITTED_MB > SHIPPED_RESERVE_MB)); }; then
+    die "MICROVM_MAX_COMMITTED_MB='$MICROVM_MAX_COMMITTED_MB' must be a whole number of MiB above the unit's SH_MEMORY_RESERVE_MB ($SHIPPED_RESERVE_MB), or nothing is ever admitted"
+  fi
   [[ -f "$SH_ENV_DIR/relay.env" && -f "$SH_UNIT_DIR/sh-relay.service" ]] ||
     die "no installed P6 found ($SH_ENV_DIR/relay.env, $SH_UNIT_DIR/sh-relay.service); run deploy/vm/setup-vm.sh first"
   [[ -f "$MICROVM_SNAPSHOT_DIR/manifest.json" ]] ||
@@ -143,7 +152,27 @@ install_units() {
   printf '# Written by deploy/microvm/setup-microvm.sh: attach this worker to the P6 relay on this host.\n[Unit]\nAfter=sh-relay.service\nWants=sh-relay.service\n\n[Service]\nEnvironmentFile=%s\n' \
     "$SH_ENV_DIR/microvm-worker.env" >"$stage/worker.conf"
   install_if_changed "$stage/worker.conf" "$SH_UNIT_DIR/microvm-worker.service.d/$WORKER_DROPIN" 0644
+  install_memory_dropin "$stage"
   rm -rf "$stage"
+}
+
+# The shipped unit budgets 24 GiB and asserts >=23G of physical memory, so on a smaller host it
+# refuses to start -- correctly, since the budget would promise memory that is not there. A smaller
+# host gets a smaller budget AND a matching assertion, in the same 90%-of-budget band
+# systemd-units.test.sh holds the shipped values to. `AssertMemory=` (empty) resets the unit's list
+# first; without it the shipped >=23G would still apply alongside the new one.
+install_memory_dropin() {
+  local dst="$SH_UNIT_DIR/microvm-worker.service.d/$MEMORY_DROPIN"
+  if [[ -z "${MICROVM_MAX_COMMITTED_MB:-}" ]]; then
+    if [[ -e "$dst" ]]; then rm -f "$dst"; CHANGED+=("$dst"); fi
+    return
+  fi
+  printf '%s\n' \
+    "# Written by deploy/microvm/setup-microvm.sh (MICROVM_MAX_COMMITTED_MB): a VM-memory budget" \
+    "# for a host smaller than the shipped unit assumes, and the physical-memory assertion to match." \
+    "[Unit]" "AssertMemory=" "AssertMemory=>=$((MICROVM_MAX_COMMITTED_MB * 90 / 100))M" "" \
+    "[Service]" "Environment=SH_MAX_COMMITTED_MB=$MICROVM_MAX_COMMITTED_MB" >"$1/memory.conf"
+  install_if_changed "$1/memory.conf" "$dst" 0644
 }
 
 install_env() {
@@ -177,7 +206,8 @@ changed_any() { # changed_any <path>...: true iff one of them is in CHANGED
 apply() {
   local relay_restart=0
   if changed_any "$SH_UNIT_DIR/microvm-worker.service" "$SH_UNIT_DIR/microvm-vms.slice" \
-    "$SH_UNIT_DIR/sh-relay.service.d/$RELAY_DROPIN" "$SH_UNIT_DIR/microvm-worker.service.d/$WORKER_DROPIN"; then
+    "$SH_UNIT_DIR/sh-relay.service.d/$RELAY_DROPIN" "$SH_UNIT_DIR/microvm-worker.service.d/$WORKER_DROPIN" \
+    "$SH_UNIT_DIR/microvm-worker.service.d/$MEMORY_DROPIN"; then
     systemctl daemon-reload
   fi
   if changed_any "$SH_UNIT_DIR/sh-relay.service.d/$RELAY_DROPIN" "$SH_ENV_DIR/microvm-relay.env"; then
@@ -188,7 +218,7 @@ apply() {
   systemctl enable microvm-worker.service
   if ((relay_restart)) || changed_any "$SH_BIN_DIR/microvm-worker" "$SH_UNIT_DIR/microvm-worker.service" \
     "$SH_UNIT_DIR/microvm-vms.slice" "$SH_UNIT_DIR/microvm-worker.service.d/$WORKER_DROPIN" \
-    "$SH_ENV_DIR/microvm-worker.env"; then
+    "$SH_UNIT_DIR/microvm-worker.service.d/$MEMORY_DROPIN" "$SH_ENV_DIR/microvm-worker.env"; then
     systemctl stop microvm-worker.service
     start_worker
   elif ! systemctl is-active --quiet microvm-worker.service; then

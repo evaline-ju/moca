@@ -156,6 +156,33 @@ check "only the new id's token line" "$(grep -c '^SH_RELAY_TOKEN_' "$R")" "1"
 check "it names the new id" "$(grep -c '^SH_RELAY_TOKEN_moca_microvm_1=' "$R")" "1"
 check "the relay was restarted to drop the old one" "$(grep -c '^systemctl restart sh-relay.service$' "$MOCK_LOG")" "1"
 
+echo "== MICROVM_MAX_COMMITTED_MB: a budget for a host smaller than the shipped unit assumes"
+M="$TMP/units/microvm-worker.service.d/60-moca-memory.conf"
+: >"$MOCK_LOG"
+check "exit 0" "$(MICROVM_SANDBOX_ID=moca_microvm_1 MICROVM_MAX_COMMITTED_MB=8192 run)" "0"
+check "the budget reaches the worker" "$(grep -c '^Environment=SH_MAX_COMMITTED_MB=8192$' "$M")" "1"
+# Same band systemd-units.test.sh holds the shipped unit to: AssertMemory at 90% of the budget.
+check "the shipped AssertMemory is reset first" "$(grep -c '^AssertMemory=$' "$M")" "1"
+check "then re-asserted at 90% of the budget" "$(grep -c '^AssertMemory=>=7372M$' "$M")" "1"
+check "reset precedes the new assertion" "$(grep -nE '^AssertMemory=' "$M" | cut -d: -f1 | tr '\n' ' ')" "4 5 "
+check "daemon-reload" "$(grep -c '^systemctl daemon-reload$' "$MOCK_LOG")" "1"
+check "worker started with the new budget" "$(grep -c '^systemctl start microvm-worker.service$' "$MOCK_LOG")" "1"
+mem_before="$(hash_tree)"; : >"$MOCK_LOG"
+check "re-run exit 0" "$(MICROVM_SANDBOX_ID=moca_microvm_1 MICROVM_MAX_COMMITTED_MB=8192 run)" "0"
+check "re-run changes nothing" "$(hash_tree)" "$mem_before"
+check "re-run restarts nothing" "$(grep -cE 'restart|systemctl (stop|start)' "$MOCK_LOG")" "0"
+: >"$MOCK_LOG"
+check "unset again: exit 0" "$(MICROVM_SANDBOX_ID=moca_microvm_1 run)" "0"
+check "unset again: the override is removed" "$([ -e "$M" ] && echo present || echo absent)" "absent"
+check "unset again: the worker picks up the shipped budget" "$(grep -c '^systemctl start microvm-worker.service$' "$MOCK_LOG")" "1"
+for bad in abc 0 4096 -1; do
+  reset_host
+  check "MICROVM_MAX_COMMITTED_MB=$bad refused" "$(MICROVM_MAX_COMMITTED_MB="$bad" run)" "1"
+  check "MICROVM_MAX_COMMITTED_MB=$bad: nothing written" "$(find "$TMP/etc" -name '*microvm*' | wc -l | tr -d ' ')" "0"
+done
+reset_host; MICROVM_MAX_COMMITTED_MB=4096 run >/dev/null
+check "the refusal names the reserve it must exceed" "$(grep -c 'MICROVM_MAX_COMMITTED_MB.*SH_MEMORY_RESERVE_MB' "$TMP/run.log")" "1"
+
 echo "== refusals write nothing"
 for case in containers stopped-containers no-p6 no-snapshot dashed-id; do
   reset_host
