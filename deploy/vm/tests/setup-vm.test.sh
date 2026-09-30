@@ -574,6 +574,28 @@ write_fails "a failing mktemp" 'mktemp() { return 1; }'
 write_fails "a failing rename" 'mv() { return 1; }'
 pass "MU1 secrets: a failing mktemp, write or rename fails whole, leaving no secret and no temp file"
 
+# A lost KEK over a credential store that already holds records: a new KEK would make every one of them
+# undecryptable, so it is refused -- before anything is written, the credentials dir included.
+M="$(mu1_dir)"
+STORE="$(mktemp -d)"
+set_env_line "$M/control-plane.env" SH_CREDENTIAL_DIR "$STORE"
+printf 'ciphertext\n' >"$STORE/github:1.json"
+refuses "a missing KEK over a store with records" "credential-kek.*$STORE"
+[[ ! -e "$M/credentials" ]] || fail "the lost-KEK refusal created $M/credentials"
+out="$(SH_ENV_DIR="$M" ensure_mu1_secrets 2>&1)" && fail "the lost-KEK refusal succeeded on a second try"
+grep -qi 'restore' <<<"$out" || fail "the lost-KEK refusal must say to restore the KEK: $out"
+grep -qi 'empty' <<<"$out" || fail "the lost-KEK refusal must name emptying the store as the other way out: $out"
+rm "$STORE/github:1.json"
+SH_ENV_DIR="$M" ensure_mu1_secrets >/dev/null || fail "ensure_mu1_secrets refused a missing KEK over an EMPTY store"
+[[ -s "$M/credentials/credential-kek" ]] || fail "an empty store did not get a generated KEK"
+# The KEK present, the store full, another secret missing: nothing to refuse.
+printf 'ciphertext\n' >"$STORE/github:1.json"
+rm "$M/credentials/exchange-token"
+SH_ENV_DIR="$M" ensure_mu1_secrets >/dev/null || fail "a full store refused a missing exchange token (the KEK is present)"
+[[ -s "$M/credentials/exchange-token" ]] || fail "the missing exchange token was not generated beside a full store"
+rm -rf "$M" "$STORE"
+pass "MU1 secrets: a lost KEK over a store with records refuses, naming both ways out; an empty store generates"
+
 # The REAL generator's two halves agree: the kid in the public keyset is the private key's own. Needs
 # tsx, so it runs only where the workspace is built (a dev box), and says so where it is not (CI).
 REAL_ROOT="$VM_DIR/../.."

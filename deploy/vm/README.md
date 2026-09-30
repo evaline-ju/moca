@@ -189,7 +189,8 @@ hand: delete the file and re-run, which restarts the running units onto the new 
 key and the `SH_SESSION_TOKEN_PUBLIC_KEYS` line are one keypair: delete both, or the script stops on
 half a pair. A new keypair invalidates every live token and re-wires `supervisor.env` as on first
 install, `SH_REQUIRE_AUTH=true` included. **A new KEK makes every stored credential
-undecryptable.**
+undecryptable**, so with `credential-kek` missing and records in `SH_CREDENTIAL_DIR`, the script
+stops: restore the KEK from a backup, or empty the store deliberately.
 
 **The limit.** `LoadCredential=` keeps the secrets out of env files, out of `/proc/<pid>/environ`
 and out of every child process. It is **not** a uid boundary. All three units run as `harness`, so

@@ -425,7 +425,7 @@ write_secret() {
 # every live session token. Sets MU1_NEW_KEYPAIR=1 when this run generated the keypair (Task 6 wiring).
 ensure_mu1_secrets() {
   local sup="$SH_ENV_DIR/supervisor.env" cp="$SH_ENV_DIR/control-plane.env" dir pair name f
-  local priv_file have_pub missing=() priv='' pub='' kek='' xchg=''
+  local priv_file have_pub store missing=() priv='' pub='' kek='' xchg=''
   dir="$(cred_dir)"
   MU1_NEW_KEYPAIR=''
   for pair in "${MU1_CREDENTIALS[@]}"; do
@@ -455,6 +455,17 @@ ensure_mu1_secrets() {
       "SH_SESSION_TOKEN_PUBLIC_KEYS in $sup is $([[ -n "$have_pub" ]] && echo set || echo unset)." \
       "They are one keypair: restore the missing half, or remove both to generate a fresh pair" \
       "(every live session token then stops verifying), then re-run." >&2
+    return 1
+  fi
+  # A lost KEK is regenerated only over an empty store: the file store's records (one per subject, in
+  # SH_CREDENTIAL_DIR) are sealed under the old one, and a new KEK makes every one undecryptable.
+  store="$(env_file_value SH_CREDENTIAL_DIR "$cp")"
+  store="${store:-/var/lib/moca-control-plane}"
+  if [[ ! -e "$dir/credential-kek" && -n "$(find "$store" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+    echo "$dir/credential-kek is missing, but the credential store $store already holds records sealed" \
+      "under it: a new KEK would make every stored credential undecryptable. Restore credential-kek from" \
+      "a backup (mode 0600), or -- discarding every stored credential, deliberately -- empty $store," \
+      "then re-run." >&2
     return 1
   fi
   for pair in "${MU1_CREDENTIALS[@]}"; do
