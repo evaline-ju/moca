@@ -47,7 +47,10 @@ json_field() {
 # <name>.txt (the response text), and prints nothing.
 turn() {
   local body
-  if [ -n "$2" ]; then body="{\"sessionId\":\"$2\",\"prompt\":\"$3\"}"; else body="{\"prompt\":\"$3\"}"; fi
+  # Built by JSON.stringify, not interpolated: a prompt with a quote, backslash or newline would
+  # otherwise be malformed JSON and a 400 that reads like a server fault. node is already required.
+  body="$(node -e 'const [s, p] = process.argv.slice(1);
+    process.stdout.write(JSON.stringify(s ? { sessionId: s, prompt: p } : { prompt: p }))' "$2" "$3")"
   curl -sS --max-time 300 -o "$OUT/$1.json" -w '%{http_code}' -X POST "$SUP/turn" \
     -H 'content-type: application/json' -d "$body" >"$OUT/$1.code" 2>"$OUT/$1.err"
   json_field "$OUT/$1.json" response >"$OUT/$1.txt"

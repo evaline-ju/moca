@@ -43,7 +43,24 @@ make_fixture() { # make_fixture <tool>... : an image tree carrying exactly these
   for t in "$@"; do printf '#!/bin/sh\n' >"$FIXTURE/usr/bin/$t"; chmod +x "$FIXTURE/usr/bin/$t"; done
   printf 'bin\n' >"$FIXTURE/usr/local/bin/remote-worker"; chmod +x "$FIXTURE/usr/local/bin/remote-worker"
 }
-ALL_TOOLS=(bash git rg python3 base64 file ls cat)
+# The script's own REQUIRED_TOOLS, read from it rather than copied: a hand-kept duplicate here
+# would let the two drift apart with every test still green.
+read -r -a ALL_TOOLS <<<"$(sed -nE 's/^REQUIRED_TOOLS=\((.*)\)$/\1/p' "$SCRIPT")"
+
+echo "== REQUIRED_TOOLS covers every capability the container tier advertises"
+# Pinned against cmd/worker's own `probed` list, as build-snapshot.test.sh pins the guest probe: a
+# tool added to the container tier must also be required of the rootfs, or build-rootfs.sh keeps
+# producing a tree that lacks it and the gap surfaces as a failed tool call. A superset, not
+# equality: ls and cat are there for the harness's own file ops.
+# `"bash", "rg", ...` -> `bash rg ...`
+container_caps="$(sed -nE 's/^var probed = \[\]string\{(.*)\}$/\1/p' \
+  "$DIR/../../remote-worker/cmd/worker/main.go" | tr -d '"' | tr ',' ' ')"
+check "REQUIRED_TOOLS was found in the script" "$([ "${#ALL_TOOLS[@]}" -gt 0 ] && echo yes || echo no)" "yes"
+check "the container tier's probed list was found" "$([ -n "$container_caps" ] && echo yes || echo no)" "yes"
+for cap in $container_caps; do
+  check "REQUIRED_TOOLS includes '$cap'" \
+    "$(printf ' %s ' "${ALL_TOOLS[@]}" | grep -qF " $cap " && echo yes || echo no)" "yes"
+done
 
 echo "== shellcheck"
 if command -v shellcheck >/dev/null; then
