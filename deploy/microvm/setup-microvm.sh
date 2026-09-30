@@ -75,7 +75,9 @@ preflight() {
   [[ -f "$MICROVM_SNAPSHOT_DIR/manifest.json" ]] ||
     die "no golden snapshot at $MICROVM_SNAPSHOT_DIR; build one with deploy/microvm/build-rootfs.sh then build-snapshot.sh (deploy/microvm/P4-ON-P6.md)"
   local attached
-  attached="$(podman ps --format '{{.Names}}' --filter 'name=^sh-sandbox-' | tr '\n' ' ')"
+  # -a: a STOPPED sandbox container still counts. setup-vm.sh runs them --restart=always, and
+  # podman-restart.service brings every such container back at boot -- both tiers attached again.
+  attached="$(podman ps -a --format '{{.Names}}' --filter 'name=^sh-sandbox-' | tr '\n' ' ')"
   if [[ -n "${attached// /}" ]]; then
     die "container sandboxes are attached to the relay (${attached% }). This host must be P4-only while the microVM tier serves: sessions re-select a sandbox every turn and would hop between tiers. Stop them (podman rm -f ${attached% }) and re-run deploy/vm/setup-vm.sh with SH_SANDBOX_COUNT=0 so a re-run does not start them again."
   fi
@@ -187,8 +189,25 @@ apply() {
   if ((relay_restart)) || changed_any "$SH_BIN_DIR/microvm-worker" "$SH_UNIT_DIR/microvm-worker.service" \
     "$SH_UNIT_DIR/microvm-vms.slice" "$SH_UNIT_DIR/microvm-worker.service.d/$WORKER_DROPIN" \
     "$SH_ENV_DIR/microvm-worker.env"; then
-    systemctl restart microvm-worker.service
+    systemctl stop microvm-worker.service
+    start_worker
+  elif ! systemctl is-active --quiet microvm-worker.service; then
+    # Nothing changed, but the worker is not running -- the usual state after a snapshot problem
+    # put it in `failed` (the unit's StartLimitBurst), which a rebuilt snapshot does not undo. A
+    # re-run is how an operator expects to bring it back, and a running worker is left alone.
+    log "microvm-worker.service is not running; starting it"
+    systemctl reset-failed microvm-worker.service || true
+    start_worker
   fi
+}
+
+# start_worker drops the worker's presence record BEFORE starting it, so verify_attached can only
+# see a record the NEW process wrote. Records have no TTL, and a relay that died without its
+# teardown leaves the previous connection's behind -- which would read as "attached" even when the
+# new worker's attach is refused (a token mismatch, the silent failure that check exists for).
+start_worker() {
+  podman exec sh-redis redis-cli HDEL sh:sandbox:records "$MICROVM_SANDBOX_ID" >/dev/null
+  systemctl start microvm-worker.service
 }
 
 # The install is not done until the relay has mirrored the worker into sh:sandbox:records -- the

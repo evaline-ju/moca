@@ -33,19 +33,34 @@ function textOf(m) {
     .join('\n');
 }
 
-/** { marker, step } for this request, or null if the prompt is unscripted. */
+// A tool_result's content is either a string or an array of blocks; the text is what the tool printed.
+function resultText(block) {
+  if (typeof block.content === 'string') return block.content;
+  return (block.content ?? [])
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text)
+    .join('\n');
+}
+
+/**
+ * { marker, step, results } for this request, or null if the prompt is unscripted. `results` are the
+ * tool outputs this turn has produced so far, oldest first.
+ */
 export function plan(messages) {
   let i = messages.length - 1;
   let step = 0;
+  const results = [];
   for (; i >= 0; i--) {
     const m = messages[i];
-    if (isToolResult(m)) step++;
-    else if (m.role === 'user') break;
+    if (isToolResult(m)) {
+      step++;
+      for (const b of m.content) if (b.type === 'tool_result') results.unshift(resultText(b));
+    } else if (m.role === 'user') break;
   }
   if (i < 0) return null;
   const text = textOf(messages[i]);
   const marker = Object.keys(SCRIPTS).find((k) => text.includes(k));
-  return marker ? { marker, step } : null;
+  return marker ? { marker, step, results } : null;
 }
 
 function sse(res, events) {
@@ -56,7 +71,7 @@ function sse(res, events) {
 }
 
 let seq = 0;
-function reply(res, model, { marker, step }) {
+function reply(res, model, { marker, step, results }) {
   const s = SCRIPTS[marker];
   const id = `msg_mock_${++seq}`;
   const usage = { input_tokens: 1, output_tokens: 1 };
@@ -107,6 +122,8 @@ function reply(res, model, { marker, step }) {
       ...stop('tool_use'),
     ]);
   }
+  // The final text echoes every tool result: a non-streaming /turn returns only the last assistant
+  // message's text (harness/src/run-turn.ts), so this is how the turn driver sees what ran.
   return sse(res, [
     start,
     [
@@ -115,7 +132,11 @@ function reply(res, model, { marker, step }) {
     ],
     [
       'content_block_delta',
-      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: s.done } },
+      {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: [s.done, ...results].join('\n') },
+      },
     ],
     ['content_block_stop', { type: 'content_block_stop', index: 0 }],
     ...stop('end_turn'),

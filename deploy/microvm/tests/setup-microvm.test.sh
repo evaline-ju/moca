@@ -23,7 +23,9 @@ cat >"$TMP/bin/podman" <<'MOCK'
 #!/usr/bin/env bash
 printf 'podman %s\n' "$*" >>"$MOCK_LOG"
 case "$1" in
-  ps) [ -n "${MOCK_PODMAN_PS:-}" ] && printf '%s\n' $MOCK_PODMAN_PS ;;
+  ps) [ -n "${MOCK_PODMAN_PS:-}" ] && printf '%s\n' $MOCK_PODMAN_PS
+      # Stopped containers are listed only with -a, as podman does.
+      [[ " $* " == *" -a "* && -n "${MOCK_PODMAN_PS_STOPPED:-}" ]] && printf '%s\n' $MOCK_PODMAN_PS_STOPPED ;;
   exec) echo "${MOCK_HEXISTS:-1}" ;; # redis-cli HEXISTS sh:sandbox:records <id>
 esac
 exit 0
@@ -31,6 +33,9 @@ MOCK
 cat >"$TMP/bin/systemctl" <<'MOCK'
 #!/usr/bin/env bash
 printf 'systemctl %s\n' "$*" >>"$MOCK_LOG"
+# is-active answers MOCK_IS_ACTIVE's exit code (0 = active, 3 = inactive/failed, as systemd does).
+[ "$1" = is-active ] && exit "${MOCK_IS_ACTIVE:-0}"
+exit 0
 MOCK
 cat >"$TMP/bin/id" <<'MOCK'
 #!/usr/bin/env bash
@@ -111,7 +116,9 @@ check "binary installed" "$(cat "$TMP/usrbin/microvm-worker")" "fake-microvm-wor
 check "daemon-reload" "$(grep -c '^systemctl daemon-reload$' "$MOCK_LOG")" "1"
 check "relay restarted to load the token" "$(grep -c '^systemctl restart sh-relay.service$' "$MOCK_LOG")" "1"
 check "worker enabled" "$(grep -c '^systemctl enable microvm-worker.service$' "$MOCK_LOG")" "1"
-check "worker restarted" "$(grep -c '^systemctl restart microvm-worker.service$' "$MOCK_LOG")" "1"
+check "worker stopped, its presence record cleared, then started -- in that order (I4)" \
+  "$(grep -nE '^systemctl stop microvm-worker.service$|HDEL sh:sandbox:records moca_microvm_0$|^systemctl start microvm-worker.service$' "$MOCK_LOG" | cut -d: -f2- | sed 's/^podman exec sh-redis redis-cli //' | tr '\n' '|')" \
+  "systemctl stop microvm-worker.service|HDEL sh:sandbox:records moca_microvm_0|systemctl start microvm-worker.service|"
 check "attach verified against the presence records" \
   "$(grep -c 'podman exec sh-redis redis-cli HEXISTS sh:sandbox:records moca_microvm_0' "$MOCK_LOG")" "1"
 
@@ -121,6 +128,16 @@ check "exit 0" "$(run)" "0"
 check "every file byte-identical" "$(hash_tree)" "$before"
 check "no daemon-reload" "$(grep -c 'daemon-reload' "$MOCK_LOG")" "0"
 check "no restart" "$(grep -c 'restart' "$MOCK_LOG")" "0"
+check "a running worker is not stopped or started" "$(grep -cE 'systemctl (stop|start) microvm-worker' "$MOCK_LOG")" "0"
+
+echo "== a re-run starts a worker that is stopped or failed, restarting nothing (I1)"
+: >"$MOCK_LOG"
+check "exit 0" "$(MOCK_IS_ACTIVE=3 run)" "0"
+check "files still byte-identical" "$(hash_tree)" "$before"
+check "failed state cleared" "$(grep -c '^systemctl reset-failed microvm-worker.service$' "$MOCK_LOG")" "1"
+check "worker started" "$(grep -c '^systemctl start microvm-worker.service$' "$MOCK_LOG")" "1"
+check "stale presence record cleared first" "$(grep -c 'HDEL sh:sandbox:records moca_microvm_0$' "$MOCK_LOG")" "1"
+check "nothing restarted" "$(grep -c 'restart' "$MOCK_LOG")" "0"
 
 echo "== an operator's edit survives a re-run (Review Focus 1)"
 sed -i.bak 's/^SH_WORKSPACE_IDLE=.*/SH_WORKSPACE_IDLE=12h/' "$W" && rm -f "$W.bak"
@@ -140,10 +157,12 @@ check "it names the new id" "$(grep -c '^SH_RELAY_TOKEN_moca_microvm_1=' "$R")" 
 check "the relay was restarted to drop the old one" "$(grep -c '^systemctl restart sh-relay.service$' "$MOCK_LOG")" "1"
 
 echo "== refusals write nothing"
-for case in containers no-p6 no-snapshot dashed-id; do
+for case in containers stopped-containers no-p6 no-snapshot dashed-id; do
   reset_host
   case "$case" in
     containers) export MOCK_PODMAN_PS="sh-sandbox-0 sh-sandbox-1" ;;
+    # I3: a stopped --restart=always container comes back at boot (podman-restart.service).
+    stopped-containers) export MOCK_PODMAN_PS_STOPPED="sh-sandbox-0" ;;
     no-p6) rm -f "$TMP/etc/relay.env" ;;
     no-snapshot) rm -f "$TMP/snap/manifest.json" ;;
     dashed-id) export MICROVM_SANDBOX_ID=sbx-microvm-1 ;;
@@ -151,7 +170,7 @@ for case in containers no-p6 no-snapshot dashed-id; do
   check "$case: exit 1" "$(run)" "1"
   check "$case: no microvm env files" "$(find "$TMP/etc" -name '*microvm*' | wc -l | tr -d ' ')" "0"
   check "$case: no systemctl" "$(grep -c '^systemctl' "$MOCK_LOG")" "0"
-  unset MOCK_PODMAN_PS MICROVM_SANDBOX_ID
+  unset MOCK_PODMAN_PS MOCK_PODMAN_PS_STOPPED MICROVM_SANDBOX_ID
 done
 reset_host; MOCK_PODMAN_PS="sh-sandbox-0" run >/dev/null
 check "containers: the refusal names them and the fix" \

@@ -36,6 +36,19 @@ check "200" "$code" "200"
 check "final text" "$(grep -c 'done-write' "$TMP/body")" "1"
 check "stop_reason end_turn" "$(grep -c '"stop_reason":"end_turn"' "$TMP/body")" "1"
 
+echo "== the final text carries the tool results back (non-streaming /turn returns only that text)"
+code="$(post '{"model":"mock-p4","stream":true,"messages":[
+  {"role":"user","content":"P4-SMOKE-READ"},
+  {"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"bash","input":{}}]},
+  {"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"RESULT-ONE"}]}]}]}')"
+check "200" "$code" "200"
+check "final text includes the tool result" "$(grep -c 'done-read.*RESULT-ONE' "$TMP/body")" "1"
+code="$(post '{"model":"mock-p4","stream":true,"messages":[
+  {"role":"user","content":"P4-SMOKE-READ"},
+  {"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"bash","input":{}}]},
+  {"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"RESULT-STRING","is_error":true}]}]}')"
+check "a string tool_result (and an error one) is echoed too" "$(grep -c 'RESULT-STRING' "$TMP/body")" "1"
+
 echo "== a later turn is keyed on ITS prompt, not the session's first"
 code="$(post '{"model":"mock-p4","stream":true,"messages":[
   {"role":"user","content":"P4-SMOKE-WRITE"},{"role":"assistant","content":[{"type":"text","text":"done-write"}]},
