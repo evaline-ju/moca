@@ -566,8 +566,23 @@ set_env_line "$S" K v3
 [[ "$(cat "$S")" == $'A=1\nK=v3' ]] || fail "set_env_line must append on its own line: $(cat "$S")"
 chmod 0640 "$S"; set_env_line "$S" K v4
 [[ "$(mode_of "$S")" == 640 ]] || fail "set_env_line changed the file's mode"
+# A failing awk or mktemp must fail set_env_line and leave the file whole -- even with errexit
+# suspended, as it is under every `set_env_line ... || return 1` caller.
+sum_before="$(cksum <"$S")"
+# shellcheck disable=SC2329  # invoked indirectly, by set_env_line
+awk() { return 2; }
+rc=0; set_env_line "$S" K v5 || rc=$?
+unset -f awk
+((rc != 0)) || fail "set_env_line returned 0 when awk failed"
+[[ "$(cksum <"$S")" == "$sum_before" ]] || fail "set_env_line changed the file when awk failed: $(cat "$S")"
+# shellcheck disable=SC2329  # invoked indirectly, by set_env_line
+mktemp() { return 1; }
+rc=0; set_env_line "$S" K v6 || rc=$?
+unset -f mktemp
+((rc != 0)) || fail "set_env_line returned 0 when mktemp failed"
+[[ "$(cksum <"$S")" == "$sum_before" ]] || fail "set_env_line changed the file when mktemp failed: $(cat "$S")"
 rm -f "$S"
-pass "set_env_line: replaces in place, collapses duplicates, appends on its own line, keeps the mode"
+pass "set_env_line: replaces in place, collapses duplicates, appends on its own line, keeps the mode, fails whole"
 
 # --- #366: supervisor.env is wired to this VM's control plane, once --------------------------------
 FIXTURE="$VM_DIR/tests/fixtures/supervisor.env.pre-cp"

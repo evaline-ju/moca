@@ -372,15 +372,15 @@ ensure_exec_listener() {
 # as ensure_exec_listener does. awk reads the value from its environment, never from an argv.
 set_env_line() {
   local file="$1" key="$2" tmp
-  tmp="$(mktemp)"
+  tmp="$(mktemp)" || return 1
   SET_ENV_VALUE="$3" awk -v k="$key" '
     FNR == NR { if ($0 ~ "^" k "=") has = 1; next }
     !done && $0 ~ (has ? "^" k "=" : "^#" k "=") { print k "=" ENVIRON["SET_ENV_VALUE"]; done = 1; next }
     done && $0 ~ "^" k "=" { next }
     { print }
     END { if (!done) print k "=" ENVIRON["SET_ENV_VALUE"] }
-  ' "$file" "$file" >"$tmp"
-  cat "$tmp" >"$file"
+  ' "$file" "$file" >"$tmp" || { rm -f "$tmp"; return 1; }
+  cat "$tmp" >"$file" || { rm -f "$tmp"; return 1; }
   rm -f "$tmp"
 }
 
