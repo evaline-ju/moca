@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Cluster-free, root-free test for setup-vm.sh. Mocks podman/systemctl/getent onto PATH and
-# asserts on the recorded argv, plus checks both unit files' ExecStart/WorkingDirectory
+# asserts on the recorded argv, plus checks all three unit files' ExecStart/WorkingDirectory
 # pairing, their §4.3 hardening directives, the env-file contract each EnvironmentFile= line
 # implies, and (last) a full main() run against the mocks.
 set -euo pipefail
@@ -266,6 +266,9 @@ secrets_line="$(grep -E '^export const CONTROL_PLANE_SECRETS = \[' "$CP_MAIN")" 
   fail "main.ts has no one-line CONTROL_PLANE_SECRETS export"
 mapfile -t cp_secrets < <(grep -oE "'SH_[A-Z_]+'" <<<"$secrets_line" | tr -d "'")
 mapfile -t cp_required < <(grep -oE "required\(env, '[A-Z_]+'\)" "$CP_MAIN" | grep -oE "'[A-Z_]+'" | tr -d "'" | sort -u)
+# Non-empty guards: a main.ts refactor that renamed required() would otherwise pass both loops vacuously.
+((${#cp_secrets[@]})) || fail "found no secret names in main.ts's CONTROL_PLANE_SECRETS line"
+((${#cp_required[@]})) || fail "found no required(env, '...') settings in $CP_MAIN"
 for name in "${cp_required[@]}"; do
   [[ "$name" == VAULT_ADDR ]] && continue
   if printf '%s\n' "${cp_secrets[@]}" | grep -qx "$name"; then
@@ -287,6 +290,9 @@ for pair in "${MU1_CREDENTIALS[@]}"; do
   grep -qxF "LoadCredential=${pair%%:*}:/etc/serverless-harness/credentials/${pair#*:}" "$UNIT_CP" ||
     fail "$UNIT_CP must LoadCredential=${pair%%:*} from /etc/serverless-harness/credentials/${pair#*:}"
 done
+[[ "$(grep -c '^LoadCredential=' "$UNIT_CP")" == "${#MU1_CREDENTIALS[@]}" ]] ||
+  fail "$UNIT_CP must load exactly the ${#MU1_CREDENTIALS[@]} credentials setup-vm.sh writes, found" \
+    "$(grep -c '^LoadCredential=' "$UNIT_CP")"
 if [[ "$(grep -c '^LoadCredential=' "$UNIT_SUPERVISOR")" != 1 ]] ||
   ! grep -qxF 'LoadCredential=SH_EXCHANGE_TOKEN:/etc/serverless-harness/credentials/exchange-token' "$UNIT_SUPERVISOR"; then
   fail "$UNIT_SUPERVISOR must load exactly one credential, the exchange token the control plane loads"
@@ -485,11 +491,11 @@ done
 grep -q '^#SH_SESSION_TOKEN_PUBLIC_KEYS=' "$M/supervisor.env" &&
   fail "the template's commented #SH_SESSION_TOKEN_PUBLIC_KEYS= line was left behind"
 [[ "$MU1_NEW_KEYPAIR" == 1 ]] || fail "MU1_NEW_KEYPAIR must be 1 on the run that generates the keypair"
-# No secret in any env file, and none in any recorded argv.
+# No secret in any env file. (No argv claim here: nothing ensure_mu1_secrets runs is mocked, so
+# MOCK_LOG could not record one. The values pass only through builtins and awk's environment.)
 for pair in "${MU1_CREDENTIALS[@]}"; do
   v="$(cred "$M" "${pair#*:}")"
   grep -rqF -- "$v" "$M"/*.env && fail "${pair%%:*}'s value appears in an env file"
-  grep -qF -- "$v" "$MOCK_LOG" && fail "${pair%%:*}'s value reached a recorded argv"
 done
 pass "MU1 secrets: generated once into 0600 files under a 0700 dir; public half in supervisor.env"
 
@@ -1206,7 +1212,9 @@ wire_line=$(declare -f main | grep -n 'wire_supervisor_mu1' | cut -d: -f1)
 units_line=$(declare -f main | grep -n 'install_units' | cut -d: -f1)
 token_line=$(declare -f main | grep -n 'require_relay_token' | cut -d: -f1)
 listener_line=$(declare -f main | grep -n 'ensure_exec_listener' | cut -d: -f1)
-[[ -n "$mu1_line" && -n "$wire_line" ]] || fail "main() must run ensure_mu1_secrets and wire_supervisor_mu1"
+[[ -n "$token_line" && -n "$listener_line" && -n "$mu1_line" && -n "$wire_line" && -n "$units_line" ]] ||
+  fail "main() must run require_relay_token, ensure_exec_listener, ensure_mu1_secrets," \
+    "wire_supervisor_mu1 and install_units"
 ((token_line < listener_line && listener_line < mu1_line && mu1_line < wire_line && wire_line < units_line)) ||
   fail "main() order must be require_relay_token < ensure_exec_listener < ensure_mu1_secrets <" \
     "wire_supervisor_mu1 < install_units"

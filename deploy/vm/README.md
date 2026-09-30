@@ -60,6 +60,10 @@ secrets in either env file) is now a systemd credential: move the value into its
 the re-run generates a matching pair. A hand-set `SH_CONTROL_PLANE_URL` is replaced by this VM's
 on the run that generates the pair.
 
+An upgraded `supervisor.env` keeps the old template's "MU1 caller authentication" comment block
+and its commented `#SH_EXCHANGE_TOKEN=` line. Both are inert (a comment is never read, and the
+exchange token now comes from `credentials/`) and can be deleted.
+
 ## Bring it up
 
 ```bash
@@ -130,7 +134,14 @@ therefore restarts `sh-relay.service` on every run, reloads the sandbox firewall
 `podman-restart.service` and every `--restart=always` container), and
 `try-restart`s `sh-supervisor.service` — restarted if it is running, left stopped if it is not, so
 a supervisor whose `SH_TURNS_PER_WORKER` is not set yet is never started by the script.
-`sh-control-plane.service` is restarted once configured and `try-restart`ed until then. A re-run
+`sh-control-plane.service` is restarted once configured and `try-restart`ed until then. It is
+**enabled** either way, though, so an unconfigured one is started on every **boot**: with no
+`SH_GITHUB_CLIENT_ID` it refuses to boot, `Restart=always`/`RestartSec=2` retries it, and systemd's
+default start limit (5 starts in 10 seconds) leaves it `failed` about ten seconds after boot, with
+`systemctl is-system-running` reporting `degraded`. That repeats on each boot until you set
+`SH_GITHUB_CLIENT_ID` and `SH_PUBLIC_HARNESS_URL` and re-run `setup-vm.sh`, which restarts it. (With
+the client id set but no `SH_PUBLIC_HARNESS_URL` it does boot, advertising no harness.) To opt out, `sudo systemctl disable sh-control-plane.service`; a re-run of
+`setup-vm.sh` enables it again. A re-run
 also recreates Redis and the sandbox containers (`podman run --replace`), so Redis state is lost
 (see "Reboots" below).
 
@@ -195,9 +206,10 @@ undecryptable**, so with `credential-kek` missing and records in `SH_CREDENTIAL_
 stops: restore the KEK from a backup, or empty the store deliberately.
 
 **The limit.** `LoadCredential=` keeps the secrets out of env files, out of `/proc/<pid>/environ`
-and out of every child process. It is **not** a uid boundary. All three units run as `harness`, so
-a compromise of the supervisor's uid can read the control plane's credentials. A dedicated
-control-plane user is a follow-up.
+and out of every child process's environment. It does not keep them from a child process: children
+inherit `CREDENTIALS_DIRECTORY` and the `harness` uid, so they can read the files. Nor is it a uid
+boundary. All three units run as `harness`, so a compromise of the supervisor's uid can read the
+control plane's credentials. A dedicated control-plane user is a follow-up.
 
 **The operator-key fallback** (`SH_ALLOW_OPERATOR_FALLBACK=true`, off by default) needs the
 operator's key as a fourth credential, which `setup-vm.sh` does not create. Put it in a root-only
@@ -259,9 +271,15 @@ EOF
 ```
 
 That line is a complete `mocactl` login cache (`expiresAt` in epoch **seconds**; `controlPlaneUrl`
-must equal the `--control-plane-url` you pass). Save it on the laptop as
-`~/.config/mocactl/auth.json`, mode 0600, e.g. `(umask 077 && cat > ~/.config/mocactl/auth.json)`
-and paste. Then add an inference credential with `/credentials` in `mocactl`, and run `doctor`.
+must equal the `--control-plane-url` you pass). Save it on the laptop as `mocactl/auth.json` under
+`$XDG_CONFIG_HOME` (default `~/.config`), mode 0600, creating the directory first:
+
+```bash
+mkdir -p -m 0700 "${XDG_CONFIG_HOME:-$HOME/.config}/mocactl"
+(umask 077 && cat > "${XDG_CONFIG_HOME:-$HOME/.config}/mocactl/auth.json")   # paste, then Ctrl-D
+```
+
+Then add an inference credential with `/credentials` in `mocactl`, and run `doctor`.
 
 ## Sandbox container networking and the relay token
 
@@ -456,7 +474,7 @@ Nor does it claim, for the control plane:
 - **TLS.** The control plane and the supervisor speak plain HTTP. The supported topologies are an
   SSH tunnel or a firewall allowlist ("The control plane" above), not an encrypted listener.
 - **A uid boundary.** The control plane runs as `harness`, the same uid as the supervisor and its
-  workers. `LoadCredential=` keeps its secrets out of env files and child processes, not out of
-  reach of a compromised `harness` process.
+  workers. `LoadCredential=` keeps its secrets out of env files and child processes' environments,
+  not out of reach of a compromised `harness` process.
 - **Multi-host credentials.** The file store is single-host. Vault, the multi-host store, is not
   wired by `setup-vm.sh`.

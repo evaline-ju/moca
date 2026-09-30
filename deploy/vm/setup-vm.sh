@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Bring up the P6 single-VM deployment: Redis, relay, sandbox containers, supervisor unit.
+# Bring up the P6 single-VM deployment: Redis, relay, sandbox containers, control plane and
+# supervisor units.
 # Sibling of deploy/knative/setup-kind.sh and setup-ocp.sh (spec §4.4).
 #
 # Prerequisites:
@@ -11,9 +12,12 @@
 #
 # Env overrides:
 #   SH_UNIT_DIR       Where systemd unit files are installed (default /etc/systemd/system)
-#   SH_ENV_DIR        Where the supervisor/relay env files live (default /etc/serverless-harness)
-#   SH_CRED_DIR       Where the MU1 secrets live as root-only files, loaded by the units with
-#                       LoadCredential= (default $SH_ENV_DIR/credentials)
+#   SH_ENV_DIR        Where the supervisor/relay/control-plane env files live (default
+#                       /etc/serverless-harness)
+#   SH_CRED_DIR       TEST-ONLY. Where the MU1 secrets are written as root-only files (default
+#                       $SH_ENV_DIR/credentials). The units' LoadCredential= lines hardcode
+#                       /etc/serverless-harness/credentials, so any other value on a real host yields
+#                       units that cannot start.
 #   SH_INSTALL_DIR    Where the harness checkout lives on the VM (default /opt/serverless-harness)
 #   SH_SANDBOX_COUNT     Number of sandbox containers to start (default 2)
 #   SANDBOX_IMAGE        Sandbox container image (default
@@ -86,7 +90,7 @@ require_systemd() {
   fi
 }
 
-# Both units run as User=harness/Group=harness; nothing here creates that account (uid
+# All three units run as User=harness/Group=harness; nothing here creates that account (uid
 # policy, shell, and home are an operator decision, not this script's to make). Fail loudly
 # before install_units, naming the account and the units that need it, instead of letting
 # systemd fail later with a confusing "user harness does not exist".
@@ -159,8 +163,9 @@ install_units() {
 
 # install_env_file <name> <hint> installs deploy/vm/env/<name>.env.example to
 # $SH_ENV_DIR/<name>.env, once. Never clobber an operator-edited env file: it holds the S
-# that an E8 run established (supervisor.env) or the shared token a worker was configured
-# with (relay.env) — either one, a silent overwrite on re-run would be a real outage.
+# that an E8 run established (supervisor.env), the shared token a worker was configured
+# with (relay.env) or the GitHub OAuth app's client id (control-plane.env) — any one, a silent
+# overwrite on re-run would be a real outage.
 install_env_file() {
   local name="$1" hint="${2:-}"
   if [[ ! -f "$SH_ENV_DIR/$name.env" ]]; then
