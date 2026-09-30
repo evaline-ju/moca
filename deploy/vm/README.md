@@ -26,9 +26,10 @@ the sandbox containers as podman containers alongside them. `setup-vm.sh` is the
   "Bring it up" below)
 - A system user and group named `harness` (all three units run as `User=harness`/`Group=harness`):
   e.g. `sudo useradd --system --no-create-home --shell /usr/sbin/nologin harness`
-- For logins: a GitHub OAuth app with **device flow enabled** (it is off by default). Its client id
-  goes in `control-plane.env` (`SH_GITHUB_CLIENT_ID`). Without one, the control plane is installed
-  but not started.
+- For logins: a GitHub OAuth app with **device flow enabled** (it is off by default), and outbound
+  HTTPS from the VM to `github.com` and `api.github.com`. Its client id goes in `control-plane.env`
+  (`SH_GITHUB_CLIENT_ID`), by hand or from `setup-vm.sh`'s environment (see "The GitHub OAuth app"
+  below). Without one, the control plane is installed but not started.
 - **The workspace built.** `ExecStart=node --import tsx src/main.ts` needs `tsx` (a
   devDependency) and the workspace's `link:` targets resolved, and those only exist after the
   checkout is built. Run, in order (spec §9), once per checkout:
@@ -89,6 +90,10 @@ sudoedit /etc/serverless-harness/control-plane.env   # SH_GITHUB_CLIENT_ID, SH_P
 sudoedit /etc/serverless-harness/supervisor.env      # SH_TURNS_PER_WORKER
 sudo ./deploy/vm/setup-vm.sh        # installs units, starts containers, enables the services
 ```
+
+The control-plane pair can instead be passed to either run, as
+`sudo env SH_GITHUB_CLIENT_ID=… SH_PUBLIC_HARNESS_URL=… ./deploy/vm/setup-vm.sh`. The script
+writes each one only where `control-plane.env` has none (see "The GitHub OAuth app" below).
 
 The first invocation exits non-zero with a message naming `SH_RELAY_TOKEN` and the file. That is
 the expected first-run path, not a failure to debug. The second invocation keeps the env files you
@@ -186,6 +191,51 @@ the unit's `StateDirectory`, mode `0700`), envelope-encrypted under the KEK. Ses
 same loopback Redis container as the supervisor's, so a reboot's lost Redis state (see "Reboots"
 below) loses sessions, not credentials. Vault (`SH_CREDENTIAL_STORE=vault`) is the multi-host
 option and is not wired by `setup-vm.sh`: a follow-up (#362 item 1).
+
+### The GitHub OAuth app
+
+Login is GitHub's **device flow** (`mocactl login` prints a code; the user types it at
+`https://github.com/login/device`). The control plane needs one GitHub OAuth app for it, and only
+its **client id**: the device flow treats the app as a public client, so there is no client secret
+to store.
+
+1. On GitHub: **Settings → Developer settings → OAuth Apps → New OAuth App** (or the same page under
+   an organization's settings). Any application name. Homepage URL and authorization callback URL
+   are required fields but the device flow never uses them: the repository URL does for both.
+2. On the created app's page, tick **Enable Device Flow** and **Update application**. It is **off by
+   default**, and forgetting it is the likeliest first-run failure: `mocactl login` then prints
+   `login failed: github device code failed: device_flow_disabled`.
+3. Copy the **Client ID** (`Ov23li…` for a new OAuth app). Do not generate a client secret.
+4. Give it to the control plane, in either of two ways:
+   - on the setup run, through `sudo env` (sudo drops the rest of the environment). The same goes
+     for the harness URL, since the control plane starts only once it has both:
+
+     ```bash
+     sudo env SH_GITHUB_CLIENT_ID=Ov23li... SH_PUBLIC_HARNESS_URL=http://127.0.0.1:8080 \
+       ./deploy/vm/setup-vm.sh
+     ```
+
+     `setup-vm.sh` writes each value only where `control-plane.env` has none. It never replaces one
+     you have already set, and warns if the environment disagrees with the file.
+
+   - or by hand: set `SH_GITHUB_CLIENT_ID=` in `/etc/serverless-harness/control-plane.env` and
+     re-run `setup-vm.sh` (or `sudo systemctl restart sh-control-plane.service`).
+
+The login asks for the `read:user` scope only. The subject is the **numeric** GitHub user id
+(`github:<id>`), never the login name, and GitHub's access token is used once, to read that id, and
+then dropped. To make someone an admin (`GET /v1/sessions?owner=…`), put their subject in
+`SH_ADMIN_SUBJECTS`. `GET /v1/me` with their API token shows it.
+
+**Network.** The VM must reach `https://github.com` (the device-code and token endpoints) and
+`https://api.github.com` (`/user`) outbound. Each user's browser must reach
+`https://github.com/login/device`. The laptop running `mocactl` talks only to the control plane,
+never to GitHub.
+
+**Who may log in.** Anyone with a GitHub account who can reach the control plane. The OAuth app
+does not restrict users, and the control plane has no allowlist. The SSH tunnel or firewall
+allowlist below is what limits who can reach it. Two users on this VM each see only their own
+sessions (404, not 403, for anyone else's), but on the container tier they share sandbox
+containers. See "What round one does not claim".
 
 ### Secrets
 
@@ -484,3 +534,9 @@ Nor does it claim, for the control plane:
   not out of reach of a compromised `harness` process.
 - **Multi-host credentials.** The file store is single-host. Vault, the multi-host store, is not
   wired by `setup-vm.sh`.
+- **Sandbox isolation between users.** Session _ownership_ is enforced: each user lists only their
+  own sessions, and another user's session answers 404. But on the container tier, every user's
+  turns lease the same sandbox containers (`harness/src/select-sandbox.ts` has no owner filter),
+  and the container worker ignores `workspace_key` (`remote-worker/internal/exec/runner.go`). So
+  users share `/workspace`, the Unix user and the process list. Owner binding is MI1 S5
+  (`docs/specs/2026-09-28-moca-multi-user-isolation-design.md` §9).

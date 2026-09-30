@@ -15,6 +15,9 @@ ENV_SRC_DIR="$VM_DIR/env"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 export MOCK_LOG="$TMP/mock.log"
+# setup-vm.sh seeds control-plane.env from these; one exported in the developer's shell would configure
+# every control plane below that the tests expect to stay unconfigured.
+unset SH_GITHUB_CLIENT_ID SH_PUBLIC_HARNESS_URL
 mkdir -p "$TMP/bin"
 for cmd in podman getent pnpm nft; do
   cat >"$TMP/bin/$cmd" <<'MOCK'
@@ -1178,6 +1181,59 @@ pass "configured control plane (client id AND public harness URL): restarted on 
 SH_ENV_DIR="$TMP/etc"
 rm -rf "$SE"
 
+# seed_control_plane_env: SH_GITHUB_CLIENT_ID and SH_PUBLIC_HARNESS_URL from the environment fill
+# control-plane.env's EMPTY slots (the template ships both empty), as deploy/compose/install.sh does for
+# the client id. A value already in the file is the operator's: kept, with a warning when the
+# environment disagrees. Run in subshells, so the exports never reach the rest of this file.
+SC="$(mu1_dir)"
+cpf="$SC/control-plane.env"
+seed_out="$(SH_ENV_DIR="$SC" SH_GITHUB_CLIENT_ID=Ov23liDemo SH_PUBLIC_HARNESS_URL=http://127.0.0.1:8080 \
+  seed_control_plane_env 2>&1)" || fail "seed_control_plane_env failed on the template: $seed_out"
+[[ "$(env_file_value SH_GITHUB_CLIENT_ID "$cpf")" == Ov23liDemo ]] ||
+  fail "an empty SH_GITHUB_CLIENT_ID was not filled from the environment: $(cat "$cpf")"
+[[ "$(env_file_value SH_PUBLIC_HARNESS_URL "$cpf")" == http://127.0.0.1:8080 ]] ||
+  fail "an empty SH_PUBLIC_HARNESS_URL was not filled from the environment: $(cat "$cpf")"
+(($(grep -cE '^SH_GITHUB_CLIENT_ID=' "$cpf") == 1)) || fail "seeding left a duplicate SH_GITHUB_CLIENT_ID= line"
+(SH_ENV_DIR="$SC" cp_configured) || fail "a seeded control-plane.env must count as configured"
+pass "seed_control_plane_env fills the template's empty client id and harness URL"
+
+sum_before="$(cksum <"$cpf")"
+seed_out="$(SH_ENV_DIR="$SC" SH_GITHUB_CLIENT_ID=Ov23liOther SH_PUBLIC_HARNESS_URL=http://10.0.0.5:8080 \
+  seed_control_plane_env 2>&1)" || fail "a differing environment must warn, not fail: $seed_out"
+[[ "$(cksum <"$cpf")" == "$sum_before" ]] || fail "seeding overwrote the operator's values: $(cat "$cpf")"
+grep -qE 'SH_GITHUB_CLIENT_ID.*Ov23liDemo.*Ov23liOther|SH_GITHUB_CLIENT_ID.*Ov23liOther.*Ov23liDemo' <<<"$seed_out" ||
+  fail "a differing SH_GITHUB_CLIENT_ID must be named in a warning, with both values: $seed_out"
+grep -q 'SH_PUBLIC_HARNESS_URL' <<<"$seed_out" || fail "a differing SH_PUBLIC_HARNESS_URL must be warned about: $seed_out"
+seed_out="$(SH_ENV_DIR="$SC" SH_GITHUB_CLIENT_ID=Ov23liDemo seed_control_plane_env 2>&1)"
+[[ -z "$seed_out" ]] || fail "an environment that agrees with the file must be silent: $seed_out"
+seed_out="$(SH_ENV_DIR="$SC" seed_control_plane_env 2>&1)" || fail "an unset environment must be a no-op: $seed_out"
+[[ -z "$seed_out" && "$(cksum <"$cpf")" == "$sum_before" ]] || fail "an unset environment changed something: $seed_out"
+pass "seed_control_plane_env keeps an operator's values (warning on a disagreement), is silent otherwise"
+
+# A value reaches set_env_line, which writes it as one env line: a newline in it would add a line of
+# the caller's choosing to a root-owned env file. Refused before anything is written.
+rm -rf "$SC"; SC="$(mu1_dir)"; cpf="$SC/control-plane.env"
+sum_before="$(cksum <"$cpf")"
+for bad in $'Ov23li\nSH_ALLOW_OPERATOR_FALLBACK=true' 'Ov23 li' 'Ov23li"'; do
+  rc=0; seed_out="$(SH_ENV_DIR="$SC" SH_GITHUB_CLIENT_ID="$bad" seed_control_plane_env 2>&1)" || rc=$?
+  ((rc != 0)) || fail "a client id with whitespace was accepted: $(cat "$cpf")"
+  grep -q 'SH_GITHUB_CLIENT_ID' <<<"$seed_out" || fail "the refusal must name SH_GITHUB_CLIENT_ID: $seed_out"
+done
+for bad in 'ftp://x' '127.0.0.1:8080' $'http://x\nSH_ALLOW_OPERATOR_FALLBACK=true' 'http://a b'; do
+  rc=0; seed_out="$(SH_ENV_DIR="$SC" SH_PUBLIC_HARNESS_URL="$bad" seed_control_plane_env 2>&1)" || rc=$?
+  ((rc != 0)) || fail "SH_PUBLIC_HARNESS_URL '$bad' was accepted: $(cat "$cpf")"
+  grep -q 'SH_PUBLIC_HARNESS_URL' <<<"$seed_out" || fail "the refusal must name SH_PUBLIC_HARNESS_URL: $seed_out"
+done
+[[ "$(cksum <"$cpf")" == "$sum_before" ]] || fail "a refused value changed control-plane.env: $(cat "$cpf")"
+# Both are checked before either is written: a bad URL must not leave a good client id behind.
+rc=0; SH_ENV_DIR="$SC" SH_GITHUB_CLIENT_ID=Ov23liDemo SH_PUBLIC_HARNESS_URL='nope' seed_control_plane_env \
+  >/dev/null 2>&1 || rc=$?
+if ((rc == 0)) || [[ "$(cksum <"$cpf")" != "$sum_before" ]]; then
+  fail "a bad URL next to a good client id must refuse both: $(cat "$cpf")"
+fi
+rm -rf "$SC"
+pass "seed_control_plane_env refuses a malformed value whole, before writing anything"
+
 # main() under errexit, as `sudo ./setup-vm.sh` runs it. `main || fail` would not do: bash ignores
 # set -e inside anything on the left of ||, so a failing step would be skipped, not reported. errexit
 # is suspended here only around a subshell that turns it back on; run_main <out> sets MAIN_RC.
@@ -1231,6 +1287,14 @@ wire_line=$(declare -f main | grep -n 'wire_supervisor_mu1' | cut -d: -f1)
 units_line=$(declare -f main | grep -n 'install_units' | cut -d: -f1)
 token_line=$(declare -f main | grep -n 'require_relay_token' | cut -d: -f1)
 listener_line=$(declare -f main | grep -n 'ensure_exec_listener' | cut -d: -f1)
+env_line=$(declare -f main | grep -nw 'install_env' | cut -d: -f1)
+seed_line=$(declare -f main | grep -n 'seed_control_plane_env' | cut -d: -f1)
+services_line=$(declare -f main | grep -n 'start_services' | cut -d: -f1)
+if [[ -z "$env_line" || -z "$seed_line" || -z "$services_line" ]] ||
+  ((env_line > seed_line || seed_line > token_line || seed_line > services_line)); then
+  fail "main() must seed control-plane.env after install_env and before require_relay_token (which" \
+    "stops a first run) and start_services"
+fi
 [[ -n "$token_line" && -n "$listener_line" && -n "$mu1_line" && -n "$wire_line" && -n "$units_line" ]] ||
   fail "main() must run require_relay_token, ensure_exec_listener, ensure_mu1_secrets," \
     "wire_supervisor_mu1 and install_units"

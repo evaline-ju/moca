@@ -38,6 +38,14 @@
 #   MOCA_SANDBOX_BRIDGE    Name of that network's bridge interface (default moca-sandbox0, at most
 #                          15 characters). The firewall matches sandbox traffic by the bridge it
 #                          arrives on, so it covers every address family, IPv6 link-local included.
+#
+# Control-plane settings (optional; written into control-plane.env only where it has none yet --
+# an existing value is kept, with a warning if these disagree). sudo drops the environment, so pass
+# them through it: sudo env SH_GITHUB_CLIENT_ID=Ov23li... SH_PUBLIC_HARNESS_URL=... ./deploy/vm/setup-vm.sh
+#   SH_GITHUB_CLIENT_ID    A GitHub OAuth app's client id, device flow ENABLED (deploy/vm/README.md,
+#                          "The GitHub OAuth app"). No client secret: the device flow needs none.
+#   SH_PUBLIC_HARNESS_URL  The harness as clients reach it, advertised by GET /v1/discovery; behind
+#                          the default SSH tunnel, http://127.0.0.1:8080.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -689,6 +697,39 @@ start_sandboxes() {
   done
 }
 
+# SH_GITHUB_CLIENT_ID and SH_PUBLIC_HARNESS_URL from this script's environment fill control-plane.env's
+# EMPTY slots (the template ships both empty), as deploy/compose/install.sh does for the client id, so
+# a first run can be given them instead of a sudoedit. Both, because cp_configured needs both. A value
+# already in the file is the operator's and is never replaced -- a re-run with a stale shell variable
+# must not repoint logins at another OAuth app -- so a disagreement is only warned about. Each value is
+# checked, both before either is written, because set_env_line writes it verbatim as one env line: a
+# newline in it would add a line of its own to a root-owned file every unit reads.
+seed_control_plane_env() {
+  local f="$SH_ENV_DIR/control-plane.env" key want have
+  if [[ -n "${SH_GITHUB_CLIENT_ID:-}" && ! "$SH_GITHUB_CLIENT_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "SH_GITHUB_CLIENT_ID in this script's environment is not a GitHub OAuth client id" \
+      "(letters, digits, '.', '_', '-'); nothing was written to $f" >&2
+    return 1
+  fi
+  if [[ -n "${SH_PUBLIC_HARNESS_URL:-}" && ! "$SH_PUBLIC_HARNESS_URL" =~ ^https?://[^[:space:]\"\']+$ ]]; then
+    echo "SH_PUBLIC_HARNESS_URL in this script's environment is not an http(s):// URL" \
+      "(e.g. http://127.0.0.1:8080 behind an SSH tunnel); nothing was written to $f" >&2
+    return 1
+  fi
+  for key in SH_GITHUB_CLIENT_ID SH_PUBLIC_HARNESS_URL; do
+    want="${!key:-}"
+    [[ -n "$want" ]] || continue
+    have="$(env_file_value "$key" "$f")"
+    if [[ -z "$have" ]]; then
+      log "setting $key in $f from the environment"
+      set_env_line "$f" "$key" "$want" || return 1
+    elif [[ "$have" != "$want" ]]; then
+      echo "WARNING: keeping $key=$have in $f; the environment's $key=$want is ignored." \
+        "Edit the file to change it." >&2
+    fi
+  done
+}
+
 # The control plane refuses to boot without SH_GITHUB_CLIENT_ID, and without SH_PUBLIC_HARNESS_URL it
 # boots advertising no harness, so no mocactl can find one. Both ship empty (no honest default).
 cp_configured() {
@@ -732,6 +773,8 @@ main() {
   require_build
   require_user harness
   install_env
+  # Before require_relay_token, which stops a first run: the values given to that run are kept.
+  seed_control_plane_env
   require_relay_token
   ensure_exec_token
   ensure_exec_listener
