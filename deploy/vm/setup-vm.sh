@@ -638,12 +638,29 @@ start_sandboxes() {
   done
 }
 
+# The control plane refuses to boot without SH_GITHUB_CLIENT_ID, and without SH_PUBLIC_HARNESS_URL it
+# boots advertising no harness, so no mocactl can find one. Both ship empty (no honest default).
+cp_configured() {
+  local f="$SH_ENV_DIR/control-plane.env"
+  [[ -n "$(env_file_value SH_GITHUB_CLIENT_ID "$f")" && -n "$(env_file_value SH_PUBLIC_HARNESS_URL "$f")" ]]
+}
+
 start_services() {
-  log "enabling and restarting the relay; enabling the supervisor (restarted only if running)"
+  log "enabling and restarting the relay; enabling the control plane (started once configured) and" \
+    "the supervisor (restarted only if running)"
   # `enable --now` leaves an already-running unit alone, so a re-run's env and unit changes would
   # wait for the next reboot. restart applies them now (and starts the relay on a fresh install).
   systemctl enable sh-relay.service
   systemctl restart sh-relay.service
+  # Before the supervisor, which exchanges every token-carrying turn with it. Unconfigured, it gets the
+  # supervisor's rule, for the supervisor's reason: a unit that cannot boot, under Restart=always, trips
+  # the default start limit in seconds and then refuses even `systemctl start` until reset-failed.
+  systemctl enable sh-control-plane.service
+  if cp_configured; then
+    systemctl restart sh-control-plane.service
+  else
+    systemctl try-restart sh-control-plane.service
+  fi
   # SH_TURNS_PER_WORKER ships empty on purpose (§3.8) and readConfig throws on blank, so this
   # unit is EXPECTED to fail until the operator sets it. Restart=always/RestartSec=2 with no
   # StartLimitIntervalSec=0 means systemd's default 5-starts-in-10s limit trips in about ten
@@ -666,6 +683,9 @@ main() {
   require_relay_token
   ensure_exec_token
   ensure_exec_listener
+  # Before install_units: sh-supervisor.service LoadCredential=s the exchange token this creates.
+  ensure_mu1_secrets
+  wire_supervisor_mu1
   install_units
   # Before the containers, so a `podman run` that lands between the two is already covered.
   enable_container_restart
@@ -676,6 +696,13 @@ main() {
   start_services
   log "done — relay is running. Before starting the supervisor, set SH_TURNS_PER_WORKER in" \
     "$SH_ENV_DIR/supervisor.env, then: systemctl start sh-supervisor.service"
+  if cp_configured; then
+    log "control plane: http://127.0.0.1:$(env_file_value SH_CONTROL_PLANE_PORT "$SH_ENV_DIR/control-plane.env")" \
+      "on this VM (reach it through an SSH tunnel: deploy/vm/README.md, \"The control plane\")"
+  else
+    log "control plane installed but not started: set SH_GITHUB_CLIENT_ID and SH_PUBLIC_HARNESS_URL in" \
+      "$SH_ENV_DIR/control-plane.env, then re-run this script (or: systemctl start sh-control-plane.service)"
+  fi
 }
 
 # Sourcing guard: lets the test load these functions without touching the machine.

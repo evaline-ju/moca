@@ -41,6 +41,7 @@ printf 'podman-env SANDBOX_TOKEN=%s\n' "${SANDBOX_TOKEN-<unset>}" >>"$MOCK_ENV_L
 # The exec token must never reach a sandbox by inheritance either (an `export`, a `set -a` over
 # relay.env): record whether podman's own environment carries it.
 printf 'podman-env MOCA_RELAY_EXEC_TOKEN=%s\n' "${MOCA_RELAY_EXEC_TOKEN-<unset>}" >>"$MOCK_ENV_LOG"
+printf 'podman-env SH_EXCHANGE_TOKEN=%s\n' "${SH_EXCHANGE_TOKEN-<unset>}" >>"$MOCK_ENV_LOG"
 if [[ "$1" == "network" && "$2" == "inspect" ]]; then
   if [[ "$*" == *isolate* ]]; then
     printf '%s\n' "${MOCK_PODMAN_ISOLATE-strict}"
@@ -1015,6 +1016,10 @@ fi
 # A re-run must apply what it just wrote: `enable --now` does nothing to a unit that is already
 # running, so env and unit changes would wait for the next reboot. The relay is restarted; the
 # supervisor is try-restarted -- restarted if it is running, left stopped if it is not.
+# Its own SH_ENV_DIR, with the UNCONFIGURED control-plane.env template: $TMP/etc's has a client id,
+# and set_env_line below edits the file in place.
+SE="$(mu1_dir)"
+SH_ENV_DIR="$SE"
 : >"$MOCK_LOG"
 start_services
 grep -qE '^systemctl enable sh-relay\.service$' "$MOCK_LOG" ||
@@ -1030,6 +1035,41 @@ grep -qE '^systemctl (enable --now|start|restart) sh-supervisor\.service$' "$MOC
   fail "start_services must NOT start a stopped supervisor (guaranteed crash loop while" \
     "SH_TURNS_PER_WORKER is unset): $(cat "$MOCK_LOG")"
 pass "relay restarted; supervisor enabled and try-restarted, never started"
+
+grep -qE '^systemctl enable sh-control-plane\.service$' "$MOCK_LOG" ||
+  fail "start_services must enable the control plane: $(cat "$MOCK_LOG")"
+grep -qE '^systemctl try-restart sh-control-plane\.service$' "$MOCK_LOG" ||
+  fail "an unconfigured control plane must only be try-restarted: $(cat "$MOCK_LOG")"
+grep -qE '^systemctl (enable --now|start|restart) sh-control-plane\.service$' "$MOCK_LOG" &&
+  fail "start_services started an unconfigured control plane (it refuses to boot without" \
+    "SH_GITHUB_CLIENT_ID, so Restart=always would trip the start limit): $(cat "$MOCK_LOG")"
+cp_line=$(grep -n 'sh-control-plane.service' "$MOCK_LOG" | tail -1 | cut -d: -f1)
+sup_line=$(grep -n 'try-restart sh-supervisor.service' "$MOCK_LOG" | head -1 | cut -d: -f1)
+[[ -n "$cp_line" && -n "$sup_line" ]] || fail "start_services did not touch both units: $(cat "$MOCK_LOG")"
+((cp_line < sup_line)) || fail "the control plane must come up before the supervisor is try-restarted"
+pass "unconfigured control plane: enabled and try-restarted, never started, before the supervisor"
+
+set_env_line "$SH_ENV_DIR/control-plane.env" SH_GITHUB_CLIENT_ID Iv1.demo
+: >"$MOCK_LOG"; start_services
+grep -qE '^systemctl restart sh-control-plane\.service$' "$MOCK_LOG" &&
+  fail "a control plane with a client id but no SH_PUBLIC_HARNESS_URL must not be started"
+set_env_line "$SH_ENV_DIR/control-plane.env" SH_PUBLIC_HARNESS_URL http://127.0.0.1:8080
+: >"$MOCK_LOG"; start_services
+grep -qE '^systemctl restart sh-control-plane\.service$' "$MOCK_LOG" ||
+  fail "a configured control plane must be restarted, so a re-run's env reaches it: $(cat "$MOCK_LOG")"
+pass "configured control plane (client id AND public harness URL): restarted on every run"
+SH_ENV_DIR="$TMP/etc"
+rm -rf "$SE"
+
+# main() under errexit, as `sudo ./setup-vm.sh` runs it. `main || fail` would not do: bash ignores
+# set -e inside anything on the left of ||, so a failing step would be skipped, not reported. errexit
+# is suspended here only around a subshell that turns it back on; run_main <out> sets MAIN_RC.
+run_main() {
+  set +e
+  (set -e; main) >"$1" 2>&1
+  MAIN_RC=$?
+  set -e
+}
 
 # --- main(), end to end, against mocks (last: exercises the real call order) ---------------
 # require_cmds also needs `install` and `node`, which are on the real PATH (appended after the
@@ -1053,7 +1093,9 @@ mkdir -p "$FAKE_BUILT_ROOT/packages/supervisor/node_modules" \
   "$FAKE_BUILT_ROOT/pi-fork/packages/coding-agent/dist"
 export SH_REPO_ROOT="$FAKE_BUILT_ROOT"
 : >"$MOCK_LOG"
-main_output=$(main 2>&1)
+run_main "$TMP/main.out"
+main_output=$(cat "$TMP/main.out")
+((MAIN_RC == 0)) || fail "main() failed (exit $MAIN_RC): $main_output"
 
 grep -q 'id -u' "$MOCK_LOG" || fail "main() did not check for root (require_root)"
 grep -q 'getent passwd harness' "$MOCK_LOG" || fail "main() did not check for the harness account"
@@ -1061,6 +1103,26 @@ grep -q 'getent passwd harness' "$MOCK_LOG" || fail "main() did not check for th
 [[ -f "$SH_UNIT_DIR/sh-relay.service" ]] || fail "main() did not install the relay unit"
 [[ -f "$SH_ENV_DIR/supervisor.env" ]] || fail "main() did not install supervisor.env"
 [[ -f "$SH_ENV_DIR/relay.env" ]] || fail "main() did not install relay.env"
+[[ -f "$SH_UNIT_DIR/sh-control-plane.service" ]] || fail "main() did not install the control-plane unit"
+[[ -f "$SH_ENV_DIR/control-plane.env" ]] || fail "main() did not install control-plane.env"
+for pair in "${MU1_CREDENTIALS[@]}"; do
+  [[ -s "$SH_ENV_DIR/credentials/${pair#*:}" ]] || fail "main() did not generate ${pair%%:*}"
+done
+grep -qxF 'SH_REQUIRE_AUTH=true' "$SH_ENV_DIR/supervisor.env" || fail "main() left the supervisor unauthenticated"
+mu1_line=$(declare -f main | grep -n 'ensure_mu1_secrets' | cut -d: -f1)
+wire_line=$(declare -f main | grep -n 'wire_supervisor_mu1' | cut -d: -f1)
+units_line=$(declare -f main | grep -n 'install_units' | cut -d: -f1)
+token_line=$(declare -f main | grep -n 'require_relay_token' | cut -d: -f1)
+listener_line=$(declare -f main | grep -n 'ensure_exec_listener' | cut -d: -f1)
+[[ -n "$mu1_line" && -n "$wire_line" ]] || fail "main() must run ensure_mu1_secrets and wire_supervisor_mu1"
+((token_line < listener_line && listener_line < mu1_line && mu1_line < wire_line && wire_line < units_line)) ||
+  fail "main() order must be require_relay_token < ensure_exec_listener < ensure_mu1_secrets <" \
+    "wire_supervisor_mu1 < install_units"
+# The exchange token -- which lets its holder obtain ANY user's decrypted credential from the control
+# plane -- never reaches a sandbox, by argv or by inheritance.
+xchg=$(cat "$SH_ENV_DIR/credentials/exchange-token")
+grep -F -- "$xchg" "$MOCK_LOG" | grep -q 'sh-sandbox-' && fail "a sandbox's podman run carries the exchange token"
+grep -qF -- "$xchg" "$MOCK_ENV_LOG" && fail "podman's environment carries the exchange token"
 
 reload_line=$(grep -n 'systemctl daemon-reload' "$MOCK_LOG" | head -1 | cut -d: -f1)
 redis_line=$(grep -n 'podman run .*sh-redis' "$MOCK_LOG" | head -1 | cut -d: -f1)
@@ -1100,7 +1162,35 @@ bad_e=$(grep 'podman run .*sh-sandbox-' "$MOCK_LOG" | grep -oE -- '-e [A-Za-z_][
 [[ -z "$bad_e" ]] || fail "a sandbox is given environment beyond SANDBOX_ID/RELAY_ADDR/SANDBOX_TOKEN: $bad_e"
 declare -f main | grep -q 'ensure_exec_listener' ||
   fail "main() must run ensure_exec_listener, or a re-run on a pre-MI1 VM keeps the single listener"
-pass "main() end to end: harness-account check, both units, both env files, correct ordering"
+pass "main() end to end: harness-account check, three units, three env files, MU1 secrets, correct ordering"
+
+# A re-run of setup-vm.sh leaves every secret unchanged.
+before="$(cat "$SH_ENV_DIR"/credentials/* "$SH_ENV_DIR/supervisor.env" | cksum)"
+calls_before="$(gen_calls)"
+run_main "$TMP/main-rerun.out"
+((MAIN_RC == 0)) || fail "a second main() failed (exit $MAIN_RC): $(cat "$TMP/main-rerun.out")"
+[[ "$(gen_calls)" == "$calls_before" ]] || fail "a second main() ran the key generator"
+[[ "$(cat "$SH_ENV_DIR"/credentials/* "$SH_ENV_DIR/supervisor.env" | cksum)" == "$before" ]] ||
+  fail "a second main() changed a secret or supervisor.env"
+pass "main() re-run: every secret and supervisor.env unchanged, generator not run"
+
+# An existing VM without a control plane upgrades by re-running setup-vm.sh.
+export SH_UNIT_DIR="$TMP/units3" SH_ENV_DIR="$TMP/etc3"
+mkdir -p "$SH_UNIT_DIR" "$SH_ENV_DIR"
+cp "$VM_DIR/tests/fixtures/supervisor.env.pre-cp" "$SH_ENV_DIR/supervisor.env"
+echo 'SH_TURNS_PER_WORKER=4' >>"$SH_ENV_DIR/supervisor.env"
+cp "$ENV_SRC_DIR/relay.env.example" "$SH_ENV_DIR/relay.env"
+echo 'SH_RELAY_TOKEN=upgrade-token' >>"$SH_ENV_DIR/relay.env"
+: >"$MOCK_LOG"
+run_main "$TMP/main-upgrade.out"
+((MAIN_RC == 0)) || fail "main() failed on a VM with no control plane (exit $MAIN_RC): $(cat "$TMP/main-upgrade.out")"
+[[ -f "$SH_UNIT_DIR/sh-control-plane.service" && -f "$SH_ENV_DIR/control-plane.env" ]] ||
+  fail "the upgrade did not install the control plane"
+grep -qxF 'SH_TURNS_PER_WORKER=4' "$SH_ENV_DIR/supervisor.env" || fail "the upgrade lost an operator setting"
+grep -qxF 'SH_REQUIRE_AUTH=true' "$SH_ENV_DIR/supervisor.env" || fail "the upgrade did not require auth"
+grep -qE '^systemctl try-restart sh-control-plane\.service$' "$MOCK_LOG" ||
+  fail "the upgrade must not start an unconfigured control plane: $(cat "$MOCK_LOG")"
+pass "main() upgrade: a VM with no control plane gains it, keeps its settings, requires auth"
 
 # The closing message must match the behaviour we actually land on: the supervisor is enabled
 # but not started, so the message must say to set SH_TURNS_PER_WORKER and then start it --
@@ -1109,6 +1199,9 @@ echo "$main_output" | grep -qi 'SH_TURNS_PER_WORKER' ||
   fail "closing message must tell the operator to set SH_TURNS_PER_WORKER: $main_output"
 echo "$main_output" | grep -qE 'systemctl start sh-supervisor\.service' ||
   fail "closing message must say 'systemctl start' (not restart -- it was never started): $main_output"
+# Matched with its "not started" context: install_env's own hint already names SH_GITHUB_CLIENT_ID.
+echo "$main_output" | grep -qE 'control plane.* not started.*SH_GITHUB_CLIENT_ID' ||
+  fail "closing message must say the control plane needs SH_GITHUB_CLIENT_ID: $main_output"
 pass "closing message matches the enable-without-start behaviour"
 
 echo "all setup-vm.sh tests passed"
