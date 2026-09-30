@@ -66,6 +66,9 @@ describe('runDiagnostics', () => {
     const results = await runDiagnostics(d);
     expect(results.at(-1)).toMatchObject({ id: 7, status: 'fail' });
     expect(results.at(-1)!.fix).toContain('SH_SESSION_TOKEN_PUBLIC_KEYS');
+    // On the VM path the exchange token is a systemd credential setup-vm.sh writes, never an env line.
+    expect(results.at(-1)!.fix).toContain('sudo ./deploy/vm/setup-vm.sh');
+    expect(results.at(-1)!.fix).not.toContain('SH_EXCHANGE_TOKEN');
     expect((d.cp as unknown as { calls: string[] }).calls).toContain('deleteSession');
   });
 
