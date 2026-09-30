@@ -271,6 +271,22 @@ returns. `p4-turn-smoke.sh` drives real turns through the supervisor against it:
 - the journal and the workspace directories;
 - with `--failure-paths`, a worker restart during a tool call, and a kill of the VM running one.
 
+**On a host with the control plane, add `--auth`** and leave `SH_REQUIRE_AUTH=true` alone. Every
+turn then goes through the real `mocactl run`, as two users:
+
+- It stands in for `mocactl login` the way `deploy/compose/smoke.sh` does. It mints one api token
+  per subject (`p4smoke:a`, `p4smoke:b`) with the control plane's own signing key, read from
+  `/etc/serverless-harness/credentials/`. That is why it runs as root.
+- The token is written by node straight into a `0600` `mocactl/auth.json` under the run's `--out`
+  directory. It never appears on an argv. A token lives one hour; delete the `--out` directory when
+  you are done.
+- Each subject stores a bearer inference credential, `p4-smoke-mock`, whose endpoint is the mock
+  (`SMOKE_MODEL_URL`, default `http://127.0.0.1:18099`). Its secret is the string
+  `mock-not-a-secret`.
+- Session B belongs to the **second** subject, and a check asserts that subject gets a 404 on
+  session A.
+- `--control-plane URL` defaults to `http://127.0.0.1:8090`.
+
 ```bash
 sudo systemd-run --unit p4-mock-anthropic -p DynamicUser=yes \
   /usr/bin/node /opt/serverless-harness/deploy/microvm/mock-anthropic.mjs --port 18099
@@ -280,7 +296,8 @@ sudo mkdir -p /etc/systemd/system/sh-supervisor.service.d
 printf '[Service]\nEnvironmentFile=/etc/serverless-harness/p4-smoke.env\n' |
   sudo tee /etc/systemd/system/sh-supervisor.service.d/90-p4-smoke.conf >/dev/null
 sudo systemctl daemon-reload && sudo systemctl restart sh-supervisor
-sudo deploy/microvm/p4-turn-smoke.sh --failure-paths --out /tmp/p4-smoke
+sudo deploy/microvm/p4-turn-smoke.sh --failure-paths --out /tmp/p4-smoke          # auth off
+sudo deploy/microvm/p4-turn-smoke.sh --auth --failure-paths --out /tmp/p4-smoke   # control plane
 ```
 
 The settings go in an `EnvironmentFile=`, not an `Environment=` line. systemd lets values from
@@ -296,6 +313,16 @@ model:
 sudo rm /etc/systemd/system/sh-supervisor.service.d/90-p4-smoke.conf /etc/serverless-harness/p4-smoke.env
 sudo systemctl daemon-reload && sudo systemctl restart sh-supervisor
 sudo systemctl stop p4-mock-anthropic
+```
+
+After an `--auth` run, delete each subject's mock credential while its token is still valid, then the
+run's directory, which holds the tokens:
+
+```bash
+for s in a b; do
+  sudo curl -s -X DELETE -H @/tmp/p4-smoke/xdg-$s/api.hdr http://127.0.0.1:8090/v1/credentials/p4-smoke-mock
+done
+sudo rm -rf /tmp/p4-smoke
 ```
 
 ## Workspace lifetime (#338)
@@ -343,12 +370,30 @@ Verified on 2026-09-30:
 | A new session's first turn fails without the harness fix (failure reproduced) | before the fix: `invalid-workspace-key: workspace_key "anon:<uuid>" must match …` on every tool call of turn 1                                                                                                                                                                                          |
 | Per-session workspace disk                                                    | 66 MiB actual / 2 GiB apparent                                                                                                                                                                                                                                                                          |
 
+**Then with the control plane**, on the same host, later on 2026-09-30:
+
+- `setup-vm.sh` was re-run with `SH_SANDBOX_COUNT=0` from a checkout that includes #366. It installed
+  the control plane, generated its keys and set `SH_REQUIRE_AUTH=true`.
+  - `SH_GITHUB_CLIENT_ID` was a placeholder, so **no device-flow login** was run.
+  - A second run started the control plane.
+- `setup-microvm.sh` was re-run with `MICROVM_MAX_COMMITTED_MB=8192`.
+
+| Claim                                                                        | Evidence                                                                                                                                                                                     |
+| ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Installing the control plane leaves the microVM tier attached                | `setup-microvm.sh` re-run: `moca_microvm_0 is attached to the relay`, `nothing to change`. The worker reconnected by itself within seconds of each relay restart                             |
+| The unauthenticated `/turn` is closed                                        | `POST /turn` without a token: 401                                                                                                                                                            |
+| `mocactl run` as a logged-in user runs multi-tool turns in microVMs          | `p4-turn-smoke.sh --auth --failure-paths`: 34/34 checks, `SH_REQUIRE_AUTH=true` throughout. Every turn went through `mocactl run` with a minted api token (the stand-in for `mocactl login`) |
+| The `workspace_key` is the control plane's session id                        | journal: `workspace_key="272d7e37-…"`, the id `mocactl` printed. A control-plane UUID, not an `anon:` key                                                                                    |
+| One VM per Exec, the workspace survives, a second user's session is separate | 4 Execs in 4 distinct VMs; turn 2 read turn 1's file and repo; subject b's session saw neither and has its own `/srv/workspaces/<id>`                                                        |
+| A second user cannot reach the first user's session                          | subject b: `GET /v1/sessions/<a's id>` → 404                                                                                                                                                 |
+| The failure paths still end with a named error                               | worker restart: `worker disconnected`; killed VM: `vsock-short-response: vmpool: guest closed before End: EOF`                                                                               |
+| The authenticated check can be run again                                     | a second `--auth` run: `PASS`; the credential `PUT` replaces the stored one                                                                                                                  |
+
 **Not verified:**
 
-- **Multi-user `mocactl run`** on the P4 tier (the control plane on `deploy/vm`, #366/#367). On a
-  current `deploy/vm` install, `SH_REQUIRE_AUTH=true` is the default, which closes the
-  unauthenticated `/turn` used above. To run `p4-turn-smoke.sh` there, follow "Run a turn": turn
-  auth off, run it, turn auth back on.
+- **A real `mocactl login`** (GitHub device flow) followed by `mocactl run` on this tier, and a real
+  model through a stored credential. The authenticated rows above use a minted token and the mock
+  model. The login flow itself is #367's acceptance run.
 - **Cloud Hypervisor, density and throughput (#256, #261), a host reboot, and any host other than
   the one above.**
 
@@ -362,6 +407,10 @@ Verified on 2026-09-30:
 - **A fresh VM per tool call** (#274). Destroying the VM dominates Exec latency (#307).
 - **The silent workspace reset** (#338, above).
 - **One tier per host** ("A P4-only host", above).
+- **A `setup-vm.sh` re-run forgets every session.** It recreates `sh-redis` (`--replace`, no volume;
+  `deploy/vm/setup-vm.sh`, `start_redis`). The control plane's session and ownership index goes with
+  it, so every user's sessions are gone. Their workspaces stay under `/srv/workspaces` until idle
+  reclaim, orphaned. Do not re-run the installer mid-demo.
 
 ## Uninstall
 
