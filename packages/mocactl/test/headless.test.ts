@@ -95,16 +95,33 @@ describe('cmdRun', () => {
     expect(asked).toEqual({ credentials: { inference: 'b' } });
   });
 
-  it('is blocked with a hint when there is no inference credential', async () => {
+  it('is blocked with a hint when the server refuses a session without an inference credential', async () => {
     const o = io();
-    expect(
-      await cmdRun(runtime({ cp: fakeControlPlane() }), o, {
-        prompt: 'hi',
-        options: {},
-        json: false,
-      }),
-    ).toBe(2);
+    const cp = fakeControlPlane({
+      createSession: async () => {
+        throw new ApiError(
+          'control-plane',
+          400,
+          'credential_required',
+          'no credential with consumer: inference',
+        );
+      },
+    });
+    expect(await cmdRun(runtime({ cp }), o, { prompt: 'hi', options: {}, json: false })).toBe(2);
     expect(o.stderr.join('\n')).toContain('add an inference credential to start');
+  });
+
+  it('asks the server for a session with no credential of its own, for the operator fallback (#368)', async () => {
+    const o = io();
+    const requests: unknown[] = [];
+    const cp = fakeControlPlane({
+      createSession: async (req) => {
+        requests.push(req);
+        return { sessionId: 's-new', token: 'st', expiresAt: 4_000_000_000 };
+      },
+    });
+    expect(await cmdRun(runtime({ cp }), o, { prompt: 'hi', options: {}, json: false })).toBe(0);
+    expect(requests).toEqual([{}]);
   });
 
   it('refuses to run without a valid login', async () => {

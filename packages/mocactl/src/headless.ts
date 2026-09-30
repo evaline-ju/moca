@@ -3,7 +3,11 @@ import { formatDiagnostics, runDiagnostics } from './core/diagnostics.js';
 import { describeError } from './core/messages.js';
 import { sanitizeRemote } from './core/sanitize.js';
 import { SessionManager, type ActiveSession } from './core/session-manager.js';
-import { SESSION_OPTION_FIELDS, resolveSessionOptions } from './core/session-options.js';
+import {
+  SESSION_OPTION_FIELDS,
+  fieldRefusedByServer,
+  resolveSessionOptions,
+} from './core/session-options.js';
 import { setAuth, type Runtime } from './runtime.js';
 
 export interface Io {
@@ -100,7 +104,14 @@ export async function cmdRun(rt: Runtime, io: Io, opts: RunOptions): Promise<num
         );
         return 2;
       }
-      session = await manager.create(r.request);
+      try {
+        session = await manager.create(r.request);
+      } catch (err) {
+        const refused = fieldRefusedByServer(err, SESSION_OPTION_FIELDS);
+        if (!refused) throw err;
+        io.err(`cannot start a session: ${refused.emptyHint}`);
+        return 2;
+      }
     }
   } catch (err) {
     io.err(describeError(err));

@@ -4,7 +4,9 @@ import {
   checkPreset,
   parseOptionFlags,
   resolveSessionOptions,
+  fieldRefusedByServer,
 } from '../src/core/session-options.js';
+import { ApiError } from '../src/api/errors.js';
 import { credential, fakeControlPlane } from './helpers/fakes.js';
 
 const api = (...names: string[]) =>
@@ -16,10 +18,31 @@ const api = (...names: string[]) =>
   });
 
 describe('resolveSessionOptions', () => {
-  it('is blocked when there is no inference credential', async () => {
+  it('leaves the inference credential to the server when there is none (#368: the operator fallback)', async () => {
     const r = await resolveSessionOptions(api(), SESSION_OPTION_FIELDS, {}, {});
+    expect(r).toEqual({ status: 'ready', values: {}, request: {} });
+  });
+
+  it('is blocked when the named credential does not exist and there is none at all', async () => {
+    const r = await resolveSessionOptions(
+      api(),
+      SESSION_OPTION_FIELDS,
+      { inferenceCredential: 'x' },
+      {},
+    );
     expect(r.status).toBe('blocked');
     if (r.status === 'blocked') expect(r.field.emptyHint).toMatch(/add an inference credential/);
+  });
+
+  it('maps the server refusing a credential-less session back to the field that needs one', () => {
+    const refused = new ApiError('control-plane', 400, 'credential_required', 'no credential');
+    expect(fieldRefusedByServer(refused, SESSION_OPTION_FIELDS)?.key).toBe('inferenceCredential');
+    expect(
+      fieldRefusedByServer(new ApiError('control-plane', 500, 'internal'), SESSION_OPTION_FIELDS),
+    ).toBeUndefined();
+    expect(
+      fieldRefusedByServer(new Error('credential_required'), SESSION_OPTION_FIELDS),
+    ).toBeUndefined();
   });
 
   it('picks the only inference credential silently, ignoring other consumers', async () => {
