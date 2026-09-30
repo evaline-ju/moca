@@ -172,7 +172,7 @@ export function OnboardingOverlay({
         <CredentialsOverlay
           cp={cp}
           startInAdd
-          hint="an inference credential is the key and gateway your sessions use to reach a model"
+          hint="an inference credential is the key and gateway your sessions use to reach a model: a gateway token (kind bearer, its endpoint) or an Anthropic API key (kind api-key, endpoint https://api.anthropic.com)"
           onChanged={() => void checkCredential(cp)}
           onCancel={onDone}
           onInputless={setCredentialInputless}
