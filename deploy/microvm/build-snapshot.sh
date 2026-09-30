@@ -811,8 +811,11 @@ wait_for_agent() {
 probe_capabilities() {
   local uds="$1"
   local out
+  # The first six mirror cmd/worker's `probed` list (the container tier's Hello.capabilities),
+  # so a snapshot built from the same image advertises the same set; build-snapshot.test.sh pins
+  # that parity against the Go source. node/ripgrep/curl are kept for images that carry them.
   out="$("$STAGE/guest_client" -uds "$uds" -port 1024 -timeout-s 10 \
-    -command 'for c in python3 node git ripgrep rg curl; do command -v "$c" >/dev/null 2>&1 && echo "$c"; done' \
+    -command 'for c in bash rg base64 file python3 git node ripgrep curl; do command -v "$c" >/dev/null 2>&1 && echo "$c"; done' \
     2>/dev/null || true)"
   printf '%s\n' "$out" | sed '/^$/d' | sort -u
 }
