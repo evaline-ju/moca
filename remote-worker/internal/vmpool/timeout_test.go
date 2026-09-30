@@ -71,7 +71,16 @@ func TestAnExecThatNamesNoTimeoutIsStillBounded(t *testing.T) {
 	clk.Advance(time.Duration(DefaultExecTimeoutS)*time.Second - time.Second)
 	notYet(t, done, "one second short of DefaultExecTimeoutS")
 
-	clk.Advance(2 * time.Second)
+	// Advance EXACTLY to the deadline, not past it: fakeClock.Advance fires every
+	// timer due at-or-before its target, including ones armed by callbacks while it
+	// loops. The timer fires mid-Advance with the virtual clock AT the deadline, and
+	// the unwinding Exec's destroy arms a replenish timer ReplenishDelay out — an
+	// overshoot of a second or more lets Advance fire that refill (and its chained
+	// second slot) mid-loop, minting standbys the liveCount assertion below reads as
+	// a leak ("2 VMs live, want 0" is exactly StandbyDepth phantoms; seen on CI,
+	// 2026-09-22). Advancing exactly to the deadline leaves that timer strictly in
+	// the future. Same convention as pool_test.go's timeout tests.
+	clk.Advance(time.Second)
 	if err := mustReturn(t, done, "an Exec with no timeout_s"); !errors.Is(err, ErrTimeout) {
 		t.Fatalf("err = %v, want ErrTimeout at DefaultExecTimeoutS", err)
 	}
@@ -118,7 +127,9 @@ func TestATimeoutAboveTheCeilingIsClampedToIt(t *testing.T) {
 	clk.Advance(time.Duration(MaxExecTimeoutS)*time.Second - time.Second)
 	notYet(t, done, "one second short of MaxExecTimeoutS")
 
-	clk.Advance(2 * time.Second)
+	// Exactly to the deadline — see TestAnExecThatNamesNoTimeoutIsStillBounded for
+	// why an overshoot lets Advance fire the destroyed Exec's replenish refill.
+	clk.Advance(time.Second)
 	if err := mustReturn(t, done, "an Exec above MaxExecTimeoutS"); !errors.Is(err, ErrTimeout) {
 		t.Fatalf("err = %v, want ErrTimeout at MaxExecTimeoutS", err)
 	}

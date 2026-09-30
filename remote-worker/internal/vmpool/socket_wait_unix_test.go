@@ -48,12 +48,14 @@ func TestWaitForUnixSocketReturnsWellInsideOneOldQuantum(t *testing.T) {
 	// registered from a non-test goroutine races the test's return, and waitForUnixSocket can
 	// return the instant the bind is visible, so a cleanup registered after tRunner drained
 	// the list never runs and the listener fd leaks for the life of the test binary.
+	var bindAt time.Time
 	bindErr := make(chan error, 1)
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
 		time.Sleep(2 * time.Millisecond)
 		l, err := net.Listen("unix", path)
+		bindAt = time.Now()
 		bindErr <- err
 		if err == nil {
 			defer func() { _ = l.Close() }()
@@ -61,19 +63,26 @@ func TestWaitForUnixSocketReturnsWellInsideOneOldQuantum(t *testing.T) {
 		}
 	}()
 
-	start := time.Now()
 	err := waitForUnixSocket(context.Background(), path, 5*time.Second)
-	elapsed := time.Since(start)
+	returnedAt := time.Now()
 	if be := <-bindErr; be != nil {
 		t.Fatalf("FIXTURE failed to bind %s: %v (not a failure of waitForUnixSocket)", path, be)
 	}
 	if err != nil {
 		t.Fatalf("waitForUnixSocket: %v", err)
 	}
-	// Under HALF a quantum. The old code could not beat 20 ms for any socket, however fast,
-	// so this is the property under test rather than a performance nicety.
-	if elapsed >= 10*time.Millisecond {
-		t.Fatalf("took %v for a socket that appeared in ~2ms; the fixed 20ms poll is still the floor", elapsed)
+	// Measured FROM THE BIND, not from the start of the wait: on a loaded runner the
+	// fixture's own 2 ms bind sleep can overshoot by tens of ms, and that overshoot is
+	// the runner's, not the poll's. This test's job is the END-TO-END sanity that a
+	// real bind on a real filesystem is noticed well inside its overall budget, not
+	// timed out against — the precise schedule (fine first retry, 3/2 growth, 1 ms
+	// cap, and the absence of any restored fixed-sleep floor) is pinned
+	// deterministically by TestWaitForUnixSocketBackoffGrowsAndIsCapped, which is
+	// where a regression of the #304 quantum actually fails. The bound here is
+	// therefore deliberately loose: tight bounds on wall clock pinned the CI runner,
+	// not the code (CI recorded 12.9 ms for a ~2 ms bind with the schedule intact).
+	if since := returnedAt.Sub(bindAt); since >= 100*time.Millisecond {
+		t.Fatalf("took %v after the bind to notice a listening socket — the poll did not notice a bound socket inside its budget", since)
 	}
 }
 
@@ -144,44 +153,53 @@ func TestWaitForUnixSocketDialsRatherThanStats(t *testing.T) {
 	}
 }
 
-// The backoff schedule itself, pinned by counting PROBES rather than by wall clock. Wall-clock
-// assertions provably cannot do this: deleting the growth and the cap outright (a flat 250 us
-// poll) left every other test in this file green at -count=2, and setting socketPollMax to 2s
-// left the timeout test green at -count=3. So without this, a future edit that removes the cap
-// and burns ~4,000 probes/s per waiter -- the exact cost the pacing rationale says the growth
-// exists to prevent -- would ship green.
+// The backoff schedule itself, pinned from the SLEEP REQUESTS rather than by wall clock
+// or probe count. Both alternatives provably cannot do this on CI's shared runners:
+// deleting the growth and the cap outright (a flat 250 us poll) left every other test
+// in this file green at -count=2, and setting socketPollMax to 2s left the timeout test
+// green at -count=3; meanwhile CI recorded 97 probes over a nominal ~197 with the
+// schedule INTACT, because time.Sleep on a loaded runner overshoots by more than the
+// intervals being pinned. The requested durations are the only deterministic signal:
+// the loop must ask for socketPollMin first, grow it by Num/Den, and never exceed
+// socketPollMax -- which is exactly the property the pacing rationale says the growth
+// exists to prevent (a flat fine poll burns ~4,000 probes/s per waiter).
 func TestWaitForUnixSocketBackoffGrowsAndIsCapped(t *testing.T) {
 	path := filepath.Join(sockBase(t), "never.sock")
 
-	var probes int
-	restore := socketProbe
-	socketProbe = func(string) bool { probes++; return false }
-	t.Cleanup(func() { socketProbe = restore })
+	// 64 samples is ample — the growth phase is 9 requests before the cap first
+	// applies -- and bounded, because a stubbed sleep makes the loop spin as fast
+	// as probing allows: an unbounded run would collect millions of samples in one
+	// budget. Ending the sleep early returns an error from the wait, which ends
+	// this test's business; the error's value is the cancellation path's own test.
+	var asked []time.Duration
+	restore := socketSleep
+	socketSleep = func(_ context.Context, d time.Duration) error {
+		asked = append(asked, d)
+		if len(asked) < 64 {
+			return nil
+		}
+		return context.Canceled
+	}
+	t.Cleanup(func() { socketSleep = restore })
 
-	const budget = 200 * time.Millisecond
-	if err := waitForUnixSocket(context.Background(), path, budget); err == nil {
+	// The probe never answers, which is what drives the loop to keep sleeping.
+	restoreProbe := socketProbe
+	socketProbe = func(string) bool { return false }
+	t.Cleanup(func() { socketProbe = restoreProbe })
+
+	if err := waitForUnixSocket(context.Background(), path, time.Second); err == nil {
 		t.Fatal("waitForUnixSocket succeeded against a probe that never answers")
 	}
-
-	// The schedule: 8 growing sleeps cover the first 12.31 ms in 9 probes, then socketPollMax
-	// governs. Over 200 ms that is 9 + (200-12.31)/1 ~= 197 probes.
-	//
-	// The bounds are what discriminate, so they are stated as the failures they catch:
-	//   - growth removed (flat socketPollMin of 250 us) -> ~800 probes, above the upper bound;
-	//   - cap raised to 5 ms -> ~47 probes, below the lower bound;
-	//   - cap removed entirely -> growth runs away, ~12 probes, far below.
-	const lo, hi = 120, 400
-	if probes < lo || probes > hi {
-		t.Fatalf("%d probes over %v; want %d..%d for socketPollMin=%v growing %d/%d to a %v cap. "+
-			"Far more means the growth is gone (a flat fine poll); far fewer means the cap is coarser "+
-			"than %v or absent.",
-			probes, budget, lo, hi, socketPollMin, socketPollGrowthNum, socketPollGrowthDen,
-			socketPollMax, socketPollMax)
+	if len(asked) < 10 {
+		t.Fatalf("only %d sleep requests collected; the loop exited before the schedule could be pinned", len(asked))
 	}
 
-	// And the FIRST retry must stay fine, which is the property the measured distribution
-	// actually cares about: a socket binding inside the first millisecond must not wait a
-	// coarse interval for its second look.
+	// The FIRST retry must stay fine, which is the property the measured distribution
+	// actually cares about: a socket binding inside the first millisecond must not wait
+	// a coarse interval for its second look.
+	if asked[0] != socketPollMin {
+		t.Fatalf("first sleep request = %v, want socketPollMin = %v", asked[0], socketPollMin)
+	}
 	if socketPollMin > 500*time.Microsecond {
 		t.Fatalf("socketPollMin = %v: the first retry is no longer fine-grained", socketPollMin)
 	}
@@ -189,5 +207,33 @@ func TestWaitForUnixSocketBackoffGrowsAndIsCapped(t *testing.T) {
 		t.Fatalf("socketPollMax = %v: coarser than this re-inflates every sockwait measurement "+
 			"by up to the cap, which is what made the 5 ms version read as a continuous distribution",
 			socketPollMax)
+	}
+	// Every request below the plateau is the previous grown by Num/Den, or the cap
+	// itself — the same integer arithmetic the loop uses. A flat fine poll (growth
+	// removed) fails on the second request; a runaway growth fails the bound below.
+	capped := false
+	for i, d := range asked {
+		if d > socketPollMax {
+			t.Fatalf("sleep request %d = %v, above the socketPollMax = %v cap", i, d, socketPollMax)
+		}
+		if d == socketPollMax {
+			capped = true
+		}
+		if i == 0 {
+			continue
+		}
+		if d == socketPollMax && asked[i-1] == socketPollMax {
+			break // the plateau; nothing further to pin
+		}
+		if want := min(asked[i-1]*socketPollGrowthNum/socketPollGrowthDen, socketPollMax); d != want {
+			t.Fatalf("sleep request %d = %v, want %v (previous %v grown %d/%d, capped at %v)",
+				i, d, want, asked[i-1], socketPollGrowthNum, socketPollGrowthDen, socketPollMax)
+		}
+	}
+	// And the cap must actually be reached, not merely obeyed: a growth that stalls
+	// below it would leave the loop fine-polling forever.
+	if !capped {
+		t.Fatalf("the schedule never reached socketPollMax = %v; requests were %v",
+			socketPollMax, asked)
 	}
 }
