@@ -96,8 +96,15 @@ FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
 # operations cost ~470ms; without git in the sandbox, an E8 tool call can only be a ~0ms no-op, so
 # the hands tier is exercised structurally but carries no load and the measured duty cycle describes
 # a cheaper workload than the basis it is compared against.
+#
+# curl-minimal and ca-certificates are here for the sandbox research turn (#368): the agent's bash
+# tool fetches live pages with `curl -o` and clones over HTTPS with git, and both need the CA bundle.
+# ubi-minimal already ships both (verified 2026-09-30: curl-minimal-7.76.1, ca-certificates-2025.2.80),
+# so this adds no bytes to the image; it turns an inheritance into a guarantee. It is curl-MINIMAL
+# because the full `curl` package conflicts with it on UBI 9, and -minimal speaks HTTP(S), which is
+# all the research turn needs. curl is NOT in `probed`: it is not an advertised capability.
 # hadolint ignore=DL3041
-RUN microdnf install -y --nodocs bash coreutils-single findutils file git python3 \
+RUN microdnf install -y --nodocs bash coreutils-single findutils file git python3 curl-minimal ca-certificates \
     && microdnf clean all
 COPY --from=build /out/remote-worker /usr/local/bin/remote-worker
 COPY --from=rg /usr/local/bin/rg /usr/local/bin/rg
@@ -119,6 +126,13 @@ COPY --from=rg /usr/local/bin/rg /usr/local/bin/rg
 # before this one set it.
 RUN install -d -o 1001 -g 0 -m 775 /workspace
 WORKDIR /workspace
+# HOME is set explicitly because uid 1001 has no passwd entry, and what a runtime then picks differs:
+# podman uses the WORKDIR (so dotfiles land in the shared /workspace, where Glob/Grep's
+# `rg --hidden` walks them), Docker and containerd use / (unwritable, so `git config --global` fails).
+# A dedicated directory, created exactly like /workspace so any gid-0 uid under nonroot-v2 can write
+# it, rather than a passwd entry that names one fixed uid (#368).
+RUN install -d -o 1001 -g 0 -m 775 /home/sandbox
+ENV HOME=/home/sandbox
 # Matches the nonroot-v2 SCC deploy-incluster.sh applies.
 USER 1001
 ENTRYPOINT ["/usr/local/bin/remote-worker"]
