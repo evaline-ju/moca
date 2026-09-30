@@ -234,7 +234,15 @@ export async function acquireTurnSandbox(
 }
 
 /**
- * What rides in `Authorization: Bearer …` upstream — TAGGED, because the same field carries two
+ * Which header a caller's credential travels in (#368), chosen by the control plane from the
+ * credential's binding. A gateway reads `Authorization: Bearer`; api.anthropic.com reads an API key
+ * only from `x-api-key`. Absent means `authorization`: what an older control plane sends, and what
+ * placeholder mode always uses (the injector picks the upstream header there).
+ */
+export type InferenceAuthHeader = 'authorization' | 'x-api-key';
+
+/**
+ * The caller's credential as it rides upstream — TAGGED, because the same field carries two
  * incompatible things (MU1 spec §3.6):
  *
  *   placeholder — an inert, subject-derived stand-in; RC1's `static-inject` rewrites it to the real
@@ -245,15 +253,9 @@ export async function acquireTurnSandbox(
  * A bare string would make the two indistinguishable, and both failure directions are silent: a
  * placeholder-mode deployment with a misconfigured injector sends the placeholder upstream and gets an
  * opaque auth error, while a direct-mode deployment that later grows an injector has its REAL key
- * rewritten. The tag makes the mode assertable rather than inferred.
+ * rewritten. The tag makes the mode assertable rather than inferred. `header` is which of the two
+ * headers it goes in (see InferenceAuthHeader).
  */
-/**
- * Which header a caller's credential travels in (#368), chosen by the control plane from the
- * credential's binding. A gateway reads `Authorization: Bearer`; api.anthropic.com reads an API key
- * only from `x-api-key`. Absent means `authorization`, which is every credential stored before #368.
- */
-export type InferenceAuthHeader = 'authorization' | 'x-api-key';
-
 export type UpstreamCredential =
   | { mode: 'placeholder'; value: string; header?: InferenceAuthHeader }
   | { mode: 'direct'; value: string; header?: InferenceAuthHeader };

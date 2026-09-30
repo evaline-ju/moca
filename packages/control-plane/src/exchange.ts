@@ -24,10 +24,12 @@ export interface ExchangeResponse {
   sessionId: string;
   subject: string;
   /**
-   * The header the data plane sends the credential in (#368). Present ONLY when it is not the
-   * default: absent means `Authorization: Bearer`, which is every credential stored before #368 and
-   * the wire shape an older data plane expects. Under MI1 S2 the grant carries the binding to
-   * moca-egress instead, and this names where the harness puts the grant placeholder.
+   * The header the data plane sends the credential in (#368), from its binding. Present ONLY in
+   * direct mode and only when it is not the default: absent means `Authorization: Bearer`, the wire
+   * shape an older data plane expects. An `api-key` kind (default binding `X-API-Key`) now goes as
+   * x-api-key in direct mode; before #368 every inference credential went as Bearer. In placeholder
+   * mode it is always absent: the injector picks the upstream header. Under MI1 S2 the grant carries
+   * the binding to moca-egress instead.
    */
   authHeader?: Exclude<InferenceAuthHeader, 'authorization'>;
 }
@@ -157,25 +159,30 @@ export async function exchangeCredential(
   // it outright (spec §3.6).
   const mode: CredentialMode = deps.config.injectorConfigured ? 'placeholder' : 'direct';
 
-  // PUT refuses Bearer to an api.anthropic.com ENDPOINT, but cannot see the deployment default the
-  // endpoint may resolve to here. Bearer there always 401s (it reads API keys from x-api-key only).
-  if (authHeader === 'authorization' && URL.parse(baseUrl)?.hostname === 'api.anthropic.com') {
-    throw new CpError(
-      'credential_required',
-      `credential '${credentialName}' is a Bearer token, but its endpoint resolves to ` +
-        "api.anthropic.com, which reads API keys from x-api-key: store the key with kind 'api-key'",
-      rec.sessionId,
-    );
-  }
-  if (mode === 'placeholder' && authHeader === 'x-api-key') {
-    // The injector rewrites `Bearer <placeholder>` only (RC1/P5), so a placeholder in x-api-key would
-    // reach upstream unrewritten: an opaque 401. Refused until MI1 S2's grants honour the binding.
-    throw new CpError(
-      'credential_required',
-      `credential '${credentialName}' is sent as x-api-key, which this deployment's credential ` +
-        'injector cannot rewrite; use a gateway token (kind bearer) here',
-      rec.sessionId,
-    );
+  // In DIRECT mode the harness sends the secret itself, in the header its binding names, so the
+  // header and the endpoint it resolves to must agree. PUT checks the credential's own endpoint but
+  // cannot see the deployment default it may resolve to here. In placeholder mode the injector, not
+  // the harness, picks the upstream header (AB1's `inject_header`), so none of this applies (#368).
+  if (mode === 'direct') {
+    const host = URL.parse(baseUrl)?.hostname;
+    if (authHeader === 'authorization' && host === 'api.anthropic.com') {
+      // Bearer there always 401s: it reads API keys from x-api-key only.
+      throw new CpError(
+        'credential_required',
+        `credential '${credentialName}' is a Bearer token, but its endpoint resolves to ` +
+          "api.anthropic.com, which reads API keys from x-api-key: store the key with kind 'api-key'",
+        rec.sessionId,
+      );
+    }
+    if (secretValue.startsWith('sk-ant-api') && host !== 'api.anthropic.com') {
+      // A raw Anthropic key aimed anywhere else is a misdirected secret (spec §6.2) and a 401 there.
+      throw new CpError(
+        'credential_required',
+        `credential '${credentialName}' is an Anthropic API key, but its endpoint resolves to ` +
+          `${host ?? 'an unparseable URL'}: set its endpoint to https://api.anthropic.com`,
+        rec.sessionId,
+      );
+    }
   }
 
   await deps.index.audit({
@@ -191,6 +198,8 @@ export async function exchangeCredential(
     anthropicBaseUrl: baseUrl,
     sessionId: rec.sessionId,
     subject: rec.owner,
-    ...(authHeader === 'x-api-key' ? { authHeader } : {}),
+    // Direct mode only: in placeholder mode the harness sends `Bearer <placeholder>` as it always did,
+    // and the injector decides the upstream header.
+    ...(mode === 'direct' && authHeader === 'x-api-key' ? { authHeader } : {}),
   };
 }

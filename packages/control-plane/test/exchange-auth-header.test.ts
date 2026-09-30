@@ -40,12 +40,39 @@ describe('exchangeCredential: authHeader', () => {
     expect(res.anthropicBaseUrl).toBe('https://api.anthropic.com');
   });
 
-  it('refuses an x-api-key credential in placeholder mode rather than sending an unrewritten placeholder', async () => {
-    // Review Focus 4: the injector rewrites only `Bearer <placeholder>` (RC1/P5).
+  it('keeps placeholder mode on Bearer <placeholder> whatever the binding: the injector picks the upstream header', async () => {
+    // Final review, Important 1: the harness never holds the secret in placeholder mode, so the
+    // harness-to-injector header carries no meaning, and AB1's injector already sets its own
+    // upstream header (ab1-deployment.yaml inject_header). Pre-#368 this credential sent
+    // `Bearer <placeholder>`; it still does.
     const inj = makeDeps({ config: { exchangeToken: 'shared-abc', injectorConfigured: true } }); // notsecret
     await seedCredential(inj, 'github:1234', 'my-anthropic', anthropicKey);
-    const token = await sessionToken(inj);
-    expect(await codeOf(() => exchangeCredential(token, inj))).toBe('credential_required');
+    const res = await exchangeCredential(await sessionToken(inj), inj);
+    expect(res.mode).toBe('placeholder');
+    expect(res.anthropicAuthToken).toBe('sh-placeholder-github:1234');
+    expect(res).not.toHaveProperty('authHeader');
+  });
+
+  it('refuses a raw Anthropic key whose resolved endpoint is not api.anthropic.com', async () => {
+    // Final review, Important 2: no endpoint on the credential and a gateway default would send the
+    // user's Anthropic key to a host they never named, and 401 there.
+    const gw = makeDeps({
+      config: { exchangeToken: 'shared-abc', defaultInferenceEndpoint: 'https://litellm.internal' }, // notsecret
+    });
+    await seedCredential(gw, 'github:1234', 'my-anthropic', {
+      ...anthropicKey,
+      endpoint: undefined,
+    });
+    const token = await sessionToken(gw);
+    let message = '';
+    try {
+      await exchangeCredential(token, gw);
+    } catch (e) {
+      message = (e as Error).message;
+      expect((e as { code: string }).code).toBe('credential_required');
+    }
+    expect(message).toContain('https://api.anthropic.com');
+    expect(message).not.toContain(RAW_KEY);
   });
 
   it('refuses a stored binding the inference path cannot send, never falling back to Bearer', async () => {
