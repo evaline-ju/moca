@@ -174,29 +174,37 @@ check "b1's 'did not see A's file' is a FAIL, not a vacuous ok" \
 check "a1's 'guest kernel is not the host's' is a FAIL, not a vacuous ok" \
   "$(grep -c "FAIL: a1 guest kernel is not the host's" "$TMP/out2/SUMMARY")" "1"
 
-echo "== --auth: two minted subjects drive mocactl run"
-rm -rf "$STATE"; : >"$MOCK_LOG"
-mkdir -p "$TMP/cred"
-(cd "$DIR/../../packages/control-plane" && node --import tsx src/genkeys.ts) |
-  sed -n 's/^SH_SESSION_TOKEN_PRIVATE_KEY=//p' >"$TMP/cred/session-token-private-key"
-check "a signing key was generated for the test" \
-  "$([ -s "$TMP/cred/session-token-private-key" ] && echo yes || echo no)" "yes"
-MOCA_CRED_DIR="$TMP/cred" MOCACTL=mocactl bash "$SCRIPT" --auth --failure-paths --out "$TMP/out3" \
-  >"$TMP/run3.log" 2>&1
-rc=$?
-check "exit 0" "$rc" "0"
-[ "$rc" = 0 ] || sed -n '/FAIL/p' "$TMP/run3.log"
-check "session B was subject b's" "$(grep -c 'ok: subject b cannot read subject a' "$TMP/out3/SUMMARY")" "1"
-check "each subject stored the mock credential" "$(grep -c '^credential-put .*/v1/credentials/p4-smoke-mock$' "$MOCK_LOG")" "2"
-check "every turn went through mocactl" "$(grep -c '^mocactl run ' "$MOCK_LOG")" "5"
-check "no api token on any argv" "$(grep -c 'eyJ' "$MOCK_LOG")" "0"
-check "auth.json is 0600" "$(node -e 'process.stdout.write((require("fs").statSync(process.argv[1]).mode & 0o777).toString(8))' "$TMP/out3/xdg-a/mocactl/auth.json")" "600"
+# --auth mints with the control plane's real signer (src/token.ts), which needs the workspace's tsx.
+# CI's deploy-scripts job runs without `pnpm install`, so there it skips; the `check` job, which has
+# the dependencies, runs this suite with P4_SMOKE_REQUIRE_AUTH=1, where a skip is a failure.
+if [ -e "$DIR/../../packages/control-plane/node_modules/tsx" ]; then
+  echo "== --auth: two minted subjects drive mocactl run"
+  rm -rf "$STATE"; : >"$MOCK_LOG"
+  mkdir -p "$TMP/cred"
+  (cd "$DIR/../../packages/control-plane" && node --import tsx src/genkeys.ts) |
+    sed -n 's/^SH_SESSION_TOKEN_PRIVATE_KEY=//p' >"$TMP/cred/session-token-private-key"
+  check "a signing key was generated for the test" \
+    "$([ -s "$TMP/cred/session-token-private-key" ] && echo yes || echo no)" "yes"
+  MOCA_CRED_DIR="$TMP/cred" MOCACTL=mocactl bash "$SCRIPT" --auth --failure-paths --out "$TMP/out3" \
+    >"$TMP/run3.log" 2>&1
+  rc=$?
+  check "exit 0" "$rc" "0"
+  [ "$rc" = 0 ] || sed -n '/FAIL/p' "$TMP/run3.log"
+  check "session B was subject b's" "$(grep -c 'ok: subject b cannot read subject a' "$TMP/out3/SUMMARY")" "1"
+  check "each subject stored the mock credential" "$(grep -c '^credential-put .*/v1/credentials/p4-smoke-mock$' "$MOCK_LOG")" "2"
+  check "every turn went through mocactl" "$(grep -c '^mocactl run ' "$MOCK_LOG")" "5"
+  check "no api token on any argv" "$(grep -c 'eyJ' "$MOCK_LOG")" "0"
+  check "auth.json is 0600" "$(node -e 'process.stdout.write((require("fs").statSync(process.argv[1]).mode & 0o777).toString(8))' "$TMP/out3/xdg-a/mocactl/auth.json")" "600"
 
-echo "== --auth without a readable signing key fails at the mint, by name"
-rm -rf "$STATE"
-MOCA_CRED_DIR="$TMP/nowhere" MOCACTL=mocactl bash "$SCRIPT" --auth --out "$TMP/out4" >"$TMP/run4.log" 2>&1
-check "exit non-zero" "$([ $? -ne 0 ] && echo yes || echo no)" "yes"
-check "the mint failure is named" "$(grep -c "FAIL: minted subject a's api token" "$TMP/out4/SUMMARY")" "1"
-
+  echo "== --auth without a readable signing key fails at the mint, by name"
+  rm -rf "$STATE"
+  MOCA_CRED_DIR="$TMP/nowhere" MOCACTL=mocactl bash "$SCRIPT" --auth --out "$TMP/out4" >"$TMP/run4.log" 2>&1
+  check "exit non-zero" "$([ $? -ne 0 ] && echo yes || echo no)" "yes"
+  check "the mint failure is named" "$(grep -c "FAIL: minted subject a's api token" "$TMP/out4/SUMMARY")" "1"
+elif [ "${P4_SMOKE_REQUIRE_AUTH:-}" = 1 ]; then
+  check "tsx is installed for the --auth block (P4_SMOKE_REQUIRE_AUTH=1)" "no" "yes"
+else
+  echo "== --auth: SKIP (no tsx in packages/control-plane: run \`pnpm install\`; CI runs it in \`check\`)"
+fi
 if [ "$fails" -eq 0 ]; then echo "PASS"; else echo "FAIL ($fails)"; fi
 exit "$fails"
