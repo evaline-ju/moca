@@ -11,6 +11,12 @@ the sandbox containers as podman containers alongside them. `setup-vm.sh` is the
   backend that enforces `isolate=strict`. `setup-vm.sh` refuses a podman that rejects the option,
   but cannot detect one that stores it without enforcing it. Isolation was verified live on
   netavark 1.17.2.
+  - Some distributions package no podman; Amazon Linux 2023 is one. A static build such as
+    [podman-static](https://github.com/mgoltzsche/podman-static) installs under `/usr/local`, and
+    `sudo`'s `secure_path` there drops `/usr/local/bin`. `setup-vm.sh` then stops with
+    "missing required commands: podman" and names the fix: run it as
+    `sudo env PATH="/usr/local/bin:$PATH" ./deploy/vm/setup-vm.sh`. The whole flow, the control
+    plane included, was verified on Amazon Linux 2023 (systemd 252) with podman-static 6.1.2.
 - systemd 247 or newer (`LoadCredential=`). `setup-vm.sh` checks and refuses an older one (RHEL 8
   ships 239), which would ignore the key and leave the control plane without its secrets.
 - `nft` (nftables), which loads the sandbox network's firewall

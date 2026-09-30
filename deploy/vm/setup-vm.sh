@@ -61,11 +61,24 @@ MU1_CREDENTIALS=(
 
 log() { printf '==> %s\n' "$*"; }
 
+# A tool that is installed but not on PATH is usually sudo's secure_path at work: Amazon Linux and
+# RHEL drop /usr/local/bin, which is exactly where a static podman build installs (AL2023 packages no
+# podman). Say where it is and how to re-run, instead of a bare "missing". SH_CMD_HINT_DIRS exists so
+# the test can point this at a scratch directory.
 require_cmds() {
-  local missing=()
+  local missing=() c d
   for c in "$@"; do command -v "$c" >/dev/null 2>&1 || missing+=("$c"); done
   if ((${#missing[@]})); then
     echo "missing required commands: ${missing[*]}" >&2
+    for c in "${missing[@]}"; do
+      for d in ${SH_CMD_HINT_DIRS:-/usr/local/bin /usr/local/sbin}; do
+        if [[ -x "$d/$c" ]]; then
+          echo "  $c is at $d/$c, which is not on this PATH (sudo's secure_path usually drops $d)." \
+            "Re-run as: sudo env PATH=\"$d:\$PATH\" $0" >&2
+          break
+        fi
+      done
+    done
     return 1
   fi
 }
@@ -733,8 +746,20 @@ main() {
   install_sandbox_firewall
   start_sandboxes
   start_services
-  log "done — relay is running. Before starting the supervisor, set SH_TURNS_PER_WORKER in" \
-    "$SH_ENV_DIR/supervisor.env, then: systemctl start sh-supervisor.service"
+  report_done
+}
+
+# The closing message, from what systemd reports rather than what a first run would leave: on a
+# re-run (every upgrade among them) start_services try-restarted a running supervisor, and telling
+# that operator to set SH_TURNS_PER_WORKER and start it would be wrong.
+report_done() {
+  if systemctl is-active --quiet sh-supervisor.service; then
+    log "done — relay and supervisor are running; the supervisor is running this run's configuration" \
+      "(restarted by this run)"
+  else
+    log "done — relay is running. Before starting the supervisor, set SH_TURNS_PER_WORKER in" \
+      "$SH_ENV_DIR/supervisor.env, then: systemctl start sh-supervisor.service"
+  fi
   if cp_configured; then
     log "control plane: http://127.0.0.1:$(env_file_value SH_CONTROL_PLANE_PORT "$SH_ENV_DIR/control-plane.env")" \
       "on this VM (reach it through an SSH tunnel: deploy/vm/README.md, \"The control plane\")"

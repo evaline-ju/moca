@@ -63,6 +63,8 @@ write_systemctl_mock() {
 #!/usr/bin/env bash
 printf '%s %s\n' "$(basename "$0")" "$*" >>"$MOCK_LOG"
 if [[ "${1:-}" == --version ]]; then printf '%s\n+PAM +AUDIT +SELINUX\n' "${MOCK_SYSTEMCTL_VERSION-systemd 252 (252.22-1)}"; fi
+# is-active answers "inactive" (3, as systemctl does) unless MOCK_SYSTEMCTL_ACTIVE names the unit.
+if [[ "${1:-}" == is-active ]]; then [[ " $* " == *" ${MOCK_SYSTEMCTL_ACTIVE:-<none>} "* ]] && exit 0; exit 3; fi
 MOCK
     printf '%s\n' "${1:-}"
   } >"$TMP/bin/systemctl"
@@ -920,6 +922,23 @@ if PATH="/nonexistent" require_cmds podman 2>/dev/null; then
 fi
 pass "require_cmds reports missing tools"
 
+# A tool that exists but is off sudo's PATH: secure_path (Amazon Linux, RHEL) drops /usr/local/bin,
+# where a static podman build installs. The refusal names where it is and the exact re-run command.
+HINT_DIR="$TMP/usr-local-bin"
+mkdir -p "$HINT_DIR"
+printf '#!/bin/sh\n' >"$HINT_DIR/podman"
+chmod +x "$HINT_DIR/podman"
+hint_out="$(PATH="/nonexistent" SH_CMD_HINT_DIRS="$HINT_DIR" require_cmds podman 2>&1)" &&
+  fail "require_cmds must still fail for a tool that is off PATH"
+grep -qF "podman is at $HINT_DIR/podman" <<<"$hint_out" ||
+  fail "require_cmds must say where an off-PATH tool is: $hint_out"
+grep -qF "sudo env PATH=\"$HINT_DIR:\$PATH\"" <<<"$hint_out" ||
+  fail "require_cmds must give the re-run command that puts it on PATH: $hint_out"
+nohint_out="$(PATH="/nonexistent" SH_CMD_HINT_DIRS="$HINT_DIR" require_cmds nft 2>&1)" &&
+  fail "require_cmds must fail for a tool that is nowhere"
+grep -q 'sudo env PATH' <<<"$nohint_out" && fail "no PATH hint for a tool that is nowhere: $nohint_out"
+pass "require_cmds names an off-PATH tool's location and the sudo env PATH= re-run"
+
 # --- systemd 247+: LoadCredential= (#366) ----------------------------------------------------------
 # An older systemd (RHEL 8's 239) ignores LoadCredential= with a warning: the control plane dies on a
 # missing SH_SESSION_TOKEN_PRIVATE_KEY and the supervisor runs with SH_REQUIRE_AUTH=true and no
@@ -1303,5 +1322,17 @@ echo "$main_output" | grep -qE 'systemctl start sh-supervisor\.service' ||
 echo "$main_output" | grep -qE 'control plane.* not started.*SH_GITHUB_CLIENT_ID' ||
   fail "closing message must say the control plane needs SH_GITHUB_CLIENT_ID: $main_output"
 pass "closing message matches the enable-without-start behaviour"
+
+# A re-run on a VM whose supervisor is running (every upgrade, every later run) try-restarts it: the
+# closing message must say so, not tell the operator to set SH_TURNS_PER_WORKER and start it again.
+running_out="$(MOCK_SYSTEMCTL_ACTIVE=sh-supervisor.service report_done 2>&1)"
+grep -qE 'supervisor is running' <<<"$running_out" ||
+  fail "a running supervisor must be reported as running: $running_out"
+grep -qE 'systemctl start sh-supervisor|set SH_TURNS_PER_WORKER' <<<"$running_out" &&
+  fail "a running supervisor must not be told to set SH_TURNS_PER_WORKER and start: $running_out"
+stopped_out="$(report_done 2>&1)"
+grep -qE 'set SH_TURNS_PER_WORKER.*systemctl start sh-supervisor\.service' <<<"$stopped_out" ||
+  fail "a stopped supervisor must still be told to set SH_TURNS_PER_WORKER and start it: $stopped_out"
+pass "closing message follows whether the supervisor is actually running"
 
 echo "all setup-vm.sh tests passed"
