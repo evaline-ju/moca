@@ -82,11 +82,11 @@ reach it (not the in-cluster address; behind a port-forward, the local one), e.g
 `kubectl set env deploy/sh-control-plane SH_PUBLIC_HARNESS_URL=http://localhost:18081`. A control
 plane older than `/v1/discovery` needs upgrading, or `--harness-url` in the meantime.
 
-If it reports that the harness does not trust this control plane, the harness
-must be given `SH_SESSION_TOKEN_PUBLIC_KEYS`, `SH_CONTROL_PLANE_URL`, `SH_EXCHANGE_TOKEN` and
-`SH_REQUIRE_AUTH`: on the VM/P6 path, add them to `/etc/serverless-harness/supervisor.env` (the
-`EnvironmentFile` of `deploy/vm/systemd/sh-supervisor.service` — the shipped
-`supervisor.env.example` doesn't include them yet); on the Knative path they're set in
+If it reports that the harness does not trust this control plane, the harness is missing the
+control plane's public keyset, the exchange token, or `SH_CONTROL_PLANE_URL`/`SH_REQUIRE_AUTH`. On
+the VM/P6 path, re-run `sudo ./deploy/vm/setup-vm.sh`, which installs the control plane beside the
+supervisor and wires all four (`deploy/vm/README.md`, "The control plane"). There the exchange token
+is a systemd credential, not a `supervisor.env` line. On the Knative path they are set in
 `deploy/knative/service.yaml`.
 
 Resuming a session started on another machine shows no history: the control plane has no route

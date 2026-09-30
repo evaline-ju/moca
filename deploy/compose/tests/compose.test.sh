@@ -89,10 +89,16 @@ declare -A FROM_DOTENV=(
   [sandbox-relay.MOCA_RELAY_EXEC_TOKEN]='exec-under-test'
   [supervisor.MOCA_RELAY_EXEC_TOKEN]='exec-under-test'
 )
+# Defaults compose deliberately does not share with the VM. The VM always installs a control plane, so
+# it requires auth; a compose trial may run without one (the control-plane profile is opt-in), so plain
+# /turn stays open unless .env sets SH_REQUIRE_AUTH=true.
+declare -A COMPOSE_DEFAULT=(
+  [supervisor.SH_REQUIRE_AUTH]='false'
+)
 check_mirror() {
   local svc="$1" example="$2" key val want got
   while IFS='=' read -r key val; do
-    want="${ADDRESSING[$svc.$key]:-${FROM_DOTENV[$svc.$key]:-$val}}"
+    want="${ADDRESSING[$svc.$key]:-${FROM_DOTENV[$svc.$key]:-${COMPOSE_DEFAULT[$svc.$key]:-$val}}}"
     got="$(svc_env "$svc" "$key")"
     [[ "$got" == "$want" ]] ||
       fail "$svc: $key is '$got', expected '$want' (mirroring ${example#"$REPO_ROOT/"})"

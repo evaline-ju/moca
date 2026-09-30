@@ -2,6 +2,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AMBIENT_KEY_SENTINEL } from '@moca/harness/ambient-sentinel';
+import { credentialValue } from '@moca/control-plane';
 import { assertKeysetUsable } from './turn-auth.js';
 import { readTenancy, type Tenancy } from './tenancy.js';
 
@@ -48,6 +49,9 @@ export function prepareServerProcess(env: NodeJS.ProcessEnv = process.env): {
   agentDir: string;
 } {
   assertKeysetUsable(env);
+  // Resolved here once so a both-set or empty SH_EXCHANGE_TOKEN credential fails the BOOT, not the
+  // first authenticated turn; turnAuthDepsFromEnv re-reads it per request (it is never cached).
+  credentialValue(env, 'SH_EXCHANGE_TOKEN');
   const tenancy = readTenancy(env);
   if (tenancy === 'multi') {
     if (env.SH_LOCAL_TOOLS === '1') {

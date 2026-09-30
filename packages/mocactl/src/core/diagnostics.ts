@@ -30,7 +30,7 @@ export const DIAGNOSTIC_NAMES = [
 ] as const;
 
 const MU1_HARNESS_SETTINGS =
-  'SH_SESSION_TOKEN_PUBLIC_KEYS (and, on the VM path, SH_CONTROL_PLANE_URL, SH_EXCHANGE_TOKEN and SH_REQUIRE_AUTH)';
+  'SH_SESSION_TOKEN_PUBLIC_KEYS (on the VM path, re-run `sudo ./deploy/vm/setup-vm.sh`: it installs the control plane and wires the harness)';
 
 /** Spec §6.9: dependency-ordered checks, each failure ending in one line saying what to do. */
 export async function runDiagnostics(deps: DiagnosticsDeps): Promise<CheckResult[]> {

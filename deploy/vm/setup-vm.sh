@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Bring up the P6 single-VM deployment: Redis, relay, sandbox containers, supervisor unit.
+# Bring up the P6 single-VM deployment: Redis, relay, sandbox containers, control plane and
+# supervisor units.
 # Sibling of deploy/knative/setup-kind.sh and setup-ocp.sh (spec §4.4).
 #
 # Prerequisites:
-#   - a Linux VM with systemd and podman, Node 22+
+#   - a Linux VM with systemd 247+ (LoadCredential=) and podman, Node 22+
 #   - run as a user that can sudo to root (installs units under /etc/systemd/system)
 #
 # Usage:
@@ -11,7 +12,12 @@
 #
 # Env overrides:
 #   SH_UNIT_DIR       Where systemd unit files are installed (default /etc/systemd/system)
-#   SH_ENV_DIR        Where the supervisor/relay env files live (default /etc/serverless-harness)
+#   SH_ENV_DIR        Where the supervisor/relay/control-plane env files live (default
+#                       /etc/serverless-harness)
+#   SH_CRED_DIR       TEST-ONLY. Where the MU1 secrets are written as root-only files (default
+#                       $SH_ENV_DIR/credentials). The units' LoadCredential= lines hardcode
+#                       /etc/serverless-harness/credentials, so any other value on a real host yields
+#                       units that cannot start.
 #   SH_INSTALL_DIR    Where the harness checkout lives on the VM (default /opt/serverless-harness)
 #   SH_SANDBOX_COUNT     Number of sandbox containers to start (default 2)
 #   SANDBOX_IMAGE        Sandbox container image (default
@@ -43,19 +49,61 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MOCA_SANDBOX_SUBNET="${MOCA_SANDBOX_SUBNET:-10.89.40.0/24}"
 MOCA_SANDBOX_GATEWAY="${MOCA_SANDBOX_GATEWAY:-10.89.40.1}"
 MOCA_SANDBOX_BRIDGE="${MOCA_SANDBOX_BRIDGE:-moca-sandbox0}"
+cred_dir() { printf '%s' "${SH_CRED_DIR:-$SH_ENV_DIR/credentials}"; }
+# The MU1 secrets as systemd credentials: NAME (what LoadCredential= and credentialValue call it) and
+# the file under $SH_CRED_DIR that holds it. The units hardcode the default path; setup-vm.test.sh
+# checks each pair against both units.
+MU1_CREDENTIALS=(
+  "SH_SESSION_TOKEN_PRIVATE_KEY:session-token-private-key"
+  "SH_CREDENTIAL_KEK:credential-kek"
+  "SH_EXCHANGE_TOKEN:exchange-token"
+)
 
 log() { printf '==> %s\n' "$*"; }
 
+# A tool that is installed but not on PATH is usually sudo's secure_path at work: Amazon Linux and
+# RHEL drop /usr/local/bin, which is exactly where a static podman build installs (AL2023 packages no
+# podman). Say where it is and how to re-run, instead of a bare "missing". SH_CMD_HINT_DIRS exists so
+# the test can point this at a scratch directory.
 require_cmds() {
-  local missing=()
+  local missing=() c d
   for c in "$@"; do command -v "$c" >/dev/null 2>&1 || missing+=("$c"); done
   if ((${#missing[@]})); then
     echo "missing required commands: ${missing[*]}" >&2
+    for c in "${missing[@]}"; do
+      for d in ${SH_CMD_HINT_DIRS:-/usr/local/bin /usr/local/sbin}; do
+        if [[ -x "$d/$c" ]]; then
+          echo "  $c is at $d/$c, which is not on this PATH (sudo's secure_path usually drops $d)." \
+            "Re-run as: sudo env PATH=\"$d:\$PATH\" $0" >&2
+          break
+        fi
+      done
+    done
     return 1
   fi
 }
 
-# Both units run as User=harness/Group=harness; nothing here creates that account (uid
+# require_systemd <min>: the units load the MU1 secrets with LoadCredential=, new in systemd 247. An older
+# systemd (RHEL 8 ships 239) ignores the key with a warning, so the control plane dies on a missing
+# SH_SESSION_TOKEN_PRIVATE_KEY and the supervisor requires auth with no exchange token to verify it by.
+# The version is the first integer after "systemd" on `systemctl --version`'s first line.
+require_systemd() {
+  local min="$1" line re='^systemd[[:space:]]+([0-9]+)'
+  line="$(systemctl --version 2>/dev/null | head -1)" || true
+  if [[ ! "$line" =~ $re ]]; then
+    echo "could not read systemd's version from 'systemctl --version' (first line: '$line'): the units" \
+      "need systemd $min or newer for LoadCredential=, which loads the control plane's secrets." >&2
+    return 1
+  fi
+  if ((BASH_REMATCH[1] < min)); then
+    echo "systemd ${BASH_REMATCH[1]} is too old: the units need systemd $min or newer for LoadCredential=," \
+      "which loads the control plane's secrets (an older systemd ignores it, and neither the control" \
+      "plane nor an authenticating supervisor can start)." >&2
+    return 1
+  fi
+}
+
+# All three units run as User=harness/Group=harness; nothing here creates that account (uid
 # policy, shell, and home are an operator decision, not this script's to make). Fail loudly
 # before install_units, naming the account and the units that need it, instead of letting
 # systemd fail later with a confusing "user harness does not exist".
@@ -111,8 +159,8 @@ require_build() {
 require_user() {
   local user="$1"
   if ! getent passwd "$user" >/dev/null 2>&1; then
-    echo "missing system user '$user': sh-supervisor.service and sh-relay.service both run" \
-      "as User=$user/Group=$user. Create it first, e.g.:" \
+    echo "missing system user '$user': sh-supervisor.service, sh-relay.service and" \
+      "sh-control-plane.service all run as User=$user/Group=$user. Create it first, e.g.:" \
       "sudo useradd --system --no-create-home --shell /usr/sbin/nologin $user" >&2
     return 1
   fi
@@ -122,13 +170,15 @@ install_units() {
   log "installing systemd units into $SH_UNIT_DIR"
   install -m 0644 "$SCRIPT_DIR/systemd/sh-supervisor.service" "$SH_UNIT_DIR/"
   install -m 0644 "$SCRIPT_DIR/systemd/sh-relay.service" "$SH_UNIT_DIR/"
+  install -m 0644 "$SCRIPT_DIR/systemd/sh-control-plane.service" "$SH_UNIT_DIR/"
   systemctl daemon-reload
 }
 
 # install_env_file <name> <hint> installs deploy/vm/env/<name>.env.example to
 # $SH_ENV_DIR/<name>.env, once. Never clobber an operator-edited env file: it holds the S
-# that an E8 run established (supervisor.env) or the shared token a worker was configured
-# with (relay.env) — either one, a silent overwrite on re-run would be a real outage.
+# that an E8 run established (supervisor.env), the shared token a worker was configured
+# with (relay.env) or the GitHub OAuth app's client id (control-plane.env) — any one, a silent
+# overwrite on re-run would be a real outage.
 install_env_file() {
   local name="$1" hint="${2:-}"
   if [[ ! -f "$SH_ENV_DIR/$name.env" ]]; then
@@ -143,6 +193,7 @@ install_env() {
   install -d -m 0750 "$SH_ENV_DIR"
   install_env_file supervisor "set SH_TURNS_PER_WORKER before starting"
   install_env_file relay "set SH_RELAY_TOKEN before starting"
+  install_env_file control-plane "set SH_GITHUB_CLIENT_ID and SH_PUBLIC_HARNESS_URL before starting"
 }
 
 start_redis() {
@@ -352,6 +403,165 @@ ensure_exec_listener() {
   return 1
 }
 
+# set_env_line <file> <key> <value>: exactly one KEY=value line -- in place of the first KEY= line if
+# there is one, else of the first #KEY= (a template's commented slot), else appended on its own line;
+# any later KEY= duplicate is dropped (systemd and env_file_value both honour the LAST one, so a
+# leftover would win). Rewritten through a temp file and `cat >`, keeping the file's owner and mode,
+# as ensure_exec_listener does. awk reads the value from its environment, never from an argv.
+set_env_line() {
+  local file="$1" key="$2" tmp
+  tmp="$(mktemp)" || return 1
+  SET_ENV_VALUE="$3" awk -v k="$key" '
+    FNR == NR { if ($0 ~ "^" k "=") has = 1; next }
+    !done && $0 ~ (has ? "^" k "=" : "^#" k "=") { print k "=" ENVIRON["SET_ENV_VALUE"]; done = 1; next }
+    done && $0 ~ "^" k "=" { next }
+    { print }
+    END { if (!done) print k "=" ENVIRON["SET_ENV_VALUE"] }
+  ' "$file" "$file" >"$tmp" || { rm -f "$tmp"; return 1; }
+  cat "$tmp" >"$file" || { rm -f "$tmp"; return 1; }
+  rm -f "$tmp"
+}
+
+# The checkout's own key generator (packages/control-plane/src/genkeys.ts), run by the checkout's own
+# node -- require_build has already established the workspace is built. It prints the four MU1 secrets
+# as KEY=value lines on STDOUT only, so they never enter an argv or a file this script did not choose.
+# A function so the test can stand in for it without a built workspace.
+generate_mu1() {
+  local root="${SH_REPO_ROOT:-$SCRIPT_DIR/../..}"
+  (cd "$root/packages/control-plane" && node --import tsx src/genkeys.ts)
+}
+
+# mu1_value <KEY> <extended regex>: KEY's value in $GENERATED, which must match the regex in full, so
+# a truncated or garbled line can never be written as a secret (deploy/compose/install.sh's check).
+mu1_value() {
+  local v
+  v="$( (printf '%s\n' "$GENERATED" | sed -n "s/^$1=//p") | tail -1)"
+  if ! printf '%s\n' "$v" | grep -Eqx -- "$2"; then
+    echo "the key generator (packages/control-plane/src/genkeys.ts) produced no usable $1" >&2
+    return 1
+  fi
+  printf '%s' "$v"
+}
+
+# write_secret <file> <value>: whole or not at all, root-only -- a temp file in the same directory,
+# created under umask 077, renamed into place. printf is a builtin: the value never reaches an argv.
+# Each step's failure is checked explicitly: a caller under `||` runs this with errexit suspended, and a
+# failed write (ENOSPC) followed by a successful rename would put an empty secret in place.
+write_secret() {
+  local dir tmp
+  dir="$(cred_dir)"
+  tmp="$(umask 077 && mktemp "$dir/.tmp.XXXXXX")" || return 1
+  printf '%s\n' "$2" >"$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$dir/$1" || { rm -f "$tmp"; return 1; }
+}
+
+# The MU1 secrets (#366): the control plane's ed25519 signing key and credential KEK, and the exchange
+# token both tiers present -- root-only files under cred_dir, which the units load with LoadCredential=
+# (MI1 §6.7: secrets are files, never env vars). The public half of the signing key is not a secret; it
+# goes to supervisor.env as SH_SESSION_TOKEN_PUBLIC_KEYS. Generated once, only what is missing, and
+# NEVER replaced: a new KEK makes every stored credential undecryptable, a new signing key invalidates
+# every live session token. Sets MU1_NEW_KEYPAIR=1 when this run generated the keypair (Task 6 wiring).
+ensure_mu1_secrets() {
+  local sup="$SH_ENV_DIR/supervisor.env" cp="$SH_ENV_DIR/control-plane.env" dir pair name f
+  local priv_file have_pub store missing=() priv='' pub='' kek='' xchg=''
+  dir="$(cred_dir)"
+  MU1_NEW_KEYPAIR=''
+  for pair in "${MU1_CREDENTIALS[@]}"; do
+    name="${pair%%:*}"
+    for f in "$sup" "$cp"; do
+      if grep -qE "^$name=" "$f" 2>/dev/null; then
+        echo "$f sets $name, which on this VM is a systemd credential ($dir/${pair#*:}): with both," \
+          "the unit refuses to boot. Move the value into that file (mode 0600), or delete the line to" \
+          "have a new one generated, then re-run. A control plane hosted elsewhere is not supported" \
+          "alongside the one setup-vm.sh installs." >&2
+        return 1
+      fi
+    done
+  done
+  for pair in "${MU1_CREDENTIALS[@]}"; do
+    if [[ -e "$dir/${pair#*:}" && ! -s "$dir/${pair#*:}" ]]; then
+      echo "$dir/${pair#*:} is empty. Restore ${pair%%:*} into it, or delete the file to have a new" \
+        "one generated -- for SH_CREDENTIAL_KEK that makes every stored credential undecryptable." >&2
+      return 1
+    fi
+  done
+  priv_file="$dir/session-token-private-key"
+  have_pub="$(env_file_value SH_SESSION_TOKEN_PUBLIC_KEYS "$sup")"
+  if [[ -s "$priv_file" && -z "$have_pub" ]] || [[ ! -e "$priv_file" && -n "$have_pub" ]]; then
+    echo "only one half of the control plane's signing keypair exists:" \
+      "$priv_file is $([[ -s "$priv_file" ]] && echo present || echo missing)," \
+      "SH_SESSION_TOKEN_PUBLIC_KEYS in $sup is $([[ -n "$have_pub" ]] && echo set || echo unset)." \
+      "They are one keypair: restore the missing half, or remove both to generate a fresh pair" \
+      "(every live session token then stops verifying), then re-run." >&2
+    return 1
+  fi
+  # A lost KEK is regenerated only over an empty store: the file store's records (one per subject, in
+  # SH_CREDENTIAL_DIR) are sealed under the old one, and a new KEK makes every one undecryptable.
+  store="$(env_file_value SH_CREDENTIAL_DIR "$cp")"
+  store="${store:-/var/lib/moca-control-plane}"
+  if [[ ! -e "$dir/credential-kek" && -n "$(find "$store" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+    echo "$dir/credential-kek is missing, but the credential store $store already holds records sealed" \
+      "under it: a new KEK would make every stored credential undecryptable. Restore credential-kek from" \
+      "a backup (mode 0600), or -- discarding every stored credential, deliberately -- empty $store," \
+      "then re-run." >&2
+    return 1
+  fi
+  for pair in "${MU1_CREDENTIALS[@]}"; do
+    [[ -e "$dir/${pair#*:}" ]] || missing+=("${pair%%:*}")
+  done
+  ((${#missing[@]})) || return 0
+  install -d -m 0700 "$dir"
+  log "generating ${missing[*]} into $dir (once; a re-run never replaces one)"
+  GENERATED="$(generate_mu1)" || {
+    echo "could not run the key generator: (cd packages/control-plane && node --import tsx src/genkeys.ts)" >&2
+    return 1
+  }
+  # Every value extracted and checked BEFORE the first write, so a bad run leaves nothing half-written.
+  if [[ ! -e "$priv_file" ]]; then
+    priv="$(mu1_value SH_SESSION_TOKEN_PRIVATE_KEY '[A-Za-z0-9+/]+=*')" || { GENERATED=''; return 1; }
+    pub="$(mu1_value SH_SESSION_TOKEN_PUBLIC_KEYS '[0-9a-f]{16}:[A-Za-z0-9+/]+=*')" || { GENERATED=''; return 1; }
+  fi
+  if [[ ! -e "$dir/credential-kek" ]]; then
+    kek="$(mu1_value SH_CREDENTIAL_KEK '[A-Za-z0-9+/]{43}=')" || { GENERATED=''; return 1; }
+  fi
+  if [[ ! -e "$dir/exchange-token" ]]; then
+    xchg="$(mu1_value SH_EXCHANGE_TOKEN '[0-9a-f]{64}')" || { GENERATED=''; return 1; }
+  fi
+  GENERATED=''
+  if [[ -n "$priv" ]]; then
+    write_secret session-token-private-key "$priv" || return 1
+    set_env_line "$sup" SH_SESSION_TOKEN_PUBLIC_KEYS "$pub" || return 1
+    MU1_NEW_KEYPAIR=1
+  fi
+  if [[ -n "$kek" ]]; then write_secret credential-kek "$kek" || return 1; fi
+  if [[ -n "$xchg" ]]; then write_secret exchange-token "$xchg" || return 1; fi
+}
+
+# The supervisor's side of MU1 (#366): dial this VM's control plane and require a session token.
+# Written on the run that generated the keypair -- the run that turns MU1 on, on a fresh VM or on one
+# upgraded from before the control plane -- and on no later run: after that both are the operator's,
+# and one who set SH_REQUIRE_AUTH=false (to keep driving plain `curl /turn`, say) keeps it. The only
+# later repair is a supervisor.env with no SH_CONTROL_PLANE_URL at all, which cannot exchange a single
+# token-carrying turn.
+wire_supervisor_mu1() {
+  local sup="$SH_ENV_DIR/supervisor.env" cp="$SH_ENV_DIR/control-plane.env" port url
+  port="$(env_file_value SH_CONTROL_PLANE_PORT "$cp")"
+  if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+    echo "SH_CONTROL_PLANE_PORT in $cp is '${port}', not a port number. The control plane would fall" \
+      "back to 8080 -- the supervisor's own port. Set it (the template uses 8090), then re-run." >&2
+    return 1
+  fi
+  url="http://127.0.0.1:$port"
+  if [[ -n "${MU1_NEW_KEYPAIR:-}" ]]; then
+    log "wiring $sup to this VM's control plane ($url); every turn now needs a session token"
+    set_env_line "$sup" SH_CONTROL_PLANE_URL "$url" || return 1
+    set_env_line "$sup" SH_REQUIRE_AUTH true || return 1
+  elif [[ -z "$(env_file_value SH_CONTROL_PLANE_URL "$sup")" ]]; then
+    log "adding SH_CONTROL_PLANE_URL=$url to $sup"
+    set_env_line "$sup" SH_CONTROL_PLANE_URL "$url" || return 1
+  fi
+}
+
 # Sandboxes run on their OWN podman network (MI1 §5 R8), with a fixed subnet so the firewall below
 # can name it, and with isolate=strict so it exchanges no traffic with any other podman network --
 # sh-redis runs on podman's default one. --ignore: a re-run finds it already there. If an operator
@@ -479,12 +689,29 @@ start_sandboxes() {
   done
 }
 
+# The control plane refuses to boot without SH_GITHUB_CLIENT_ID, and without SH_PUBLIC_HARNESS_URL it
+# boots advertising no harness, so no mocactl can find one. Both ship empty (no honest default).
+cp_configured() {
+  local f="$SH_ENV_DIR/control-plane.env"
+  [[ -n "$(env_file_value SH_GITHUB_CLIENT_ID "$f")" && -n "$(env_file_value SH_PUBLIC_HARNESS_URL "$f")" ]]
+}
+
 start_services() {
-  log "enabling and restarting the relay; enabling the supervisor (restarted only if running)"
+  log "enabling and restarting the relay; enabling the control plane (started once configured) and" \
+    "the supervisor (restarted only if running)"
   # `enable --now` leaves an already-running unit alone, so a re-run's env and unit changes would
   # wait for the next reboot. restart applies them now (and starts the relay on a fresh install).
   systemctl enable sh-relay.service
   systemctl restart sh-relay.service
+  # Before the supervisor, which exchanges every token-carrying turn with it. Unconfigured, it gets the
+  # supervisor's rule, for the supervisor's reason: a unit that cannot boot, under Restart=always, trips
+  # the default start limit in seconds and then refuses even `systemctl start` until reset-failed.
+  systemctl enable sh-control-plane.service
+  if cp_configured; then
+    systemctl restart sh-control-plane.service
+  else
+    systemctl try-restart sh-control-plane.service
+  fi
   # SH_TURNS_PER_WORKER ships empty on purpose (§3.8) and readConfig throws on blank, so this
   # unit is EXPECTED to fail until the operator sets it. Restart=always/RestartSec=2 with no
   # StartLimitIntervalSec=0 means systemd's default 5-starts-in-10s limit trips in about ten
@@ -500,6 +727,7 @@ start_services() {
 
 main() {
   require_cmds podman systemctl install node getent pnpm nft
+  require_systemd 247
   require_root
   require_build
   require_user harness
@@ -507,6 +735,9 @@ main() {
   require_relay_token
   ensure_exec_token
   ensure_exec_listener
+  # Before install_units: sh-supervisor.service LoadCredential=s the exchange token this creates.
+  ensure_mu1_secrets
+  wire_supervisor_mu1
   install_units
   # Before the containers, so a `podman run` that lands between the two is already covered.
   enable_container_restart
@@ -515,8 +746,27 @@ main() {
   install_sandbox_firewall
   start_sandboxes
   start_services
-  log "done — relay is running. Before starting the supervisor, set SH_TURNS_PER_WORKER in" \
-    "$SH_ENV_DIR/supervisor.env, then: systemctl start sh-supervisor.service"
+  report_done
+}
+
+# The closing message, from what systemd reports rather than what a first run would leave: on a
+# re-run (every upgrade among them) start_services try-restarted a running supervisor, and telling
+# that operator to set SH_TURNS_PER_WORKER and start it would be wrong.
+report_done() {
+  if systemctl is-active --quiet sh-supervisor.service; then
+    log "done — relay and supervisor are running; the supervisor is running this run's configuration" \
+      "(restarted by this run)"
+  else
+    log "done — relay is running. Before starting the supervisor, set SH_TURNS_PER_WORKER in" \
+      "$SH_ENV_DIR/supervisor.env, then: systemctl start sh-supervisor.service"
+  fi
+  if cp_configured; then
+    log "control plane: http://127.0.0.1:$(env_file_value SH_CONTROL_PLANE_PORT "$SH_ENV_DIR/control-plane.env")" \
+      "on this VM (reach it through an SSH tunnel: deploy/vm/README.md, \"The control plane\")"
+  else
+    log "control plane installed but not started: set SH_GITHUB_CLIENT_ID and SH_PUBLIC_HARNESS_URL in" \
+      "$SH_ENV_DIR/control-plane.env, then re-run this script (or: systemctl start sh-control-plane.service)"
+  fi
 }
 
 # Sourcing guard: lets the test load these functions without touching the machine.

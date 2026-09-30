@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
 import { buildHandler, startControlPlane } from '../src/server.js';
 import { makeDeps, seedCredential, type TestDeps } from './helpers/deps.js';
@@ -282,5 +282,35 @@ describe('error hygiene', () => {
 describe('buildHandler', () => {
   it('is usable without listening, for a caller that owns its own server', () => {
     expect(typeof buildHandler(d)).toBe('function');
+  });
+});
+
+describe('startControlPlane host', () => {
+  it('binds only the given host when one is passed (deploy/vm ships 127.0.0.1)', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const srv = startControlPlane(makeDeps(), 0, '127.0.0.1');
+      await new Promise<void>((r) => srv.once('listening', () => r()));
+      const { address, port } = srv.address() as { address: string; port: number };
+      expect(address).toBe('127.0.0.1');
+      // The logged address is the socket's own, not the configured string.
+      expect(log).toHaveBeenCalledWith(`sh-control-plane listening on 127.0.0.1:${port}`);
+      await new Promise<void>((r) => srv.close(() => r()));
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it('logs `:<port>` when no host is given, as every existing deployment has', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const srv = startControlPlane(makeDeps(), 0);
+      await new Promise<void>((r) => srv.once('listening', () => r()));
+      const { port } = srv.address() as { port: number };
+      expect(log).toHaveBeenCalledWith(`sh-control-plane listening on :${port}`);
+      await new Promise<void>((r) => srv.close(() => r()));
+    } finally {
+      log.mockRestore();
+    }
   });
 });

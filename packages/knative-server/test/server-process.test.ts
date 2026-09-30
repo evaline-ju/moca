@@ -1,8 +1,16 @@
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { AMBIENT_KEY_SENTINEL } from '@moca/harness/ambient-sentinel';
 import { isTenancyNearMiss, readTenancy } from '../src/tenancy.js';
 import { prepareServerProcess, scrubAmbientCredentials } from '../src/server-process.js';
@@ -175,6 +183,21 @@ describe('prepareServerProcess', () => {
     expect(() => prepareServerProcess({ SH_SESSION_TOKEN_PUBLIC_KEYS: 'garbage' })).toThrow(
       /SH_SESSION_TOKEN_PUBLIC_KEYS/,
     );
+  });
+
+  it('refuses at boot an exchange token set both as a systemd credential and in the env', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sh-ks-creds-'));
+    writeFileSync(join(dir, 'SH_EXCHANGE_TOKEN'), 'from-credential\n'); // notsecret
+    const env: NodeJS.ProcessEnv = { CREDENTIALS_DIRECTORY: dir, SH_EXCHANGE_TOKEN: 'stale' }; // notsecret
+    expect(() => prepareServerProcess(env)).toThrow(
+      /both in the environment and as a systemd credential/,
+    );
+  });
+
+  it('refuses at boot an empty exchange-token credential', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sh-ks-creds-'));
+    writeFileSync(join(dir, 'SH_EXCHANGE_TOKEN'), '');
+    expect(() => prepareServerProcess({ CREDENTIALS_DIRECTORY: dir })).toThrow(/is empty/);
   });
 
   it("scrubAmbientCredentials removes every credential pi's provider lookup reads (drift guard)", () => {

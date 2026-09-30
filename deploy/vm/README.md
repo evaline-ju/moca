@@ -1,8 +1,8 @@
 # Single-VM deployment (P6 process-manager runtime)
 
 Round one's target for the VM process-manager runtime (spec §4.3, §4.4, step 4): a single
-Linux VM running the supervisor and relay under systemd, with Redis and the sandbox
-containers as podman containers alongside them. `setup-vm.sh` is the sibling of
+Linux VM running the supervisor, the relay and the MU1 control plane under systemd, with Redis and
+the sandbox containers as podman containers alongside them. `setup-vm.sh` is the sibling of
 `deploy/knative/setup-kind.sh` and `deploy/knative/setup-ocp.sh`.
 
 ## Prerequisites
@@ -11,13 +11,24 @@ containers as podman containers alongside them. `setup-vm.sh` is the sibling of
   backend that enforces `isolate=strict`. `setup-vm.sh` refuses a podman that rejects the option,
   but cannot detect one that stores it without enforcing it. Isolation was verified live on
   netavark 1.17.2.
+  - Some distributions package no podman; Amazon Linux 2023 is one. A static build such as
+    [podman-static](https://github.com/mgoltzsche/podman-static) installs under `/usr/local`, and
+    `sudo`'s `secure_path` there drops `/usr/local/bin`. `setup-vm.sh` then stops with
+    "missing required commands: podman" and names the fix: run it as
+    `sudo env PATH="/usr/local/bin:$PATH" ./deploy/vm/setup-vm.sh`. The whole flow, the control
+    plane included, was verified on Amazon Linux 2023 (systemd 252) with podman-static 6.1.2.
+- systemd 247 or newer (`LoadCredential=`). `setup-vm.sh` checks and refuses an older one (RHEL 8
+  ships 239), which would ignore the key and leave the control plane without its secrets.
 - `nft` (nftables), which loads the sandbox network's firewall
 - Node.js 22+ and pnpm 9+ on the VM (the supervisor and relay run directly via
   `node --import tsx`, not containerized)
 - A user able to install systemd units under `/etc/systemd/system` and run as root (see
   "Bring it up" below)
-- A system user and group named `harness` (both units run as `User=harness`/`Group=harness`):
+- A system user and group named `harness` (all three units run as `User=harness`/`Group=harness`):
   e.g. `sudo useradd --system --no-create-home --shell /usr/sbin/nologin harness`
+- For logins: a GitHub OAuth app with **device flow enabled** (it is off by default). Its client id
+  goes in `control-plane.env` (`SH_GITHUB_CLIENT_ID`). Without one, the control plane is installed
+  but not started.
 - **The workspace built.** `ExecStart=node --import tsx src/main.ts` needs `tsx` (a
   devDependency) and the workspace's `link:` targets resolved, and those only exist after the
   checkout is built. Run, in order (spec §9), once per checkout:
@@ -40,6 +51,25 @@ sh-relay.service` never creates. `sudo ./deploy/vm/setup-vm.sh` generates it, mi
 and `supervisor.env` together to the loopback exec listener, installs the sandbox network and
 firewall, and restarts what it owns (step 3 below).
 
+Since #366 a re-run also installs the control plane. It writes `control-plane.env`, installs
+`sh-control-plane.service`, generates the MU1 secrets once into
+`/etc/serverless-harness/credentials/`, and wires `supervisor.env`: it adds the public keyset
+(`SH_SESSION_TOKEN_PUBLIC_KEYS`) and `SH_CONTROL_PLANE_URL`, and sets **`SH_REQUIRE_AUTH=true`**.
+**From then on, `/turn` without a session token is refused.** A driver that calls it bare, such as an E8 rung, needs
+`SH_REQUIRE_AUTH=false` set back in `supervisor.env`; later re-runs keep that choice.
+
+A hand-written MU1 line from the previous `mocactl` README (for a control plane hosted elsewhere)
+makes the script stop and name it. `SH_EXCHANGE_TOKEN` in `supervisor.env` (or any of the three
+secrets in either env file) is now a systemd credential: move the value into its file under
+`credentials/` (mode 0600), or delete the line to have a new one generated. A
+`SH_SESSION_TOKEN_PUBLIC_KEYS` line with no private key beside it is half a keypair: delete it, and
+the re-run generates a matching pair. A hand-set `SH_CONTROL_PLANE_URL` is replaced by this VM's
+on the run that generates the pair.
+
+An upgraded `supervisor.env` keeps the old template's "MU1 caller authentication" comment block
+and its commented `#SH_EXCHANGE_TOKEN=` line. Both are inert (a comment is never read, and the
+exchange token now comes from `credentials/`) and can be deleted.
+
 ## Bring it up
 
 ```bash
@@ -54,19 +84,25 @@ never attach — see "Sandbox container networking and the relay token" below). 
 
 ```bash
 sudo ./deploy/vm/setup-vm.sh        # writes the env files, then stops at the token check
-sudoedit /etc/serverless-harness/relay.env   # set SH_RELAY_TOKEN=<a shared secret>
+sudoedit /etc/serverless-harness/relay.env           # SH_RELAY_TOKEN=<a shared secret>
+sudoedit /etc/serverless-harness/control-plane.env   # SH_GITHUB_CLIENT_ID, SH_PUBLIC_HARNESS_URL
+sudoedit /etc/serverless-harness/supervisor.env      # SH_TURNS_PER_WORKER
 sudo ./deploy/vm/setup-vm.sh        # installs units, starts containers, enables the services
 ```
 
 The first invocation exits non-zero with a message naming `SH_RELAY_TOKEN` and the file. That is
-the expected first-run path, not a failure to debug. The second invocation keeps the env file you
-edited (`install_env` never clobbers an existing one) and continues past the check.
+the expected first-run path, not a failure to debug. The second invocation keeps the env files you
+edited (`install_env` never clobbers an existing one) and continues past the check. Only the relay
+token blocks the second run. Without the control-plane settings (for `SH_PUBLIC_HARNESS_URL`
+behind a tunnel, see "The control plane" below) the control plane is installed but not started;
+the supervisor is never started by the script, and `SH_TURNS_PER_WORKER` is what lets you start it
+(below).
 
 Across those two runs, the script does the following, in this order:
 
-1. Writes `/etc/serverless-harness/supervisor.env` and `relay.env` from their `env/*.example`
-   templates — only the first time each; an operator-edited env file is never clobbered on a
-   re-run.
+1. Writes `/etc/serverless-harness/supervisor.env`, `relay.env` and `control-plane.env` from their
+   `env/*.example` templates — only the first time each; an operator-edited env file is never
+   clobbered on a re-run.
 2. **Checks `relay.env` for a non-empty `SH_RELAY_TOKEN`, and stops here if there is none.**
    Everything below runs only once that is set — which is why a fresh VM needs the second
    invocation above.
@@ -78,19 +114,24 @@ Across those two runs, the script does the following, in this order:
    migrated together to the loopback exec listener `127.0.0.1:9444`. Any other disagreement (one
    file migrated and not the other, or two different ports) stops the script with a message naming
    both values.
-4. Installs `systemd/sh-supervisor.service` and `systemd/sh-relay.service` into
-   `/etc/systemd/system`, reloads the daemon, and enables `podman-restart.service` so the
-   containers below come back after a reboot (see "Reboots" below).
-5. Starts a Redis container on podman's **default** network (published on `127.0.0.1:6379`), which
+4. Generates the MU1 secrets, once and only those missing (see "The control plane" below). On the
+   run that generates the signing keypair, it points `supervisor.env` at this VM's control plane
+   (`SH_CONTROL_PLANE_URL`) and requires session tokens (`SH_REQUIRE_AUTH=true`).
+5. Installs `systemd/sh-supervisor.service`, `systemd/sh-relay.service` and
+   `systemd/sh-control-plane.service` into `/etc/systemd/system`, reloads the daemon, and enables
+   `podman-restart.service` so the containers below come back after a reboot (see "Reboots" below).
+6. Starts a Redis container on podman's **default** network (published on `127.0.0.1:6379`), which
    `isolate=strict` below keeps unreachable from sandboxes.
-6. Creates a dedicated `moca-sandbox` podman network (fixed subnet `10.89.40.0/24`, gateway
+7. Creates a dedicated `moca-sandbox` podman network (fixed subnet `10.89.40.0/24`, gateway
    `10.89.40.1`, `isolate=strict` so it exchanges no traffic with any other podman network) and
    installs an nftables table that confines it, then starts `SH_SANDBOX_COUNT` (default 2) sandbox
    containers on that network, wired to reach the relay and to authenticate to it. The firewall is
    in place before the first sandbox starts. See "Sandbox container networking and the relay
    token" below.
-7. Enables **and restarts** `sh-relay.service`, but only **enables** `sh-supervisor.service` — it
-   is deliberately not started yet (see below).
+8. Enables **and restarts** `sh-relay.service`. Enables `sh-control-plane.service`, and restarts it
+   once `SH_GITHUB_CLIENT_ID` and `SH_PUBLIC_HARNESS_URL` are both set in `control-plane.env`;
+   until then it is only `try-restart`ed, for the supervisor's reason below. Only **enables**
+   `sh-supervisor.service` — it is deliberately not started yet (see below).
 
 **A re-run restarts what it owns.** `systemctl enable --now` leaves an already-running unit alone,
 so env and unit changes from a re-run would otherwise wait for the next reboot. `setup-vm.sh`
@@ -98,7 +139,15 @@ therefore restarts `sh-relay.service` on every run, reloads the sandbox firewall
 (its unit is only started, never restarted: through `RequiredBy=` a restart would also restart
 `podman-restart.service` and every `--restart=always` container), and
 `try-restart`s `sh-supervisor.service` — restarted if it is running, left stopped if it is not, so
-a supervisor whose `SH_TURNS_PER_WORKER` is not set yet is never started by the script. A re-run
+a supervisor whose `SH_TURNS_PER_WORKER` is not set yet is never started by the script.
+`sh-control-plane.service` is restarted once configured and `try-restart`ed until then. It is
+**enabled** either way, though, so an unconfigured one is started on every **boot**: with no
+`SH_GITHUB_CLIENT_ID` it refuses to boot, `Restart=always`/`RestartSec=2` retries it, and systemd's
+default start limit (5 starts in 10 seconds) leaves it `failed` about ten seconds after boot, with
+`systemctl is-system-running` reporting `degraded`. That repeats on each boot until you set
+`SH_GITHUB_CLIENT_ID` and `SH_PUBLIC_HARNESS_URL` and re-run `setup-vm.sh`, which restarts it. (With
+the client id set but no `SH_PUBLIC_HARNESS_URL` it does boot, advertising no harness.) To opt out, `sudo systemctl disable sh-control-plane.service`; a re-run of
+`setup-vm.sh` enables it again. A re-run
 also recreates Redis and the sandbox containers (`podman run --replace`), so Redis state is lost
 (see "Reboots" below).
 
@@ -127,6 +176,116 @@ underlying config in `supervisor.env`, then clear the lockout and start again:
 sudo systemctl reset-failed sh-supervisor.service
 sudo systemctl start sh-supervisor.service
 ```
+
+## The control plane
+
+**What runs.** `sh-control-plane.service` runs `packages/control-plane` on `127.0.0.1:8090`
+(`SH_CONTROL_PLANE_HOST`, `SH_CONTROL_PLANE_PORT` in `control-plane.env`). Credentials use the
+**file** store (`SH_CREDENTIAL_STORE=file`) in `/var/lib/moca-control-plane` (`SH_CREDENTIAL_DIR`,
+the unit's `StateDirectory`, mode `0700`), envelope-encrypted under the KEK. Sessions live in the
+same loopback Redis container as the supervisor's, so a reboot's lost Redis state (see "Reboots"
+below) loses sessions, not credentials. Vault (`SH_CREDENTIAL_STORE=vault`) is the multi-host
+option and is not wired by `setup-vm.sh`: a follow-up (#362 item 1).
+
+### Secrets
+
+All three live in `/etc/serverless-harness/credentials/` (directory `0700`, files `0600`, owner
+root), and each unit loads its own with `LoadCredential=` under the setting's own name:
+
+| File                        | Setting                        | Loaded by                      |
+| --------------------------- | ------------------------------ | ------------------------------ |
+| `session-token-private-key` | `SH_SESSION_TOKEN_PRIVATE_KEY` | control plane                  |
+| `credential-kek`            | `SH_CREDENTIAL_KEK`            | control plane                  |
+| `exchange-token`            | `SH_EXCHANGE_TOKEN`            | control plane _and_ supervisor |
+
+The public half of the signing key is not a secret: it is the `SH_SESSION_TOKEN_PUBLIC_KEYS` line
+in `supervisor.env`. Setting any of the three as an env line as well makes the unit refuse to boot
+(and `setup-vm.sh` stops before that, naming the line).
+
+`setup-vm.sh` generates them once, with the checkout's own `packages/control-plane/src/genkeys.ts`,
+and a re-run never replaces one. It generates only a file that is missing, so rotation is by
+hand: delete the file and re-run, which restarts the running units onto the new value. The private
+key and the `SH_SESSION_TOKEN_PUBLIC_KEYS` line are one keypair: delete both, or the script stops on
+half a pair. A new keypair invalidates every live token and re-wires `supervisor.env` as on first
+install, `SH_REQUIRE_AUTH=true` included. **A new KEK makes every stored credential
+undecryptable**, so with `credential-kek` missing and records in `SH_CREDENTIAL_DIR`, the script
+stops: restore the KEK from a backup, or empty the store deliberately.
+
+**The limit.** `LoadCredential=` keeps the secrets out of env files, out of `/proc/<pid>/environ`
+and out of every child process's environment. It does not keep them from a child process: children
+inherit `CREDENTIALS_DIRECTORY` and the `harness` uid, so they can read the files. Nor is it a uid
+boundary. All three units run as `harness`, so a compromise of the supervisor's uid can read the
+control plane's credentials. A dedicated control-plane user is a follow-up.
+
+**The operator-key fallback** (`SH_ALLOW_OPERATOR_FALLBACK=true`, off by default) needs the
+operator's key as a fourth credential, which `setup-vm.sh` does not create. Put it in a root-only
+file, add a drop-in, and set `SH_ALLOW_OPERATOR_FALLBACK=true` in `control-plane.env`:
+
+```bash
+sudo install -m 0600 /dev/null /etc/serverless-harness/credentials/operator-inference-token
+sudoedit /etc/serverless-harness/credentials/operator-inference-token   # the key; mode is kept
+sudo systemctl edit sh-control-plane.service
+#   [Service]
+#   LoadCredential=SH_OPERATOR_INFERENCE_TOKEN:/etc/serverless-harness/credentials/operator-inference-token
+sudo systemctl restart sh-control-plane.service
+```
+
+### Reaching it: the supported demo topology
+
+Both the control plane and the supervisor speak **plain HTTP**; TLS termination is out of scope
+for this round. A client needs two ports: the control plane (8090) and the harness it advertises
+(`SH_PUBLIC_HARNESS_URL`, the supervisor on 8080). Two topologies are supported:
+
+- **(a) An SSH tunnel, the default.** Each user runs
+  `ssh -N -L 8090:127.0.0.1:8090 -L 8080:127.0.0.1:8080 <vm>`. On the VM, set
+  `SH_PUBLIC_HARNESS_URL=http://127.0.0.1:8080`; on the laptop, run
+  `mocactl --control-plane-url http://127.0.0.1:8090 …`. Because the harness URL is advertised,
+  **every user must forward the same local port**.
+- **(b) A cloud firewall allowlist.** Set `SH_CONTROL_PLANE_HOST=0.0.0.0` and
+  `SH_PUBLIC_HARNESS_URL=http://<vm-address>:8080`, and allow 8090 and 8080 from the users'
+  addresses only. Tokens and credentials then cross the network in clear.
+
+The supervisor already listens on `0.0.0.0:8080`. With `SH_REQUIRE_AUTH=true` every turn needs a
+session token, but that is not a substitute for the allowlist.
+
+### Session discovery
+
+`/v1/sessions/{id}/resources` answers `sandbox.phase: "unknown"` on a VM:
+there is no kubectl, and the control plane treats that like a Kubernetes outage. `mocactl` does
+not use the route.
+
+### Checking it
+
+On the VM, `curl -s 127.0.0.1:8090/readyz`. From a laptop, through the tunnel,
+`mocactl --control-plane-url http://127.0.0.1:8090 doctor`. Doctor stops at its first failure,
+and "harness trusts this control plane" (check 7) comes after "logged in" (3) and "inference
+credential present" (4). `mocactl login` (GitHub's device flow) gets past check 3. To check the
+wiring without a GitHub login, mint an API token on the VM the way `deploy/compose/smoke.sh` does.
+The key stays in its root-only file, and the output goes to stdout only:
+
+```bash
+cd /opt/serverless-harness/packages/control-plane
+sudo node --import tsx --input-type=module <<'EOF'
+import { readFileSync } from 'node:fs';
+import { makeSigner } from './src/token.ts';
+const s = makeSigner(readFileSync('/etc/serverless-harness/credentials/session-token-private-key', 'utf8'));
+const sub = 'demo:1', ttlSeconds = 3600, now = Math.floor(Date.now() / 1000);
+const apiToken = s.mint({ sub, tenant: sub, roles: [], scope: ['api'], ttlSeconds, now });
+const auth = { apiToken, subject: sub, roles: [], expiresAt: now + ttlSeconds, controlPlaneUrl: 'http://127.0.0.1:8090' };
+process.stdout.write(JSON.stringify(auth) + '\n');
+EOF
+```
+
+That line is a complete `mocactl` login cache (`expiresAt` in epoch **seconds**; `controlPlaneUrl`
+must equal the `--control-plane-url` you pass). Save it on the laptop as `mocactl/auth.json` under
+`$XDG_CONFIG_HOME` (default `~/.config`), mode 0600, creating the directory first:
+
+```bash
+mkdir -p -m 0700 "${XDG_CONFIG_HOME:-$HOME/.config}/mocactl"
+(umask 077 && cat > "${XDG_CONFIG_HOME:-$HOME/.config}/mocactl/auth.json")   # paste, then Ctrl-D
+```
+
+Then add an inference credential with `/credentials` in `mocactl`, and run `doctor`.
 
 ## Sandbox container networking and the relay token
 
@@ -242,8 +401,8 @@ in your own forward-hook table. The in-product fix is tracked in rossoctl/moca#3
 
 ## Reboots
 
-Both units are `WantedBy=multi-user.target`, so systemd brings the relay and the supervisor back
-on boot. The podman containers need one extra thing: `--restart=always` (which `setup-vm.sh` now
+All three units are `WantedBy=multi-user.target`, so systemd brings the relay, the control plane
+and the supervisor back on boot. The podman containers need one extra thing: `--restart=always` (which `setup-vm.sh` now
 passes to Redis and to every sandbox container) covers a container that _exits_, but
 `podman-run(1)` is explicit that it does **not** cover a host reboot. `setup-vm.sh` therefore also
 enables `podman-restart.service`, podman's own supported mechanism for that. Without it the units
@@ -307,11 +466,21 @@ Kubernetes sandbox pod image to `setup-k8s.sh`, and compose spells this concept
 
 ## What round one does not claim
 
-The systemd `[Service]` hardening directives in `sh-supervisor.service` and
-`sh-relay.service` (`ProtectSystem=strict`, `NoNewPrivileges=true`, `SystemCallFilter=`, and
+The systemd `[Service]` hardening directives in `sh-supervisor.service`, `sh-relay.service` and
+`sh-control-plane.service` (`ProtectSystem=strict`, `NoNewPrivileges=true`, `SystemCallFilter=`, and
 friends) are the VM analogue of a pod's `securityContext` — they narrow the filesystem and
 syscall surface available to each process. They are **present, not equivalent**: this round
 does **not** claim security-context parity with the Kubernetes deployment, and it does
 **not** have any analogue of Kubernetes `NetworkPolicy` egress control. systemd has no
 per-unit network-egress primitive comparable to a `NetworkPolicy`, so a VM deployment is
 strictly more exposed on that axis until the Z2/Z5 work lands.
+
+Nor does it claim, for the control plane:
+
+- **TLS.** The control plane and the supervisor speak plain HTTP. The supported topologies are an
+  SSH tunnel or a firewall allowlist ("The control plane" above), not an encrypted listener.
+- **A uid boundary.** The control plane runs as `harness`, the same uid as the supervisor and its
+  workers. `LoadCredential=` keeps its secrets out of env files and child processes' environments,
+  not out of reach of a compromised `harness` process.
+- **Multi-host credentials.** The file store is single-host. Vault, the multi-host store, is not
+  wired by `setup-vm.sh`.

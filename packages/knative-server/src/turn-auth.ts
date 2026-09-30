@@ -3,6 +3,7 @@ import { createClient } from 'redis';
 import {
   CpError,
   OwnershipIndex,
+  credentialValue,
   parseKeyset,
   verifyToken,
   type CpRedisLike,
@@ -99,7 +100,8 @@ export function turnAuthDepsFromEnv(env: NodeJS.ProcessEnv): TurnAuthDeps {
     // (spec §4.3.1); flipping the default is MU2.
     requireAuth: env.SH_REQUIRE_AUTH === 'true',
     controlPlaneUrl: env.SH_CONTROL_PLANE_URL || undefined,
-    exchangeToken: env.SH_EXCHANGE_TOKEN || undefined,
+    // A systemd credential on deploy/vm (LoadCredential=, MI1 §6.7), the env var everywhere else.
+    exchangeToken: credentialValue(env, 'SH_EXCHANGE_TOKEN'),
     // Shared, NOT `makeRuntimeReporter(...)` -- see sharedRuntimeReporter for why a fresh
     // closure per request would leak one Redis connection per turn.
     reportRuntime: sharedRuntimeReporter(env.REDIS_URL),

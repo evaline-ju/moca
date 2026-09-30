@@ -1,4 +1,7 @@
 import { generateKeyPairSync } from 'node:crypto';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { CP_ERROR_CODES, CpError, statusFor, type CpErrorCode } from '@moca/control-plane';
 import { keyIdFor, makeSigner, publicKeyToBase64 } from '@moca/control-plane';
@@ -483,6 +486,22 @@ describe('the exchange hop', () => {
 });
 
 describe('turnAuthDepsFromEnv', () => {
+  it('reads the exchange token from $CREDENTIALS_DIRECTORY when the unit loads it (deploy/vm)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sh-ks-creds-'));
+    writeFileSync(join(dir, 'SH_EXCHANGE_TOKEN'), 'from-credential\n'); // notsecret
+    expect(turnAuthDepsFromEnv({ CREDENTIALS_DIRECTORY: dir }).exchangeToken).toBe(
+      'from-credential',
+    );
+    // No credential of that name: the env var, exactly as on Knative.
+    const empty = mkdtempSync(join(tmpdir(), 'sh-ks-creds-'));
+    expect(
+      turnAuthDepsFromEnv({
+        CREDENTIALS_DIRECTORY: empty,
+        SH_EXCHANGE_TOKEN: 'from-env', // notsecret
+      }).exchangeToken,
+    ).toBe('from-env');
+  });
+
   it('is permissive by default and reads exactly `true` for the flag', () => {
     expect(turnAuthDepsFromEnv({}).requireAuth).toBe(false);
     expect(turnAuthDepsFromEnv({ SH_REQUIRE_AUTH: 'true' }).requireAuth).toBe(true);
