@@ -144,9 +144,12 @@ export function startControlPlane(deps: CpDeps, port = 8080, host?: string): Ser
   // test and masking a genuine future leak behind expected noise.
   server.once('close', () => process.removeListener('SIGTERM', onSigterm));
   const onListening = () => {
+    // The socket's own address, never the configured string: `host` comes from the same env object
+    // as the resolved secrets (main.ts withCredentials), and nothing read from it is logged.
     const addr = server.address();
-    const bound = typeof addr === 'object' && addr ? addr.port : port;
-    console.log(`sh-control-plane listening on ${host ?? ''}:${bound}`);
+    const bound =
+      typeof addr === 'object' && addr ? `${host ? addr.address : ''}:${addr.port}` : `:${port}`;
+    console.log(`sh-control-plane listening on ${bound}`);
   };
   // `listen(port, undefined, cb)` is not a documented overload; keep the two calls distinct.
   if (host) server.listen(port, host, onListening);
