@@ -1,0 +1,48 @@
+[Unit]
+Description=MOCA control plane (MU1: login, sessions, credential issuance)
+# Redis comes back on boot through podman-restart.service (setup-vm.sh's start_redis runs it with
+# --restart=always). Ordering only: the client reconnects and /readyz reports the outage, so a
+# Requires= would add nothing but a dependency on one podman package's unit name.
+After=network-online.target podman-restart.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=harness
+Group=harness
+# The control plane's own package dir: `node --import tsx` resolves tsx relative to the CWD, and tsx
+# is linked only into each package's own node_modules (see sh-supervisor.service).
+WorkingDirectory=/opt/serverless-harness/packages/control-plane
+EnvironmentFile=/etc/serverless-harness/control-plane.env
+# MI1 §6.7: secrets are files, never env vars. systemd reads each (root-only, 0600) and exposes it to
+# this unit alone under $CREDENTIALS_DIRECTORY/<NAME>; main.ts resolves them there (withCredentials).
+# setup-vm.sh generates all three once and never rotates them. The exchange token is the SAME file
+# sh-supervisor.service loads, so the two tiers cannot disagree.
+LoadCredential=SH_SESSION_TOKEN_PRIVATE_KEY:/etc/serverless-harness/credentials/session-token-private-key
+LoadCredential=SH_CREDENTIAL_KEK:/etc/serverless-harness/credentials/credential-kek
+LoadCredential=SH_EXCHANGE_TOKEN:/etc/serverless-harness/credentials/exchange-token
+ExecStart=/usr/bin/node --import tsx src/main.ts
+Restart=always
+RestartSec=2
+# server.close() on SIGTERM; requests are short (no streaming routes).
+TimeoutStopSec=30
+
+# §4.3 hardening, as the other two units.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+# The file credential store (SH_CREDENTIAL_DIR in control-plane.env). Its OWN directory, not the
+# supervisor's /var/lib/serverless-harness, and 0700. Envelope-encrypted under the KEK, so a copy of it
+# without the credentials above is ciphertext.
+StateDirectory=moca-control-plane
+StateDirectoryMode=0700
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+
+[Install]
+WantedBy=multi-user.target

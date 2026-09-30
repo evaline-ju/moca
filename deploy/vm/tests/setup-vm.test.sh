@@ -9,6 +9,8 @@ VM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$VM_DIR/setup-vm.sh"
 UNIT_SUPERVISOR="$VM_DIR/systemd/sh-supervisor.service"
 UNIT_RELAY="$VM_DIR/systemd/sh-relay.service"
+UNIT_CP="$VM_DIR/systemd/sh-control-plane.service"
+CP_MAIN="$VM_DIR/../../packages/control-plane/src/main.ts"
 ENV_SRC_DIR="$VM_DIR/env"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -81,6 +83,7 @@ pass "SH_SOURCE_ONLY sources without side effects"
 install_units
 [[ -f "$SH_UNIT_DIR/sh-supervisor.service" ]] || fail "supervisor unit not installed"
 [[ -f "$SH_UNIT_DIR/sh-relay.service" ]] || fail "relay unit not installed"
+[[ -f "$SH_UNIT_DIR/sh-control-plane.service" ]] || fail "control-plane unit not installed"
 grep -q 'systemctl daemon-reload' "$MOCK_LOG" || fail "daemon-reload not invoked"
 
 # unit -> package-dir pairs. WorkingDirectory must be the package's OWN dir (not the repo
@@ -90,18 +93,21 @@ grep -q 'systemctl daemon-reload' "$MOCK_LOG" || fail "daemon-reload not invoked
 # `node --import tsx` resolves the tsx loader relative to the CWD, and tsx is linked only
 # into each package's own node_modules, never root-hoisted.
 UNIT_PACKAGES=(
-  "$UNIT_SUPERVISOR:supervisor"
-  "$UNIT_RELAY:sandbox-relay"
+  "$UNIT_SUPERVISOR:supervisor:serverless-harness"
+  "$UNIT_RELAY:sandbox-relay:serverless-harness"
+  "$UNIT_CP:control-plane:moca-control-plane"
 )
-for pair in "${UNIT_PACKAGES[@]}"; do
-  unit="${pair%%:*}"
-  pkg="${pair##*:}"
+for triple in "${UNIT_PACKAGES[@]}"; do
+  unit="${triple%%:*}"
+  rest="${triple#*:}"
+  pkg="${rest%%:*}"
+  state="${rest#*:}"
   grep -qE "^WorkingDirectory=/opt/serverless-harness/packages/$pkg\$" "$unit" ||
     fail "$unit: WorkingDirectory must be the $pkg package dir, not the repo root"
   grep -qE '^ExecStart=/usr/bin/node --import tsx src/main\.ts$' "$unit" ||
     fail "$unit: ExecStart must run src/main.ts relative to WorkingDirectory"
   for directive in ProtectSystem=strict NoNewPrivileges=true SystemCallFilter TimeoutStopSec \
-    StateDirectory=serverless-harness; do
+    "StateDirectory=$state"; do
     # These are the VM analogue of the pod securityContext. Present, and asserted so a future
     # edit cannot quietly drop them -- §4.3 does not CLAIM parity, but it does claim presence.
     grep -q "$directive" "$unit" || fail "$unit is missing $directive"
@@ -113,7 +119,7 @@ for pair in "${UNIT_PACKAGES[@]}"; do
     fail "$unit: Requires= names a unit nothing installs"
   fi
 done
-pass "both units: correct ExecStart/WorkingDirectory, §4.3 hardening present, no dangling Requires="
+pass "all three units: correct ExecStart/WorkingDirectory, §4.3 hardening present, no dangling Requires="
 
 # --- the supervisor unit must not SIGTERM its own workers -------------------------------------
 # KillMode=control-group makes systemd's stop job deliver SIGTERM to EVERY process in the cgroup.
@@ -159,7 +165,7 @@ esac
 # Derive the env names from the units themselves, not by hard-coding "supervisor"/"relay" --
 # that is what makes this catch the next env file somebody adds.
 ENV_NAMES=()
-for unit in "$UNIT_SUPERVISOR" "$UNIT_RELAY"; do
+for unit in "$UNIT_SUPERVISOR" "$UNIT_RELAY" "$UNIT_CP"; do
   # R46: under `set -euo pipefail`, a no-match `grep` in this pipeline aborts the script
   # right here -- before the `[[ -n "$name" ]] || fail ...` guard below can ever run. `|| true`
   # makes the guard reachable so a future unit missing EnvironmentFile= gets the diagnostic
@@ -183,18 +189,82 @@ grep -q 'SH_SANDBOX_DISCOVERY=records' "$SH_ENV_DIR/supervisor.env" ||
   fail "VM env must select records discovery (no cluster on a VM)"
 echo 'SH_TURNS_PER_WORKER=9' >>"$SH_ENV_DIR/supervisor.env"
 echo 'SH_RELAY_PORT=7777' >>"$SH_ENV_DIR/relay.env"
+echo 'SH_GITHUB_CLIENT_ID=Iv1.operator' >>"$SH_ENV_DIR/control-plane.env"
 install_env
 grep -q 'SH_TURNS_PER_WORKER=9' "$SH_ENV_DIR/supervisor.env" ||
   fail "install_env clobbered an operator-edited supervisor.env"
 grep -q 'SH_RELAY_PORT=7777' "$SH_ENV_DIR/relay.env" ||
   fail "install_env clobbered an operator-edited relay.env"
-pass "both env files written once, operator edits preserved"
+grep -q 'SH_GITHUB_CLIENT_ID=Iv1.operator' "$SH_ENV_DIR/control-plane.env" ||
+  fail "install_env clobbered an operator-edited control-plane.env"
+pass "all three env files written once, operator edits preserved"
 
 # --- SH_TURNS_PER_WORKER ships EMPTY -------------------------------------------------------
 # §3.8: shipping a value would put a guess where an E8 output belongs.
 grep -qE '^SH_TURNS_PER_WORKER=$' "$ENV_SRC_DIR/supervisor.env.example" ||
   fail "the example env must leave SH_TURNS_PER_WORKER empty"
 pass "no default shipped for SH_TURNS_PER_WORKER"
+
+# --- the control plane unit and its env contract (#366) ------------------------------------------
+# Loopback, the file store in its OWN StateDirectory, ordered after the containers come back.
+grep -qE '^SH_CONTROL_PLANE_PORT=8090$' "$ENV_SRC_DIR/control-plane.env.example" ||
+  fail "control-plane.env.example must bind 8090 (8080 is the supervisor's)"
+grep -qE '^SH_CONTROL_PLANE_HOST=127\.0\.0\.1$' "$ENV_SRC_DIR/control-plane.env.example" ||
+  fail "control-plane.env.example must bind loopback: it speaks plain HTTP"
+grep -qE '^SH_CREDENTIAL_STORE=file$' "$ENV_SRC_DIR/control-plane.env.example" ||
+  fail "control-plane.env.example must select the file credential store"
+grep -qE '^SH_CREDENTIAL_DIR=/var/lib/moca-control-plane$' "$ENV_SRC_DIR/control-plane.env.example" ||
+  fail "SH_CREDENTIAL_DIR must be the unit's StateDirectory (/var/lib/moca-control-plane)"
+grep -qE '^REDIS_URL=redis://127\.0\.0\.1:6379$' "$ENV_SRC_DIR/control-plane.env.example" ||
+  fail "control-plane.env.example must use the loopback Redis start_redis publishes"
+for k in SH_PUBLIC_HARNESS_URL SH_GITHUB_CLIENT_ID; do
+  grep -qE "^$k=\$" "$ENV_SRC_DIR/control-plane.env.example" ||
+    fail "control-plane.env.example must ship $k empty: it has no honest default"
+done
+grep -qE '^StateDirectoryMode=0700$' "$UNIT_CP" || fail "$UNIT_CP: the credential store's dir must be 0700"
+grep -qE '^After=.*podman-restart\.service' "$UNIT_CP" ||
+  fail "$UNIT_CP: order after podman-restart.service, which brings Redis back on boot"
+pass "control plane: loopback :8090, file store in its own 0700 StateDirectory, after Redis"
+
+# Every setting main.ts REQUIRES is either a systemd credential or a key in control-plane.env.example
+# (VAULT_ADDR only for the vault store). A secret is never ALSO an env line: credentialValue refuses
+# both at once. This is the var-for-var mirror deploy/compose/tests/compose.test.sh keeps for compose.
+secrets_line="$(grep -E '^export const CONTROL_PLANE_SECRETS = \[' "$CP_MAIN")" ||
+  fail "main.ts has no one-line CONTROL_PLANE_SECRETS export"
+mapfile -t cp_secrets < <(grep -oE "'SH_[A-Z_]+'" <<<"$secrets_line" | tr -d "'")
+mapfile -t cp_required < <(grep -oE "required\(env, '[A-Z_]+'\)" "$CP_MAIN" | grep -oE "'[A-Z_]+'" | tr -d "'" | sort -u)
+for name in "${cp_required[@]}"; do
+  [[ "$name" == VAULT_ADDR ]] && continue
+  if printf '%s\n' "${cp_secrets[@]}" | grep -qx "$name"; then
+    grep -qE "^LoadCredential=$name:" "$UNIT_CP" || fail "$UNIT_CP does not load the required secret $name"
+  else
+    grep -qE "^$name=" "$ENV_SRC_DIR/control-plane.env.example" ||
+      fail "control-plane.env.example has no $name, which main.ts requires"
+  fi
+done
+for name in "${cp_secrets[@]}"; do
+  grep -qE "^$name=" "$ENV_SRC_DIR/control-plane.env.example" &&
+    fail "control-plane.env.example sets the secret $name as an env line"
+done
+pass "every setting main.ts requires is a credential or an env key, and no secret is both"
+
+# The units load exactly the files setup-vm.sh writes (MU1_CREDENTIALS), at the default SH_ENV_DIR:
+# a LoadCredential= naming a file nothing creates fails the unit before ExecStart.
+for pair in "${MU1_CREDENTIALS[@]}"; do
+  grep -qxF "LoadCredential=${pair%%:*}:/etc/serverless-harness/credentials/${pair#*:}" "$UNIT_CP" ||
+    fail "$UNIT_CP must LoadCredential=${pair%%:*} from /etc/serverless-harness/credentials/${pair#*:}"
+done
+if [[ "$(grep -c '^LoadCredential=' "$UNIT_SUPERVISOR")" != 1 ]] ||
+  ! grep -qxF 'LoadCredential=SH_EXCHANGE_TOKEN:/etc/serverless-harness/credentials/exchange-token' "$UNIT_SUPERVISOR"; then
+  fail "$UNIT_SUPERVISOR must load exactly one credential, the exchange token the control plane loads"
+fi
+grep -qE '^SH_EXCHANGE_TOKEN=' "$ENV_SRC_DIR/supervisor.env.example" &&
+  fail "supervisor.env.example sets SH_EXCHANGE_TOKEN: it is a credential now, and both at once refuses to boot"
+grep -qE '^SH_REQUIRE_AUTH=true$' "$ENV_SRC_DIR/supervisor.env.example" ||
+  fail "supervisor.env.example must require auth: this VM always runs a control plane"
+grep -qE '^SH_CONTROL_PLANE_URL=http://127\.0\.0\.1:8090$' "$ENV_SRC_DIR/supervisor.env.example" ||
+  fail "supervisor.env.example must dial the control plane on loopback :8090"
+pass "credentials: the units load exactly the files setup-vm.sh writes; no secret in any env template"
 
 # --- the supervisor dials the relay's EXEC listener, and the two ports agree (F3, MI1 R5) ---------
 # R46 (same as above): both assignments below can abort the pipeline on no-match under

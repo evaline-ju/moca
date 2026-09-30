@@ -17,6 +17,10 @@ Group=harness
 # ERR_MODULE_NOT_FOUND 'tsx'. Do not "simplify" this back to the repo root.
 WorkingDirectory=/opt/serverless-harness/packages/supervisor
 EnvironmentFile=/etc/serverless-harness/supervisor.env
+# MU1: the exchange token the workers present to the control plane, as a systemd credential (MI1
+# §6.7) -- the same file sh-control-plane.service loads. setup-vm.sh creates it before installing
+# this unit; a unit whose credential file is missing does not start.
+LoadCredential=SH_EXCHANGE_TOKEN:/etc/serverless-harness/credentials/exchange-token
 # Every manifest that runs this same harness code sets HOME explicitly with a writable path
 # behind it (deploy/knative/service.yaml:33, leaf-scaledjob.yaml:39, control-plane.yaml:190 all
 # use /tmp; relay-deployment.yaml does not, consistent with this being a harness-side need

@@ -12,6 +12,8 @@
 # Env overrides:
 #   SH_UNIT_DIR       Where systemd unit files are installed (default /etc/systemd/system)
 #   SH_ENV_DIR        Where the supervisor/relay env files live (default /etc/serverless-harness)
+#   SH_CRED_DIR       Where the MU1 secrets live as root-only files, loaded by the units with
+#                       LoadCredential= (default $SH_ENV_DIR/credentials)
 #   SH_INSTALL_DIR    Where the harness checkout lives on the VM (default /opt/serverless-harness)
 #   SH_SANDBOX_COUNT     Number of sandbox containers to start (default 2)
 #   SANDBOX_IMAGE        Sandbox container image (default
@@ -43,6 +45,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MOCA_SANDBOX_SUBNET="${MOCA_SANDBOX_SUBNET:-10.89.40.0/24}"
 MOCA_SANDBOX_GATEWAY="${MOCA_SANDBOX_GATEWAY:-10.89.40.1}"
 MOCA_SANDBOX_BRIDGE="${MOCA_SANDBOX_BRIDGE:-moca-sandbox0}"
+cred_dir() { printf '%s' "${SH_CRED_DIR:-$SH_ENV_DIR/credentials}"; }
+# The MU1 secrets as systemd credentials: NAME (what LoadCredential= and credentialValue call it) and
+# the file under $SH_CRED_DIR that holds it. The units hardcode the default path; setup-vm.test.sh
+# checks each pair against both units.
+# shellcheck disable=SC2034  # read by setup-vm.test.sh today; the secret generation reads it next
+MU1_CREDENTIALS=(
+  "SH_SESSION_TOKEN_PRIVATE_KEY:session-token-private-key"
+  "SH_CREDENTIAL_KEK:credential-kek"
+  "SH_EXCHANGE_TOKEN:exchange-token"
+)
 
 log() { printf '==> %s\n' "$*"; }
 
@@ -111,8 +123,8 @@ require_build() {
 require_user() {
   local user="$1"
   if ! getent passwd "$user" >/dev/null 2>&1; then
-    echo "missing system user '$user': sh-supervisor.service and sh-relay.service both run" \
-      "as User=$user/Group=$user. Create it first, e.g.:" \
+    echo "missing system user '$user': sh-supervisor.service, sh-relay.service and" \
+      "sh-control-plane.service all run as User=$user/Group=$user. Create it first, e.g.:" \
       "sudo useradd --system --no-create-home --shell /usr/sbin/nologin $user" >&2
     return 1
   fi
@@ -122,6 +134,7 @@ install_units() {
   log "installing systemd units into $SH_UNIT_DIR"
   install -m 0644 "$SCRIPT_DIR/systemd/sh-supervisor.service" "$SH_UNIT_DIR/"
   install -m 0644 "$SCRIPT_DIR/systemd/sh-relay.service" "$SH_UNIT_DIR/"
+  install -m 0644 "$SCRIPT_DIR/systemd/sh-control-plane.service" "$SH_UNIT_DIR/"
   systemctl daemon-reload
 }
 
@@ -143,6 +156,7 @@ install_env() {
   install -d -m 0750 "$SH_ENV_DIR"
   install_env_file supervisor "set SH_TURNS_PER_WORKER before starting"
   install_env_file relay "set SH_RELAY_TOKEN before starting"
+  install_env_file control-plane "set SH_GITHUB_CLIENT_ID and SH_PUBLIC_HARNESS_URL before starting"
 }
 
 start_redis() {
