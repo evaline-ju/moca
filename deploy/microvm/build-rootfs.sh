@@ -37,7 +37,7 @@ while [ $# -gt 0 ]; do
   *) echo "build-rootfs.sh: unknown argument $1" >&2; usage ;;
   esac
 done
-[ -n "$OUT" ] && [ -n "$IMAGE" ] || usage
+if [ -z "$OUT" ] || [ -z "$IMAGE" ]; then usage; fi
 
 if [ "$(id -u)" != 0 ]; then
   echo "build-rootfs.sh: must run as root (file ownership inside the image must survive" \

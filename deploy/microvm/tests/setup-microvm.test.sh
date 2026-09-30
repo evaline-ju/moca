@@ -101,8 +101,9 @@ check "worker sandbox id" "$(val SANDBOX_ID "$W")" "moca_microvm_0"
 check "workspace idle default" "$(val SH_WORKSPACE_IDLE "$W")" "8h"
 check "worker env never carries the exec token" "$(grep -c 'MOCA_RELAY_EXEC_TOKEN' "$W")" "0"
 check "worker env never carries the container token" "$(grep -c '^SH_RELAY_TOKEN' "$W")" "0"
-check "worker env is 0600" "$(stat -f %Lp "$W" 2>/dev/null || stat -c %a "$W")" "600"
-check "relay env is 0600" "$(stat -f %Lp "$R" 2>/dev/null || stat -c %a "$R")" "600"
+mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; } # GNU first: GNU `stat -f` is filesystem status
+check "worker env is 0600" "$(mode "$W")" "600"
+check "relay env is 0600" "$(mode "$R")" "600"
 check "P6's relay.env untouched" "$(val SH_RELAY_TOKEN "$TMP/etc/relay.env")" "container-token"
 check "relay drop-in loads the new env file" \
   "$(grep -c "^EnvironmentFile=$TMP/etc/microvm-relay.env\$" "$TMP/units/sh-relay.service.d/50-moca-microvm.conf")" "1"
@@ -167,9 +168,10 @@ check "then re-asserted at 90% of the budget" "$(grep -c '^AssertMemory=>=7372M$
 # `AssertMemory=` (empty) resets the WHOLE assertion list, not just AssertMemory (systemd.unit(5),
 # verified on the rig: a unit asserting a missing path started once the reset was in a drop-in). So
 # every other assertion the shipped unit makes -- /dev/kvm above all -- must be re-stated after it.
-for a in $(grep -E '^Assert[A-Za-z]+=' "$DIR/microvm-worker.service" | grep -v '^AssertMemory='); do
+# Process substitution, not a pipe: `check` must run in THIS shell or its failure count is lost.
+while read -r a; do
   check "the drop-in re-states the shipped $a" "$(grep -cxF "$a" "$M")" "1"
-done
+done < <(grep -E '^Assert[A-Za-z]+=' "$DIR/microvm-worker.service" | grep -v '^AssertMemory=')
 check "the shipped unit has a non-memory assertion to re-state (else this test proves nothing)" \
   "$(grep -cE '^Assert[A-Za-z]+=' "$DIR/microvm-worker.service" | awk '{print ($1 > 1) ? "yes" : "no"}')" "yes"
 check "reset precedes the new assertion" "$(grep -nE '^AssertMemory=' "$M" | cut -d: -f1 | tr '\n' ' ')" "4 5 "
