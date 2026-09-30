@@ -576,10 +576,16 @@ ensure_operator_fallback() {
   local cp="$SH_ENV_DIR/control-plane.env" f dropin_dir
   f="$(cred_dir)/$OPERATOR_TOKEN_FILE"
   dropin_dir="$SH_UNIT_DIR/sh-control-plane.service.d"
-  if grep -qE '^SH_OPERATOR_INFERENCE_TOKEN=' "$cp" 2>/dev/null; then
+  # Leading whitespace too: systemd's EnvironmentFile= accepts it.
+  if grep -qE '^[[:space:]]*SH_OPERATOR_INFERENCE_TOKEN=' "$cp" 2>/dev/null; then
     echo "$cp sets SH_OPERATOR_INFERENCE_TOKEN, which on this VM is a systemd credential ($f): with" \
       "both, the control plane refuses to boot. Move the value into that file (mode 0600), delete the" \
       "line, then re-run." >&2
+    return 1
+  fi
+  if [[ -L "$f" && ! -e "$f" ]]; then
+    echo "$f is a dangling symlink. Point it at the operator's inference key, or remove it to turn the" \
+      "fallback's token off, then re-run." >&2
     return 1
   fi
   if [[ -e "$f" ]]; then
@@ -588,9 +594,9 @@ ensure_operator_fallback() {
         "token off, then re-run." >&2
       return 1
     fi
-    if [[ "$(file_mode "$f")" != 600 ]]; then
-      echo "$f is mode $(file_mode "$f"): it is the operator's inference key, so it must be 0600 (root" \
-        "only). sudo chmod 0600 $f, then re-run." >&2
+    if [[ ! "$(file_mode "$f")" =~ ^[46]00$ ]]; then
+      echo "$f is mode $(file_mode "$f"): it is the operator's inference key, so it must be 0600 or" \
+        "0400 (root only). sudo chmod 0600 $f, then re-run." >&2
       return 1
     fi
     install -d -m 0755 "$dropin_dir"

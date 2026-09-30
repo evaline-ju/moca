@@ -1214,8 +1214,19 @@ pass "operator fallback: a present token gets a LoadCredential= drop-in; the val
 chmod 0644 "$OP/credentials/operator-inference-token"
 if op_err=$(op_run 2>&1); then fail "a 0644 operator token was accepted"; fi
 grep -qF '0600' <<<"$op_err" || fail "the refusal must say 0600: $op_err"
+chmod 0400 "$OP/credentials/operator-inference-token"
+op_run || fail "a 0400 operator token (read-only, root-only) was refused"
 chmod 0600 "$OP/credentials/operator-inference-token"
-pass "operator fallback: a token file readable by group or others refuses"
+pass "operator fallback: a token file readable by group or others refuses; 0400 and 0600 pass"
+
+# A dangling symlink at the token path is not "no token": refused, not silently treated as absent.
+mv "$OP/credentials/operator-inference-token" "$OP/credentials/token.real"
+ln -s "$OP/credentials/nowhere" "$OP/credentials/operator-inference-token"
+if op_err=$(op_run 2>&1); then fail "a dangling symlink at the token path was accepted"; fi
+grep -qF 'symlink' <<<"$op_err" || fail "the refusal must say it is a dangling symlink: $op_err"
+rm "$OP/credentials/operator-inference-token"
+mv "$OP/credentials/token.real" "$OP/credentials/operator-inference-token"
+pass "operator fallback: a dangling symlink at the token path refuses"
 
 # An empty token file is refused, not loaded.
 : >"$OP/credentials/operator-inference-token"
@@ -1225,11 +1236,14 @@ pass "operator fallback: an empty token file refuses"
 
 # The token as an env line is refused, as the MU1 secrets are, and the value is not echoed.
 op_token "$OP_SECRET"
-echo "SH_OPERATOR_INFERENCE_TOKEN=$OP_SECRET" >>"$OP/control-plane.env"
-if op_err=$(op_run 2>&1); then fail "SH_OPERATOR_INFERENCE_TOKEN as an env line was accepted"; fi
-grep -qF 'systemd credential' <<<"$op_err" || fail "the refusal must say it is a systemd credential: $op_err"
-grep -qF -- "$OP_SECRET" <<<"$op_err" && fail "the refusal echoed the token"
-sed -i.bak '/^SH_OPERATOR_INFERENCE_TOKEN=/d' "$OP/control-plane.env" && rm -f "$OP/control-plane.env.bak"
+for line in "SH_OPERATOR_INFERENCE_TOKEN=$OP_SECRET" "  SH_OPERATOR_INFERENCE_TOKEN=$OP_SECRET"; do
+  # Leading whitespace too: systemd's EnvironmentFile= accepts it.
+  printf '%s\n' "$line" >>"$OP/control-plane.env"
+  if op_err=$(op_run 2>&1); then fail "SH_OPERATOR_INFERENCE_TOKEN as an env line was accepted: '$line'"; fi
+  grep -qF 'systemd credential' <<<"$op_err" || fail "the refusal must say it is a systemd credential: $op_err"
+  grep -qF -- "$OP_SECRET" <<<"$op_err" && fail "the refusal echoed the token"
+  sed -i.bak '/SH_OPERATOR_INFERENCE_TOKEN=/d' "$OP/control-plane.env" && rm -f "$OP/control-plane.env.bak"
+done
 pass "operator fallback: the token as an env line refuses without echoing it"
 
 # Token removed later with the fallback off -> the drop-in goes too (Review Focus 4).
