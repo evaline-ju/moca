@@ -569,6 +569,58 @@ chmod 0640 "$S"; set_env_line "$S" K v4
 rm -f "$S"
 pass "set_env_line: replaces in place, collapses duplicates, appends on its own line, keeps the mode"
 
+# --- #366: supervisor.env is wired to this VM's control plane, once --------------------------------
+FIXTURE="$VM_DIR/tests/fixtures/supervisor.env.pre-cp"
+{ grep -qE '^SH_REQUIRE_AUTH=false$' "$FIXTURE" && grep -qE '^#SH_CONTROL_PLANE_URL=' "$FIXTURE"; } ||
+  fail "the pre-control-plane fixture is not today's template (see Task 4 Step 1)"
+
+# An existing VM: supervisor.env from the pre-control-plane template, with an operator edit and NO
+# final newline; relay.env configured; no control-plane.env and no credentials yet.
+U="$(mktemp -d)"
+printf '%s' "$(cat "$FIXTURE"; echo 'SH_TURNS_PER_WORKER=9')" >"$U/supervisor.env" # $(…) drops the final newline
+cp "$ENV_SRC_DIR/relay.env.example" "$U/relay.env"
+SH_ENV_DIR="$U" install_env >/dev/null
+[[ -f "$U/control-plane.env" ]] || fail "an upgrade must install control-plane.env"
+SH_ENV_DIR="$U" ensure_mu1_secrets >/dev/null || fail "ensure_mu1_secrets failed on an upgrade"
+SH_ENV_DIR="$U" wire_supervisor_mu1 >/dev/null || fail "wire_supervisor_mu1 failed on an upgrade"
+for kv in 'SH_CONTROL_PLANE_URL=http://127.0.0.1:8090' 'SH_REQUIRE_AUTH=true' 'SH_TURNS_PER_WORKER=9'; do
+  [[ "$(grep -cxF "$kv" "$U/supervisor.env")" == 1 ]] || fail "upgraded supervisor.env lacks exactly one $kv: $(cat "$U/supervisor.env")"
+done
+for k in SH_CONTROL_PLANE_URL SH_REQUIRE_AUTH SH_SESSION_TOKEN_PUBLIC_KEYS; do
+  [[ "$(grep -c "^$k=" "$U/supervisor.env")" == 1 ]] || fail "upgraded supervisor.env has more than one $k="
+done
+grep -qE '^SH_EXCHANGE_TOKEN=' "$U/supervisor.env" && fail "the upgrade put the exchange token in supervisor.env"
+pass "upgrade: supervisor.env gains the control plane's URL, its public keyset and SH_REQUIRE_AUTH=true"
+
+before="$(cat "$U/supervisor.env" "$U"/credentials/* | cksum)"
+SH_ENV_DIR="$U" ensure_mu1_secrets >/dev/null || fail "ensure_mu1_secrets failed on a re-run after the upgrade"
+SH_ENV_DIR="$U" wire_supervisor_mu1 >/dev/null || fail "wire_supervisor_mu1 failed on a re-run after the upgrade"
+[[ "$(cat "$U/supervisor.env" "$U"/credentials/* | cksum)" == "$before" ]] || fail "a re-run after the upgrade changed something"
+set_env_line "$U/supervisor.env" SH_REQUIRE_AUTH false # the operator opts out
+SH_ENV_DIR="$U" ensure_mu1_secrets >/dev/null || fail "ensure_mu1_secrets failed after the operator's opt-out"
+SH_ENV_DIR="$U" wire_supervisor_mu1 >/dev/null || fail "wire_supervisor_mu1 failed after the operator's opt-out"
+grep -qxF 'SH_REQUIRE_AUTH=false' "$U/supervisor.env" || fail "a re-run overrode the operator's SH_REQUIRE_AUTH=false"
+sed -i.bak '/^SH_CONTROL_PLANE_URL=/d' "$U/supervisor.env" || fail "could not delete SH_CONTROL_PLANE_URL"
+rm -f "$U/supervisor.env.bak"
+SH_ENV_DIR="$U" wire_supervisor_mu1 >/dev/null || fail "wire_supervisor_mu1 failed with no SH_CONTROL_PLANE_URL"
+grep -qxF 'SH_CONTROL_PLANE_URL=http://127.0.0.1:8090' "$U/supervisor.env" || fail "a missing SH_CONTROL_PLANE_URL was not restored"
+pass "re-runs: nothing rotated or rewritten; an operator's SH_REQUIRE_AUTH=false is kept"
+rm -rf "$U"
+
+# The URL follows the port the control plane actually binds; a port it would not bind is refused.
+U="$(mu1_dir)"
+set_env_line "$U/control-plane.env" SH_CONTROL_PLANE_PORT 8091
+SH_ENV_DIR="$U" ensure_mu1_secrets >/dev/null || fail "ensure_mu1_secrets failed on a fresh install on :8091"
+SH_ENV_DIR="$U" wire_supervisor_mu1 >/dev/null || fail "wire_supervisor_mu1 failed on a fresh install on :8091"
+grep -qxF 'SH_CONTROL_PLANE_URL=http://127.0.0.1:8091' "$U/supervisor.env" || fail "SH_CONTROL_PLANE_URL did not follow SH_CONTROL_PLANE_PORT"
+for bad in '' 'abc'; do
+  set_env_line "$U/control-plane.env" SH_CONTROL_PLANE_PORT "$bad"
+  out="$(MU1_NEW_KEYPAIR=1 SH_ENV_DIR="$U" wire_supervisor_mu1 2>&1)" && fail "SH_CONTROL_PLANE_PORT='$bad' was accepted"
+  grep -q 'SH_CONTROL_PLANE_PORT' <<<"$out" || fail "the refusal does not name SH_CONTROL_PLANE_PORT: $out"
+done
+rm -rf "$U"
+pass "SH_CONTROL_PLANE_URL follows SH_CONTROL_PLANE_PORT; an empty or non-numeric port is refused"
+
 # --- relay_token strips one matched pair of surrounding quotes (systemd's EnvironmentFile=
 # semantics) ----------------------------------------------------------------------------------
 # An operator writing SH_RELAY_TOKEN="s3cr3t" in relay.env gets s3cr3t handed to the relay

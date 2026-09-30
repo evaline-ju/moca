@@ -480,11 +480,35 @@ ensure_mu1_secrets() {
   if [[ -n "$priv" ]]; then
     write_secret session-token-private-key "$priv"
     set_env_line "$sup" SH_SESSION_TOKEN_PUBLIC_KEYS "$pub"
-    # shellcheck disable=SC2034  # read by setup-vm.test.sh today; wire_supervisor_mu1 reads it next
     MU1_NEW_KEYPAIR=1
   fi
   [[ -z "$kek" ]] || write_secret credential-kek "$kek"
   [[ -z "$xchg" ]] || write_secret exchange-token "$xchg"
+}
+
+# The supervisor's side of MU1 (#366): dial this VM's control plane and require a session token.
+# Written on the run that generated the keypair -- the run that turns MU1 on, on a fresh VM or on one
+# upgraded from before the control plane -- and on no later run: after that both are the operator's,
+# and one who set SH_REQUIRE_AUTH=false (to keep driving plain `curl /turn`, say) keeps it. The only
+# later repair is a supervisor.env with no SH_CONTROL_PLANE_URL at all, which cannot exchange a single
+# token-carrying turn.
+wire_supervisor_mu1() {
+  local sup="$SH_ENV_DIR/supervisor.env" cp="$SH_ENV_DIR/control-plane.env" port url
+  port="$(env_file_value SH_CONTROL_PLANE_PORT "$cp")"
+  if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+    echo "SH_CONTROL_PLANE_PORT in $cp is '${port}', not a port number. The control plane would fall" \
+      "back to 8080 -- the supervisor's own port. Set it (the template uses 8090), then re-run." >&2
+    return 1
+  fi
+  url="http://127.0.0.1:$port"
+  if [[ -n "${MU1_NEW_KEYPAIR:-}" ]]; then
+    log "wiring $sup to this VM's control plane ($url); every turn now needs a session token"
+    set_env_line "$sup" SH_CONTROL_PLANE_URL "$url" || return 1
+    set_env_line "$sup" SH_REQUIRE_AUTH true || return 1
+  elif [[ -z "$(env_file_value SH_CONTROL_PLANE_URL "$sup")" ]]; then
+    log "adding SH_CONTROL_PLANE_URL=$url to $sup"
+    set_env_line "$sup" SH_CONTROL_PLANE_URL "$url" || return 1
+  fi
 }
 
 # Sandboxes run on their OWN podman network (MI1 §5 R8), with a fixed subnet so the firewall below
