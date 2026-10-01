@@ -20,14 +20,14 @@
 #     mock-anthropic.mjs puts every tool result into that text, which is how the checks below see
 #     what ran in the sandbox.
 #
-#   sudo deploy/microvm/p4-turn-smoke.sh [--supervisor URL] [--out DIR] [--failure-paths]
+#   sudo deploy/microvm/p4-turn-smoke.sh [--supervisor URL] [--out DIR (default: mktemp -d)] [--failure-paths]
 #                                        [--auth [--control-plane URL]]
 set -uo pipefail
 
 SUP="http://127.0.0.1:8080"
 CP="http://127.0.0.1:8090"
 AUTH=0
-OUT="/tmp/p4-smoke-$(date +%s)"
+OUT=""
 FAILURE_PATHS=0
 : "${MICROVM_SANDBOX_ID:=moca_microvm_0}"
 : "${SH_WORKSPACE_ROOT:=/srv/workspaces}"
@@ -39,7 +39,12 @@ FAILURE_PATHS=0
 # (deploy/vm/setup-vm.sh's SH_CRED_DIR), the client, and where the stored credential sends the model.
 : "${MOCA_ROOT:=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 : "${MOCA_CRED_DIR:=/etc/serverless-harness/credentials}"
-: "${MOCACTL:=node $MOCA_ROOT/packages/mocactl/bin/mocactl.mjs}"
+# MOCACTL, if set, is a command line split on whitespace; unset, it is the checkout's own mocactl, kept
+# as an array so a checkout path with a space in it still works.
+if [ -n "${MOCACTL:-}" ]; then read -ra MOCACTL_CMD <<<"$MOCACTL"
+else MOCACTL_CMD=(node "$MOCA_ROOT/packages/mocactl/bin/mocactl.mjs"); fi
+# Seconds a `mocactl run` may take: the same bound the unauthenticated path puts on curl --max-time.
+: "${SMOKE_TURN_TIMEOUT:=300}"
 : "${SMOKE_MODEL_URL:=http://127.0.0.1:18099}"
 SMOKE_CREDENTIAL="p4-smoke-mock"
 while [ $# -gt 0 ]; do
@@ -53,7 +58,22 @@ while [ $# -gt 0 ]; do
     exit 2 ;;
   esac
 done
+# mocactl normalises its URLs without trailing slashes, and loadAuth requires auth.json's
+# controlPlaneUrl to equal that exactly; a trailing slash would also build //v1/... URLs for curl.
+while [ "${CP%/}" != "$CP" ]; do CP="${CP%/}"; done
+while [ "${SUP%/}" != "$SUP" ]; do SUP="${SUP%/}"; done
+# With --auth, $OUT holds minted api tokens. The default is a fresh mktemp directory; a named one must
+# be a real directory this user owns (not a symlink, not one another user pre-created in /tmp), and
+# it is made private before anything is written into it.
+if [ -z "$OUT" ]; then T="${TMPDIR:-/tmp}"; OUT="$(mktemp -d "${T%/}/p4-smoke-XXXXXX")" || exit 2; fi
 mkdir -p "$OUT"
+if [ "$AUTH" = 1 ]; then
+  if [ -L "$OUT" ] || [ ! -O "$OUT" ]; then
+    echo "--out $OUT is a symlink or not owned by $(id -un): it would hold api tokens; pick another" >&2
+    exit 2
+  fi
+  chmod 0700 "$OUT"
+fi
 fails=0
 check() { if [ "$2" = "$3" ]; then echo "  ok: $1" | tee -a "$OUT/SUMMARY"; else
   echo "  FAIL: $1 (want '$3', got '$2')" | tee -a "$OUT/SUMMARY"; fails=$((fails + 1)); fi; }
@@ -92,6 +112,13 @@ store_credential() {
     -H @"$OUT/xdg-$1/api.hdr" -H 'content-type: application/json' -d "$body" \
     "$CP/v1/credentials/$SMOKE_CREDENTIAL" 2>>"$OUT/credential-$1.err"
 }
+# session_code <subject> <session id>: the HTTP code of GET /v1/sessions/<id> as that subject, or
+# "no-id" for an empty id (which would hit /v1/sessions/, a different route).
+session_code() {
+  [ -n "$2" ] || { echo no-id; return; }
+  curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -H @"$OUT/xdg-$1/api.hdr" \
+    "$CP/v1/sessions/$2" 2>/dev/null
+}
 # turn <name> <session id, or "" for a new session> <prompt> [subject]: writes <name>.code, <name>.txt
 # (the response text) and <name>.sid (the session id), and prints nothing. Without --auth it posts
 # /turn and <name>.code is the HTTP code; with --auth it runs `mocactl run` as <subject> (default a)
@@ -100,13 +127,20 @@ turn() {
   if [ "$AUTH" = 1 ]; then turn_mocactl "$@"; else turn_http "$@"; fi
 }
 turn_mocactl() {
-  local dir="$OUT/xdg-${4:-a}" rc cmd
+  local dir="$OUT/xdg-${4:-a}" rc bound=()
   local args=(run "$3" --control-plane-url "$CP" --harness-url "$SUP")
   if [ -n "$2" ]; then args+=(--session "$2"); else args+=(--option "inferenceCredential=$SMOKE_CREDENTIAL"); fi
-  read -ra cmd <<<"$MOCACTL"
-  XDG_CONFIG_HOME="$dir" XDG_STATE_HOME="$dir/state" "${cmd[@]}" "${args[@]}" >"$OUT/$1.txt" 2>"$OUT/$1.err"
+  # A hung turn must end the check, not the driver. timeout(1) is coreutils (the rig has it); without
+  # it the turn is unbounded.
+  # --foreground keeps mocactl in the driver's process group, so a Ctrl-C on the driver reaches it
+  # too instead of leaving the turn running until the bound.
+  command -v timeout >/dev/null && bound=(timeout --foreground "$SMOKE_TURN_TIMEOUT")
+  XDG_CONFIG_HOME="$dir" XDG_STATE_HOME="$dir/state" ${bound[@]+"${bound[@]}"} "${MOCACTL_CMD[@]}" "${args[@]}" \
+    >"$OUT/$1.txt" 2>"$OUT/$1.err"
   rc=$?
-  if [ "$rc" = 0 ]; then echo 200; else echo "exit-$rc"; fi >"$OUT/$1.code"
+  # 124 is timeout(1)'s own code: say so, rather than leave an exit code to look up.
+  if [ "$rc" = 0 ]; then echo 200; elif [ "$rc" = 124 ] && ((${#bound[@]})); then echo "timed-out"
+  else echo "exit-$rc"; fi >"$OUT/$1.code"
   # mocactl names the session on stderr before the turn starts: "session <id>".
   sed -n 's/^session \([^ ]*\)$/\1/p' "$OUT/$1.err" | head -1 >"$OUT/$1.sid"
 }
@@ -194,9 +228,12 @@ check "b1 is a different session" "$([ -n "$B" ] && [ "$B" != "$A" ] && echo yes
 check "b1 did not see A's file" "$(absent b1 p4-proof continuity-missing)" "absent"
 check "b1 did not see A's repo" "$(has b1 continuity-missing)" "yes"
 if [ "$AUTH" = 1 ]; then
-  # Session B is a second subject's, not a second session of one: B's owner cannot even read A's.
-  check "subject b cannot read subject a's session (404)" "$(curl -sS --max-time 10 -o /dev/null \
-    -w '%{http_code}' -H @"$OUT/xdg-b/api.hdr" "$CP/v1/sessions/$A" 2>/dev/null)" "404"
+  # Session B is a second subject's, not a second session of one. The control plane answers 404 for
+  # another subject's session, but also for an id it never saw and for an empty one, so the 404 counts
+  # only next to its positive controls: each owner reads its own session.
+  check "subject a reads its own session A (200)" "$(session_code a "$A")" "200"
+  check "subject b reads its own session B (200)" "$(session_code b "$B")" "200"
+  check "subject b cannot read subject a's session (404)" "$(session_code b "$A")" "404"
 fi
 
 echo "== evidence on the host" | tee -a "$OUT/SUMMARY"

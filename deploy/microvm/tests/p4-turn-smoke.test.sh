@@ -27,14 +27,17 @@ mkdir -p "$TMP/bin"
 
 cat >"$TMP/bin/curl" <<'MOCK'
 #!/usr/bin/env bash
-# Minimal curl: -o FILE, -w '%{http_code}', -d BODY, --unix-socket SOCK, and a URL.
-out=/dev/stdout body="" sock="" url="" wfmt=""
+# Minimal curl: -o FILE, -w '%{http_code}', -d BODY, -H @FILE, --unix-socket SOCK, and a URL. Its
+# argv is logged whole, so a token passed on the command line instead of through a file shows up.
+echo "curl $*" >>"$MOCK_LOG"
+out=/dev/stdout body="" sock="" url="" wfmt="" hdrfile=""
 while [ $# -gt 0 ]; do
   case "$1" in
   -o) out="$2"; shift 2 ;;
   -w) wfmt="$2"; shift 2 ;;
   -d) body="$2"; shift 2 ;;
-  -H | --max-time | -X) shift 2 ;;
+  -H) case "$2" in @*) hdrfile="${2#@}" ;; esac; shift 2 ;;
+  --max-time | -X) shift 2 ;;
   --unix-socket) sock="$2"; shift 2 ;;
   -*) shift ;;
   *) url="$1"; shift ;;
@@ -44,10 +47,28 @@ if [ -n "$sock" ]; then # Firecracker GET /: only vm-7 is running; the rest are 
   case "$sock" in */vm-7/*) echo '{"state":"Running"}' ;; *) echo '{"state":"Paused"}' ;; esac
   exit 0
 fi
+mkdir -p "$STATE"
+# The caller, as the control plane would see it: the `sub` of the bearer token in the -H @FILE.
+sub="$(sed -n 's/^Authorization: Bearer //p' "$hdrfile" 2>/dev/null | node -e 'let t = "";
+  process.stdin.on("data", (c) => (t += c)).on("end", () => { try { process.stdout.write(
+    JSON.parse(Buffer.from(t.trim().split(".")[1], "base64url")).sub) } catch {} })')"
 if [ "$url" != "${url%/v1/credentials/*}" ]; then # PUT /v1/credentials/<name>, as a minted subject
-  echo "credential-put $url" >>"$MOCK_LOG"; code=204; : >"$out" # putCredential's real code
-elif [ "$url" != "${url%/v1/sessions/*}" ]; then # GET /v1/sessions/<id>: every caller here is a foreigner
-  code=404; printf '{"error":"session_not_found"}' >"$out"
+  echo "credential-put $url" >>"$MOCK_LOG"
+  # The shape putCredential accepts for an inference credential; anything else is its 400.
+  if [ -n "$sub" ] && node -e 'const b = JSON.parse(process.argv[1]);
+    process.exit(b.kind === "bearer" && b.consumer === "inference" && /^https?:\/\//.test(b.endpoint) &&
+      Array.isArray(b.destination?.hosts) && b.destination.hosts.length > 0 && b.secret?.token ? 0 : 1)' "$body"; then
+    code=204; : >"$out"; touch "$STATE/cred-$sub" # putCredential's real code
+  else
+    code=400; printf '{"error":"invalid_request"}' >"$out"
+  fi
+elif [ "$url" != "${url%/v1/sessions/*}" ]; then # GET /v1/sessions/<id>: 200 to its owner only
+  id="${url##*/v1/sessions/}"
+  if [ -n "$id" ] && [ -n "$sub" ] && [ "$(cat "$STATE/owner-$id" 2>/dev/null)" = "$sub" ]; then
+    code=200; printf '{"sessionId":"%s"}' "$id" >"$out"
+  else
+    code=404; printf '{"error":"session_not_found"}' >"$out"
+  fi
 elif [ "$url" != "${url%/healthz}" ]; then
   code=200; printf 'ok' >"$out"
 else
@@ -98,23 +119,34 @@ cat >"$TMP/bin/mocactl" <<'MOCK'
 echo "mocactl $*" >>"$MOCK_LOG"
 [ "$1" = run ] || exit 2
 prompt="$2"; shift 2
-sid="" opt=""
+sid="" opt="" cpurl=""
 while [ $# -gt 0 ]; do
   case "$1" in
   --session) sid="$2"; shift 2 ;;
   --option) opt="$2"; shift 2 ;;
+  --control-plane-url) cpurl="$2"; shift 2 ;;
   *) shift 2 ;;
   esac
 done
+# loadAuth (packages/mocactl/src/config.ts): auth.json counts only if its controlPlaneUrl equals the
+# flag with trailing slashes stripped (normalizeUrl).
+while [ "${cpurl%/}" != "$cpurl" ]; do cpurl="${cpurl%/}"; done
 sub="$(node -e 'const a = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
   const c = JSON.parse(Buffer.from(a.apiToken.split(".")[1], "base64url"));
-  process.stdout.write(c.sub === a.subject && c.scope.includes("api") ? c.sub : "")' \
-  "$XDG_CONFIG_HOME/mocactl/auth.json" 2>/dev/null)"
+  process.stdout.write(c.sub === a.subject && c.scope.includes("api") && a.controlPlaneUrl === process.argv[2]
+    ? c.sub : "")' "$XDG_CONFIG_HOME/mocactl/auth.json" "$cpurl" 2>/dev/null)"
 case "$sub" in p4smoke:a | p4smoke:b) ;; *) echo "not logged in — run \`mocactl login\` first" >&2; exit 2 ;; esac
 if [ -z "$sid" ] && [ "$opt" != "inferenceCredential=p4-smoke-mock" ]; then
   echo "choose the inference credential with --option inferenceCredential=<value>" >&2; exit 2
 fi
+# A new session needs the subject's OWN stored credential (resolveSessionOptions lists the caller's).
+if [ -z "$sid" ] && [ ! -e "$STATE/cred-$sub" ]; then
+  echo "cannot start a session: add an inference credential to start" >&2; exit 2
+fi
+[ -n "${MOCK_MOCACTL_HANG:-}" ] && exec sleep 30 # a turn that never ends
 resp="$(fake-turn "$sid" "$prompt")" || { echo "session not found" >&2; exit 1; }
+# The control plane's ownership index: a new session belongs to the subject that created it.
+[ -n "$sid" ] || echo "$sub" >"$STATE/owner-$(cat "$STATE/last-sid")"
 echo "session $(cat "$STATE/last-sid")" >&2
 printf '%b\n' "$resp"
 MOCK
@@ -185,16 +217,74 @@ if [ -e "$DIR/../../packages/control-plane/node_modules/tsx" ]; then
     sed -n 's/^SH_SESSION_TOKEN_PRIVATE_KEY=//p' >"$TMP/cred/session-token-private-key"
   check "a signing key was generated for the test" \
     "$([ -s "$TMP/cred/session-token-private-key" ] && echo yes || echo no)" "yes"
-  MOCA_CRED_DIR="$TMP/cred" MOCACTL=mocactl bash "$SCRIPT" --auth --failure-paths --out "$TMP/out3" \
+  # A trailing slash on --control-plane, as an operator might type it (#409 review).
+  MOCA_CRED_DIR="$TMP/cred" MOCACTL=mocactl bash "$SCRIPT" --auth --failure-paths \
+    --control-plane http://127.0.0.1:8090/ --out "$TMP/out3" \
     >"$TMP/run3.log" 2>&1
   rc=$?
   check "exit 0" "$rc" "0"
   [ "$rc" = 0 ] || sed -n '/FAIL/p' "$TMP/run3.log"
-  check "session B was subject b's" "$(grep -c 'ok: subject b cannot read subject a' "$TMP/out3/SUMMARY")" "1"
+  check "session B was subject b's" "$(grep -c 'ok: subject b reads its own session B' "$TMP/out3/SUMMARY")" "1"
+  check "subject b was refused session A" "$(grep -c 'ok: subject b cannot read subject a' "$TMP/out3/SUMMARY")" "1"
   check "each subject stored the mock credential" "$(grep -c '^credential-put .*/v1/credentials/p4-smoke-mock$' "$MOCK_LOG")" "2"
   check "every turn went through mocactl" "$(grep -c '^mocactl run ' "$MOCK_LOG")" "5"
   check "no api token on any argv" "$(grep -c 'eyJ' "$MOCK_LOG")" "0"
+  mode() { node -e 'process.stdout.write((require("fs").statSync(process.argv[1]).mode & 0o777).toString(8))' "$1"; }
+  check "the --out directory is 0700" "$(mode "$TMP/out3")" "700"
+  check "each subject's config directory is 0700" "$(mode "$TMP/out3/xdg-a")$(mode "$TMP/out3/xdg-b")" "700700"
+  check "api.hdr is 0600" "$(mode "$TMP/out3/xdg-b/api.hdr")" "600"
   check "auth.json is 0600" "$(node -e 'process.stdout.write((require("fs").statSync(process.argv[1]).mode & 0o777).toString(8))' "$TMP/out3/xdg-a/mocactl/auth.json")" "600"
+
+  # The checks above must be able to fail for the regressions they name (#409 review): run mutated
+  # copies of the driver. MOCA_ROOT is set because a copy in $TMP cannot find the checkout itself.
+  mutant() { # mutant <name> <sed expression>: prints a copy of the driver with one change; fails if it did not apply
+    sed "$2" "$SCRIPT" >"$TMP/mutant-$1.sh"
+    if cmp -s "$SCRIPT" "$TMP/mutant-$1.sh"; then return 1; fi
+    echo "$TMP/mutant-$1.sh"
+  }
+  echo "== --auth mutant: every turn runs as subject a"
+  rm -rf "$STATE"
+  if m="$(mutant one-subject 's#local dir="$OUT/xdg-${4:-a}"#local dir="$OUT/xdg-a"#')"; then
+    MOCA_ROOT="$DIR/../.." MOCA_CRED_DIR="$TMP/cred" MOCACTL=mocactl bash "$m" --auth --out "$TMP/out5" >"$TMP/run5.log" 2>&1
+    check "the run fails" "$([ $? -ne 0 ] && echo yes || echo no)" "yes"
+    check "and names it: b does not own session B" \
+      "$(grep -c "FAIL: subject b reads its own session B" "$TMP/out5/SUMMARY")" "1"
+  else check "the one-subject mutation applied" no yes; fi
+  echo "== --auth mutant: the api token on curl's argv"
+  rm -rf "$STATE"; : >"$MOCK_LOG"
+  if m="$(mutant token-argv 's#-H @"$OUT/xdg-$1/api.hdr" -H '"'"'content-type#-H "$(cat "$OUT/xdg-$1/api.hdr")" -H '"'"'content-type#')"; then
+    MOCA_ROOT="$DIR/../.." MOCA_CRED_DIR="$TMP/cred" MOCACTL=mocactl bash "$m" --auth --out "$TMP/out6" >"$TMP/run6.log" 2>&1
+    check "the token shows up in the call log" "$([ "$(grep -c 'eyJ' "$MOCK_LOG")" -gt 0 ] && echo yes || echo no)" "yes"
+  else check "the token-argv mutation applied" no yes; fi
+
+  echo "== --auth: a hung mocactl run ends the turn, named, instead of hanging the driver"
+  if command -v timeout >/dev/null; then
+    rm -rf "$STATE"
+    MOCK_MOCACTL_HANG=1 SMOKE_TURN_TIMEOUT=1 MOCA_CRED_DIR="$TMP/cred" MOCACTL=mocactl \
+      bash "$SCRIPT" --auth --out "$TMP/out7" >"$TMP/run7.log" 2>&1
+    check "exit non-zero" "$([ $? -ne 0 ] && echo yes || echo no)" "yes"
+    check "a1's turn is named as timed out" "$(grep -c "FAIL: a1 HTTP 200 (want '200', got 'timed-out')" "$TMP/out7/SUMMARY")" "1"
+  else
+    echo "  SKIP: no timeout(1) on this host (macOS without coreutils); CI and the rig have it"
+  fi
+
+  echo "== --auth mutant: subject b's credential is stored with subject a's token"
+  rm -rf "$STATE"
+  if m="$(mutant cred-as-a 's#-H @"$OUT/xdg-$1/api.hdr" -H '"'"'content-type#-H @"$OUT/xdg-a/api.hdr" -H '"'"'content-type#')"; then
+    MOCA_ROOT="$DIR/../.." MOCA_CRED_DIR="$TMP/cred" MOCACTL=mocactl bash "$m" --auth --out "$TMP/out8" >"$TMP/run8.log" 2>&1
+    check "b1 cannot start a session" "$(grep -c "FAIL: b1 HTTP 200 (want '200', got 'exit-2')" "$TMP/out8/SUMMARY")" "1"
+  else check "the cred-as-a mutation applied" no yes; fi
+  echo "== --auth mutant: a credential the control plane would refuse"
+  rm -rf "$STATE"
+  if m="$(mutant bad-consumer 's#consumer: "inference"#consumer: "egress"#')"; then
+    MOCA_ROOT="$DIR/../.." MOCA_CRED_DIR="$TMP/cred" MOCACTL=mocactl bash "$m" --auth --out "$TMP/out9" >"$TMP/run9.log" 2>&1
+    check "the PUT is named as refused" "$(grep -c "FAIL: stored subject a's inference credential (want '204', got '400')" "$TMP/out9/SUMMARY")" "1"
+  else check "the bad-consumer mutation applied" no yes; fi
+  echo "== --auth refuses an --out that is a symlink (it would hold tokens)"
+  mkdir -p "$TMP/real-out"; ln -s "$TMP/real-out" "$TMP/link-out"
+  MOCA_CRED_DIR="$TMP/cred" MOCACTL=mocactl bash "$SCRIPT" --auth --out "$TMP/link-out" >"$TMP/run10.log" 2>&1
+  check "exit 2" "$?" "2"
+  check "nothing was minted into it" "$(find "$TMP/real-out" -name api.hdr | wc -l | tr -d ' ')" "0"
 
   echo "== --auth without a readable signing key fails at the mint, by name"
   rm -rf "$STATE"
