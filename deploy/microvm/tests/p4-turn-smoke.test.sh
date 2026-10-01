@@ -27,14 +27,17 @@ mkdir -p "$TMP/bin"
 
 cat >"$TMP/bin/curl" <<'MOCK'
 #!/usr/bin/env bash
-# Minimal curl: -o FILE, -w '%{http_code}', -d BODY, --unix-socket SOCK, and a URL.
-out=/dev/stdout body="" sock="" url="" wfmt=""
+# Minimal curl: -o FILE, -w '%{http_code}', -d BODY, -H @FILE, --unix-socket SOCK, and a URL. Its
+# argv is logged whole, so a token passed on the command line instead of through a file shows up.
+echo "curl $*" >>"$MOCK_LOG"
+out=/dev/stdout body="" sock="" url="" wfmt="" hdrfile=""
 while [ $# -gt 0 ]; do
   case "$1" in
   -o) out="$2"; shift 2 ;;
   -w) wfmt="$2"; shift 2 ;;
   -d) body="$2"; shift 2 ;;
-  -H | --max-time | -X) shift 2 ;;
+  -H) case "$2" in @*) hdrfile="${2#@}" ;; esac; shift 2 ;;
+  --max-time | -X) shift 2 ;;
   --unix-socket) sock="$2"; shift 2 ;;
   -*) shift ;;
   *) url="$1"; shift ;;
@@ -44,34 +47,108 @@ if [ -n "$sock" ]; then # Firecracker GET /: only vm-7 is running; the rest are 
   case "$sock" in */vm-7/*) echo '{"state":"Running"}' ;; *) echo '{"state":"Paused"}' ;; esac
   exit 0
 fi
-sid="$(node -e 'const b=JSON.parse(process.argv[1]); process.stdout.write(b.sessionId ?? "")' "$body")"
-prompt="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).prompt)' "$body")"
-mkdir -p "$STATE/ws"
-code=200
-if [ -n "$sid" ] && [ ! -d "$STATE/ws/$sid" ]; then
-  code=404; resp=""
-  printf '{"error":"session_not_found"}' >"$out"
+mkdir -p "$STATE"
+# The caller, as the control plane would see it: the `sub` of the bearer token in the -H @FILE.
+sub="$(sed -n 's/^Authorization: Bearer //p' "$hdrfile" 2>/dev/null | node -e 'let t = "";
+  process.stdin.on("data", (c) => (t += c)).on("end", () => { try { process.stdout.write(
+    JSON.parse(Buffer.from(t.trim().split(".")[1], "base64url")).sub) } catch {} })')"
+if [ "$url" != "${url%/v1/credentials/*}" ]; then # PUT /v1/credentials/<name>, as a minted subject
+  echo "credential-put $url" >>"$MOCK_LOG"
+  # The shape putCredential accepts for an inference credential; anything else is its 400.
+  if [ -n "$sub" ] && node -e 'const b = JSON.parse(process.argv[1]);
+    process.exit(b.kind === "bearer" && b.consumer === "inference" && /^https?:\/\//.test(b.endpoint) &&
+      Array.isArray(b.destination?.hosts) && b.destination.hosts.length > 0 && b.secret?.token ? 0 : 1)' "$body"; then
+    code=204; : >"$out"; touch "$STATE/cred-$sub" # putCredential's real code
+  else
+    code=400; printf '{"error":"invalid_request"}' >"$out"
+  fi
+elif [ "$url" != "${url%/v1/sessions/*}" ]; then # GET /v1/sessions/<id>: 200 to its owner only
+  id="${url##*/v1/sessions/}"
+  if [ -n "$id" ] && [ -n "$sub" ] && [ "$(cat "$STATE/owner-$id" 2>/dev/null)" = "$sub" ]; then
+    code=200; printf '{"sessionId":"%s"}' "$id" >"$out"
+  else
+    code=404; printf '{"error":"session_not_found"}' >"$out"
+  fi
+elif [ "$url" != "${url%/healthz}" ]; then
+  code=200; printf 'ok' >"$out"
 else
-  if [ -z "$sid" ]; then sid="sess-$(ls "$STATE/ws" | wc -l | tr -d ' ')"; mkdir -p "$STATE/ws/$sid"; fi
-  ws="$STATE/ws/$sid"
-  logexec() { n=$(( $(cat "$STATE/vmseq" 2>/dev/null || echo 0) + 1 )); echo "$n" >"$STATE/vmseq"
-    echo "vmpool: exec req=$n workspace_key=\"$sid\" vm=vm-$n cold=\"\" exit=0 err=<nil>" >>"$STATE/journal"; }
-  case "$prompt" in
-  P4-SMOKE-WRITE) logexec; logexec; touch "$ws/proof" "$ws/repo"
-    resp="done-write\n6.1.0-guest\nimage=ghcr.io/x\n/workspace\n## No commits yet on main\n42\nripgrep 15.2.0" ;;
-  P4-SMOKE-READ) logexec
-    if [ -e "$ws/proof" ]; then resp="done-read\np4-proof\ncontinuity-ok"
-    else resp="done-read\ncat: proof.txt: No such file or directory\ncontinuity-missing"; fi ;;
-  P4-SMOKE-SLEEP) # ends when the worker restarts or the running VM is killed
-    for _ in $(seq 50); do [ -e "$STATE/interrupted" ] && break; sleep 0.1; done
-    why="$(cat "$STATE/interrupted" 2>/dev/null)"; rm -f "$STATE/interrupted"
-    resp="done-sleep\n${why:-slept}" ;;
-  esac
-  [ -n "${MOCK_EMPTY_RESPONSE:-}" ] && resp=""
-  printf '{"sessionId":"%s","response":"%s","stopReason":"end_turn"}' "$sid" "$resp" >"$out"
+  sid="$(node -e 'const b=JSON.parse(process.argv[1]); process.stdout.write(b.sessionId ?? "")' "$body")"
+  prompt="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).prompt)' "$body")"
+  code=200
+  if resp="$(fake-turn "$sid" "$prompt")"; then
+    printf '{"sessionId":"%s","response":"%s","stopReason":"end_turn"}' "$(cat "$STATE/last-sid")" "$resp" >"$out"
+  else
+    code=404; printf '{"error":"session_not_found"}' >"$out"
+  fi
 fi
 [ -n "$wfmt" ] && printf '%s' "$code"
 exit 0
+MOCK
+cat >"$TMP/bin/fake-turn" <<'MOCK'
+#!/usr/bin/env bash
+# fake-turn <session id, or "" for new> <prompt>: the supervisor's turn, shared by the curl mock
+# (/turn) and the mocactl mock (/v1/turn). Prints the response text with \n escapes and writes the
+# session id to $STATE/last-sid. Exit 4 = session_not_found.
+sid="$1" prompt="$2"
+mkdir -p "$STATE/ws"
+if [ -n "$sid" ] && [ ! -d "$STATE/ws/$sid" ]; then exit 4; fi
+if [ -z "$sid" ]; then sid="sess-$(ls "$STATE/ws" | wc -l | tr -d ' ')"; mkdir -p "$STATE/ws/$sid"; fi
+ws="$STATE/ws/$sid"
+logexec() { n=$(( $(cat "$STATE/vmseq" 2>/dev/null || echo 0) + 1 )); echo "$n" >"$STATE/vmseq"
+  echo "vmpool: exec req=$n workspace_key=\"$sid\" vm=vm-$n cold=\"\" exit=0 err=<nil>" >>"$STATE/journal"; }
+case "$prompt" in
+P4-SMOKE-WRITE) logexec; logexec; touch "$ws/proof" "$ws/repo"
+  resp="done-write\n6.1.0-guest\nimage=ghcr.io/x\n/workspace\n## No commits yet on main\n42\nripgrep 15.2.0" ;;
+P4-SMOKE-READ) logexec
+  if [ -e "$ws/proof" ]; then resp="done-read\np4-proof\ncontinuity-ok"
+  else resp="done-read\ncat: proof.txt: No such file or directory\ncontinuity-missing"; fi ;;
+P4-SMOKE-SLEEP) # ends when the worker restarts or the running VM is killed
+  for _ in $(seq 50); do [ -e "$STATE/interrupted" ] && break; sleep 0.1; done
+  why="$(cat "$STATE/interrupted" 2>/dev/null)"; rm -f "$STATE/interrupted"
+  resp="done-sleep\n${why:-slept}" ;;
+esac
+[ -n "${MOCK_EMPTY_RESPONSE:-}" ] && resp=""
+echo "$sid" >"$STATE/last-sid"
+printf '%s' "$resp"
+MOCK
+cat >"$TMP/bin/mocactl" <<'MOCK'
+#!/usr/bin/env bash
+# mocactl run PROMPT --control-plane-url U --harness-url H [--session ID | --option K=V]. Logged in only
+# if $XDG_CONFIG_HOME/mocactl/auth.json holds a token minted for a p4smoke subject; the subject is
+# read from the token itself, so a driver that wrote a wrong or unsigned-looking file fails here.
+echo "mocactl $*" >>"$MOCK_LOG"
+[ "$1" = run ] || exit 2
+prompt="$2"; shift 2
+sid="" opt="" cpurl=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+  --session) sid="$2"; shift 2 ;;
+  --option) opt="$2"; shift 2 ;;
+  --control-plane-url) cpurl="$2"; shift 2 ;;
+  *) shift 2 ;;
+  esac
+done
+# loadAuth (packages/mocactl/src/config.ts): auth.json counts only if its controlPlaneUrl equals the
+# flag with trailing slashes stripped (normalizeUrl).
+while [ "${cpurl%/}" != "$cpurl" ]; do cpurl="${cpurl%/}"; done
+sub="$(node -e 'const a = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+  const c = JSON.parse(Buffer.from(a.apiToken.split(".")[1], "base64url"));
+  process.stdout.write(c.sub === a.subject && c.scope.includes("api") && a.controlPlaneUrl === process.argv[2]
+    ? c.sub : "")' "$XDG_CONFIG_HOME/mocactl/auth.json" "$cpurl" 2>/dev/null)"
+case "$sub" in p4smoke:a | p4smoke:b) ;; *) echo "not logged in — run \`mocactl login\` first" >&2; exit 2 ;; esac
+if [ -z "$sid" ] && [ "$opt" != "inferenceCredential=p4-smoke-mock" ]; then
+  echo "choose the inference credential with --option inferenceCredential=<value>" >&2; exit 2
+fi
+# A new session needs the subject's OWN stored credential (resolveSessionOptions lists the caller's).
+if [ -z "$sid" ] && [ ! -e "$STATE/cred-$sub" ]; then
+  echo "cannot start a session: add an inference credential to start" >&2; exit 2
+fi
+[ -n "${MOCK_MOCACTL_HANG:-}" ] && exec sleep 30 # a turn that never ends
+resp="$(fake-turn "$sid" "$prompt")" || { echo "session not found" >&2; exit 1; }
+# The control plane's ownership index: a new session belongs to the subject that created it.
+[ -n "$sid" ] || echo "$sub" >"$STATE/owner-$(cat "$STATE/last-sid")"
+echo "session $(cat "$STATE/last-sid")" >&2
+printf '%b\n' "$resp"
 MOCK
 cat >"$TMP/bin/podman" <<'MOCK'
 #!/usr/bin/env bash
@@ -129,5 +206,105 @@ check "b1's 'did not see A's file' is a FAIL, not a vacuous ok" \
 check "a1's 'guest kernel is not the host's' is a FAIL, not a vacuous ok" \
   "$(grep -c "FAIL: a1 guest kernel is not the host's" "$TMP/out2/SUMMARY")" "1"
 
+# --auth mints with the control plane's real signer (src/token.ts), which needs the workspace's tsx.
+# CI's deploy-scripts job runs without `pnpm install`, so there it skips; the `check` job, which has
+# the dependencies, runs this suite with P4_SMOKE_REQUIRE_AUTH=1, where a skip is a failure.
+if [ -e "$DIR/../../packages/control-plane/node_modules/tsx" ]; then
+  echo "== --auth: two minted subjects drive mocactl run"
+  rm -rf "$STATE"; : >"$MOCK_LOG"
+  mkdir -p "$TMP/cred"
+  (cd "$DIR/../../packages/control-plane" && node --import tsx src/genkeys.ts) |
+    sed -n 's/^SH_SESSION_TOKEN_PRIVATE_KEY=//p' >"$TMP/cred/session-token-private-key"
+  check "a signing key was generated for the test" \
+    "$([ -s "$TMP/cred/session-token-private-key" ] && echo yes || echo no)" "yes"
+  # A trailing slash on --control-plane, as an operator might type it (#409 review).
+  MOCA_CRED_DIR="$TMP/cred" MOCACTL=mocactl bash "$SCRIPT" --auth --failure-paths \
+    --control-plane http://127.0.0.1:8090/ --out "$TMP/out3" \
+    >"$TMP/run3.log" 2>&1
+  rc=$?
+  check "exit 0" "$rc" "0"
+  [ "$rc" = 0 ] || sed -n '/FAIL/p' "$TMP/run3.log"
+  check "session B was subject b's" "$(grep -c 'ok: subject b reads its own session B' "$TMP/out3/SUMMARY")" "1"
+  check "subject b was refused session A" "$(grep -c 'ok: subject b cannot read subject a' "$TMP/out3/SUMMARY")" "1"
+  check "each subject stored the mock credential" "$(grep -c '^credential-put .*/v1/credentials/p4-smoke-mock$' "$MOCK_LOG")" "2"
+  check "every turn went through mocactl" "$(grep -c '^mocactl run ' "$MOCK_LOG")" "5"
+  check "no api token on any argv" "$(grep -c 'eyJ' "$MOCK_LOG")" "0"
+  mode() { node -e 'process.stdout.write((require("fs").statSync(process.argv[1]).mode & 0o7777).toString(8))' "$1"; }
+  check "the --out directory is 0700" "$(mode "$TMP/out3")" "700"
+  check "each subject's config directory is 0700" "$(mode "$TMP/out3/xdg-a")$(mode "$TMP/out3/xdg-b")" "700700"
+  check "api.hdr is 0600" "$(mode "$TMP/out3/xdg-b/api.hdr")" "600"
+  check "auth.json is 0600" "$(mode "$TMP/out3/xdg-a/mocactl/auth.json")" "600"
+
+  # The checks above must be able to fail for the regressions they name (#409 review): run mutated
+  # copies of the driver. MOCA_ROOT is set because a copy in $TMP cannot find the checkout itself.
+  mutant() { # mutant <name> <sed expression>: prints a copy of the driver with one change; fails if it did not apply
+    sed "$2" "$SCRIPT" >"$TMP/mutant-$1.sh"
+    if cmp -s "$SCRIPT" "$TMP/mutant-$1.sh"; then return 1; fi
+    echo "$TMP/mutant-$1.sh"
+  }
+  echo "== --auth mutant: every turn runs as subject a"
+  rm -rf "$STATE"
+  if m="$(mutant one-subject 's#local dir="$OUT/xdg-${4:-a}"#local dir="$OUT/xdg-a"#')"; then
+    MOCA_ROOT="$DIR/../.." MOCA_CRED_DIR="$TMP/cred" MOCACTL=mocactl bash "$m" --auth --out "$TMP/out5" >"$TMP/run5.log" 2>&1
+    check "the run fails" "$([ $? -ne 0 ] && echo yes || echo no)" "yes"
+    check "and names it: b does not own session B" \
+      "$(grep -c "FAIL: subject b reads its own session B" "$TMP/out5/SUMMARY")" "1"
+  else check "the one-subject mutation applied" no yes; fi
+  echo "== --auth mutant: the api token on curl's argv"
+  rm -rf "$STATE"; : >"$MOCK_LOG"
+  if m="$(mutant token-argv 's#-H @"$OUT/xdg-$1/api.hdr" -H '"'"'content-type#-H "$(cat "$OUT/xdg-$1/api.hdr")" -H '"'"'content-type#')"; then
+    MOCA_ROOT="$DIR/../.." MOCA_CRED_DIR="$TMP/cred" MOCACTL=mocactl bash "$m" --auth --out "$TMP/out6" >"$TMP/run6.log" 2>&1
+    check "the token shows up in the call log" "$([ "$(grep -c 'eyJ' "$MOCK_LOG")" -gt 0 ] && echo yes || echo no)" "yes"
+  else check "the token-argv mutation applied" no yes; fi
+
+  echo "== --auth: a hung mocactl run ends the turn, named, instead of hanging the driver"
+  if command -v timeout >/dev/null; then
+    rm -rf "$STATE"
+    MOCK_MOCACTL_HANG=1 SMOKE_TURN_TIMEOUT=1 MOCA_CRED_DIR="$TMP/cred" MOCACTL=mocactl \
+      bash "$SCRIPT" --auth --out "$TMP/out7" >"$TMP/run7.log" 2>&1
+    check "exit non-zero" "$([ $? -ne 0 ] && echo yes || echo no)" "yes"
+    check "a1's turn is named as timed out" "$(grep -c "FAIL: a1 HTTP 200 (want '200', got 'timed-out')" "$TMP/out7/SUMMARY")" "1"
+  else
+    echo "  SKIP: no timeout(1) on this host (macOS without coreutils); CI and the rig have it"
+  fi
+
+  echo "== --auth mutant: subject b's credential is stored with subject a's token"
+  rm -rf "$STATE"
+  if m="$(mutant cred-as-a 's#-H @"$OUT/xdg-$1/api.hdr" -H '"'"'content-type#-H @"$OUT/xdg-a/api.hdr" -H '"'"'content-type#')"; then
+    MOCA_ROOT="$DIR/../.." MOCA_CRED_DIR="$TMP/cred" MOCACTL=mocactl bash "$m" --auth --out "$TMP/out8" >"$TMP/run8.log" 2>&1
+    check "b1 cannot start a session" "$(grep -c "FAIL: b1 HTTP 200 (want '200', got 'exit-2')" "$TMP/out8/SUMMARY")" "1"
+  else check "the cred-as-a mutation applied" no yes; fi
+  echo "== --auth mutant: a credential the control plane would refuse"
+  rm -rf "$STATE"
+  if m="$(mutant bad-consumer 's#consumer: "inference"#consumer: "egress"#')"; then
+    MOCA_ROOT="$DIR/../.." MOCA_CRED_DIR="$TMP/cred" MOCACTL=mocactl bash "$m" --auth --out "$TMP/out9" >"$TMP/run9.log" 2>&1
+    check "the PUT is named as refused" "$(grep -c "FAIL: stored subject a's inference credential (want '204', got '400')" "$TMP/out9/SUMMARY")" "1"
+  else check "the bad-consumer mutation applied" no yes; fi
+  echo "== --auth refuses an --out that already exists, or is a symlink (it would hold tokens)"
+  mkdir -p "$TMP/shared"; chmod 1777 "$TMP/shared"; : >"$TMP/shared/someone-elses-file"
+  ln -s "$TMP/shared" "$TMP/link-out"
+  for o in "$TMP/shared" "$TMP/link-out"; do
+    MOCA_CRED_DIR="$TMP/cred" MOCACTL=mocactl bash "$SCRIPT" --auth --out "$o" >"$TMP/run10.log" 2>&1
+    rc=$? # before the check's own $(basename): it would reset $?
+    check "exit 2 for $(basename "$o")" "$rc" "2"
+  done
+  check "the existing directory's mode is untouched" "$(mode "$TMP/shared")" "1777"
+  check "nothing was minted into it" "$(find "$TMP/shared" -name api.hdr | wc -l | tr -d ' ')" "0"
+  echo "== --auth creates a named --out that does not exist yet, 0700"
+  rm -rf "$STATE"
+  MOCA_CRED_DIR="$TMP/cred" MOCACTL=mocactl bash "$SCRIPT" --auth --out "$TMP/new-out" >"$TMP/run11.log" 2>&1
+  check "it ran (PASS)" "$(grep -c '^PASS' "$TMP/run11.log")" "1"
+  check "it is 0700" "$(mode "$TMP/new-out")" "700"
+
+  echo "== --auth without a readable signing key fails at the mint, by name"
+  rm -rf "$STATE"
+  MOCA_CRED_DIR="$TMP/nowhere" MOCACTL=mocactl bash "$SCRIPT" --auth --out "$TMP/out4" >"$TMP/run4.log" 2>&1
+  check "exit non-zero" "$([ $? -ne 0 ] && echo yes || echo no)" "yes"
+  check "the mint failure is named" "$(grep -c "FAIL: minted subject a's api token" "$TMP/out4/SUMMARY")" "1"
+elif [ "${P4_SMOKE_REQUIRE_AUTH:-}" = 1 ]; then
+  check "tsx is installed for the --auth block (P4_SMOKE_REQUIRE_AUTH=1)" "no" "yes"
+else
+  echo "== --auth: SKIP (no tsx in packages/control-plane: run \`pnpm install\`; CI runs it in \`check\`)"
+fi
 if [ "$fails" -eq 0 ]; then echo "PASS"; else echo "FAIL ($fails)"; fi
 exit "$fails"

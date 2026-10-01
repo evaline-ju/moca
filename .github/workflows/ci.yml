@@ -64,6 +64,12 @@ jobs:
       - name: Test
         run: pnpm -r test
 
+      # p4-turn-smoke --auth mints with the control plane's real signer, which needs this job's
+      # `pnpm install` (tsx). deploy-scripts has no node_modules, so it skips that block; here a
+      # skip is a failure.
+      - name: P4 turn driver, authenticated mode
+        run: P4_SMOKE_REQUIRE_AUTH=1 bash deploy/microvm/tests/p4-turn-smoke.test.sh
+
   # Runs the same `make lint` (pre-commit over all files) that contributors run locally, so
   # a config that silently executes zero hooks can no longer look identical to a green
   # build -- which is exactly how the broken `typescript` identify tag survived unnoticed.
