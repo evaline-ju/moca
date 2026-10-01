@@ -143,6 +143,10 @@ services:
       # every user without their own inference credential spends the operator's key (spec §6.4).
       SH_ALLOW_OPERATOR_FALLBACK:
       SH_OPERATOR_INFERENCE_TOKEN:
+      # authorization (Bearer, a gateway token; the default) or x-api-key (an Anthropic API key, with
+      # SH_DEFAULT_INFERENCE_ENDPOINT=https://api.anthropic.com). The control plane refuses to boot
+      # on a token, header and endpoint that cannot work together (#368).
+      SH_OPERATOR_INFERENCE_HEADER:
       SH_DEFAULT_INFERENCE_ENDPOINT:
       SH_API_TOKEN_TTL_SECONDS:
       SH_SESSION_TOKEN_TTL_SECONDS:

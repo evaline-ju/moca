@@ -1,5 +1,6 @@
 import type { ControlPlaneApi, CreateSessionRequest } from '../api/types.js';
 import type { Preset } from '../config.js';
+import { ApiError } from '../api/errors.js';
 import { sanitizeRemote } from './sanitize.js';
 
 // Spec §7.3. Supporting a new session-time parameter (a model, a sandbox selector) is one more
@@ -14,6 +15,12 @@ export interface SessionOptionField {
   key: string;
   label: string;
   emptyHint: string;
+  /**
+   * With no choice to offer, leave the field unset and let the server decide rather than block: the
+   * control plane may have a default (the operator fallback, #368). A server refusal comes back as
+   * `credential_required` and is mapped to `emptyHint` by fieldRefusedByServer.
+   */
+  serverMayResolve?: boolean;
   source(api: ControlPlaneApi): Promise<Choice[]>;
   toRequest(value: string, req: CreateSessionRequest): CreateSessionRequest;
 }
@@ -22,6 +29,7 @@ export const inferenceCredentialField: SessionOptionField = {
   key: 'inferenceCredential',
   label: 'Inference credential',
   emptyHint: 'add an inference credential to start',
+  serverMayResolve: true,
   async source(api) {
     return (await api.listCredentials())
       .filter((c) => c.consumer === 'inference')
@@ -65,7 +73,10 @@ export async function resolveSessionOptions(
       values[field.key] = wanted;
       continue;
     }
-    if (choices.length === 0) return { status: 'blocked', field, values };
+    if (choices.length === 0) {
+      if (field.serverMayResolve && wanted === undefined) continue;
+      return { status: 'blocked', field, values };
+    }
     if (choices.length === 1 && wanted === undefined) {
       values[field.key] = choices[0].value;
       continue;
@@ -80,8 +91,22 @@ export async function resolveSessionOptions(
     };
   }
   let request: CreateSessionRequest = {};
-  for (const field of fields) request = field.toRequest(values[field.key], request);
+  for (const field of fields) {
+    if (values[field.key] !== undefined) request = field.toRequest(values[field.key], request);
+  }
   return { status: 'ready', values, request };
+}
+
+/**
+ * The field a `POST /v1/sessions` refusal is about, when the server declined to resolve one the
+ * client left to it (serverMayResolve): the caller then shows that field's emptyHint, as if blocked.
+ */
+export function fieldRefusedByServer(
+  err: unknown,
+  fields: readonly SessionOptionField[],
+): SessionOptionField | undefined {
+  if (!(err instanceof ApiError) || err.code !== 'credential_required') return undefined;
+  return fields.find((f) => f.serverMayResolve);
 }
 
 export function checkPreset(

@@ -570,6 +570,103 @@ wire_supervisor_mu1() {
   fi
 }
 
+# file_mode <file>: its permission bits in octal (GNU stat, then BSD stat for the macOS test run).
+# -L: a symlink's TARGET, which is what LoadCredential= reads (a link's own mode is always 777).
+file_mode() { stat -L -c '%a' "$1" 2>/dev/null || stat -L -f '%Lp' "$1"; }
+
+# operator_fallback_value <env file>: SH_ALLOW_OPERATOR_FALLBACK as systemd's EnvironmentFile= reads it
+# -- leading whitespace allowed, like the SH_OPERATOR_INFERENCE_TOKEN guard below -- with quotes removed.
+operator_fallback_value() {
+  local v
+  # Whitespace around the key and after `=` too: parse_env_file_internal (systemd's env-file.c) trims
+  # the key and skips blanks after `=`.
+  v="$( (grep -E '^[[:space:]]*SH_ALLOW_OPERATOR_FALLBACK[[:space:]]*=' "$1" 2>/dev/null || true) | tail -1)"
+  v="${v#*=}"
+  v="${v#"${v%%[![:space:]]*}"}"
+  # Trailing whitespace goes, as systemd drops it from an unquoted value; then a matched pair of
+  # quotes only, exactly as env_file_value strips them.
+  v="${v%"${v##*[![:space:]]}"}"
+  if ((${#v} >= 2)); then
+    case "$v" in
+    \"*\") v="${v#\"}"; v="${v%\"}" ;;
+    \'*\') v="${v#\'}"; v="${v%\'}" ;;
+    esac
+  fi
+  printf '%s' "$v"
+}
+
+# The operator-key fallback's token (#368, spec §6.4): an operator secret this script never generates,
+# reads or copies -- only its presence is checked. When the file exists a drop-in loads it into the
+# control plane with LoadCredential=, like the MU1 secrets; when it does not, the drop-in goes too,
+# because LoadCredential= on a missing file fails the unit. Whether the token, its header and the
+# default endpoint agree is the control plane's own boot check (main.ts checkInferenceConfig).
+OPERATOR_TOKEN_FILE=operator-inference-token
+OPERATOR_DROPIN=50-operator-inference-token.conf
+ensure_operator_fallback() {
+  local cp="$SH_ENV_DIR/control-plane.env" f dropin_dir other allow
+  f="$(cred_dir)/$OPERATOR_TOKEN_FILE"
+  dropin_dir="$SH_UNIT_DIR/sh-control-plane.service.d"
+  allow="$(operator_fallback_value "$cp")"
+  # Any OTHER drop-in loading this credential -- the `systemctl edit` override.conf that this README
+  # told operators to write before #411 -- doubles the line while the token exists, and once it goes
+  # fails the unit on the missing file. It is the operator's file, so it is named, not removed.
+  # As systemd parses a unit file: whitespace around `=`, the Encrypted form, and the colon-less one.
+  other="$(grep -lE '^[[:space:]]*LoadCredential(Encrypted)?[[:space:]]*=[[:space:]]*SH_OPERATOR_INFERENCE_TOKEN([:[:space:]]|$)' \
+    "$dropin_dir"/*.conf 2>/dev/null |
+    grep -vxF "$dropin_dir/$OPERATOR_DROPIN" || true)"
+  if [[ -n "$other" ]]; then
+    echo "$(tr '\n' ' ' <<<"$other")also loads SH_OPERATOR_INFERENCE_TOKEN. setup-vm.sh now manages that" \
+      "credential itself ($OPERATOR_DROPIN): delete the LoadCredential= line from that file (or the" \
+      "file, if it holds nothing else), then re-run." >&2
+    return 1
+  fi
+  # Every spelling systemd's EnvironmentFile= accepts: leading whitespace, and whitespace around `=`.
+  if grep -qE '^[[:space:]]*SH_OPERATOR_INFERENCE_TOKEN[[:space:]]*=' "$cp" 2>/dev/null; then
+    echo "$cp sets SH_OPERATOR_INFERENCE_TOKEN, which on this VM is a systemd credential ($f): with" \
+      "both, the control plane refuses to boot. Move the value into that file (mode 0600), delete the" \
+      "line, then re-run." >&2
+    return 1
+  fi
+  if [[ -L "$f" && ! -e "$f" ]]; then
+    echo "$f is a dangling symlink. Point it at the operator's inference key, or remove it to turn the" \
+      "fallback's token off, then re-run." >&2
+    return 1
+  fi
+  if [[ -e "$f" ]]; then
+    if [[ ! -s "$f" ]]; then
+      echo "$f is empty. Put the operator's inference key in it, or delete it to turn the fallback's" \
+        "token off, then re-run." >&2
+      return 1
+    fi
+    if [[ ! "$(file_mode "$f")" =~ ^[46]00$ ]]; then
+      echo "$f is mode $(file_mode "$f"): it is the operator's inference key, so it must be 0600 or" \
+        "0400 (root only). sudo chmod 0600 $f, then re-run." >&2
+      return 1
+    fi
+    install -d -m 0755 "$dropin_dir"
+    printf '%s\n' '# Written by deploy/vm/setup-vm.sh because the operator token file exists (#368).' \
+      '# Removed by it when the file goes: LoadCredential= on a missing file fails the unit.' \
+      '[Service]' \
+      "LoadCredential=SH_OPERATOR_INFERENCE_TOKEN:/etc/serverless-harness/credentials/$OPERATOR_TOKEN_FILE" \
+      >"$dropin_dir/$OPERATOR_DROPIN"
+    chmod 0644 "$dropin_dir/$OPERATOR_DROPIN"
+    if [[ "$allow" != true ]]; then
+      log "operator inference token loaded, but the fallback is off (SH_ALLOW_OPERATOR_FALLBACK in $cp)"
+    else
+      log "operator-key fallback on: users with no inference credential of their own spend $f"
+    fi
+    return 0
+  fi
+  if [[ "$allow" == true ]]; then
+    echo "SH_ALLOW_OPERATOR_FALLBACK=true in $cp, but $f does not exist. Put the operator's inference" \
+      "key there (sudo install -m 0600 /dev/null $f && sudoedit $f), or turn the fallback off, then" \
+      "re-run." >&2
+    return 1
+  fi
+  rm -f "$dropin_dir/$OPERATOR_DROPIN"
+  rmdir "$dropin_dir" 2>/dev/null || true
+}
+
 # Sandboxes run on their OWN podman network (MI1 §5 R8), with a fixed subnet so the firewall below
 # can name it, and with isolate=strict so it exchanges no traffic with any other podman network --
 # sh-redis runs on podman's default one. --ignore: a re-run finds it already there. If an operator
@@ -792,6 +889,8 @@ main() {
   # Before install_units: sh-supervisor.service LoadCredential=s the exchange token this creates.
   ensure_mu1_secrets
   wire_supervisor_mu1
+  # Before install_units, whose daemon-reload picks up (or drops) the token's drop-in.
+  ensure_operator_fallback
   install_units
   # Before the containers, so a `podman run` that lands between the two is already covered.
   enable_container_restart

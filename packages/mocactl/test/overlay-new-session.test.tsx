@@ -1,4 +1,5 @@
 import { render } from 'ink-testing-library';
+import { ApiError } from '../src/api/errors.js';
 import { describe, expect, it, vi } from 'vitest';
 import type { CredentialDescriptor } from '../src/api/types.js';
 import { NewSessionOverlay } from '../src/views/overlays/NewSession.js';
@@ -39,11 +40,27 @@ describe('NewSessionOverlay', () => {
     expect(lastFrame()).toContain('creating session');
   });
 
-  it('routes to credentials when there is none', async () => {
-    const { onBlocked, lastFrame } = setup(cpWith());
+  it('routes to credentials when there is none and the server refuses a session without one', async () => {
+    const { onBlocked, lastFrame } = setup(cpWith(), {
+      onCreate: vi.fn(async () => {
+        throw new ApiError(
+          'control-plane',
+          400,
+          'credential_required',
+          'no credential with consumer: inference',
+        );
+      }),
+    });
     await waitFor(() => onBlocked.mock.calls.length > 0, 1000, lastFrame);
     expect(onBlocked).toHaveBeenCalledWith('add an inference credential to start');
     expect(onBlocked).toHaveBeenCalledTimes(1);
+  });
+
+  it('creates a session with no credential of its own when there is none, for the operator fallback (#368)', async () => {
+    const { onCreate, onBlocked, lastFrame } = setup(cpWith());
+    await waitFor(() => onCreate.mock.calls.length > 0, 1000, lastFrame);
+    expect(onCreate).toHaveBeenCalledWith({}, {});
+    expect(onBlocked).not.toHaveBeenCalled();
   });
 
   it('asks when there are several, preselecting the last used', async () => {

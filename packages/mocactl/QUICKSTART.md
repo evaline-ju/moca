@@ -48,7 +48,7 @@ kind load docker-image dev.local/moca:local --name sh-knative
 2. **Application name**: anything, e.g. `mocactl (local)`. **Homepage URL** and **Authorization
    callback URL**: any valid URL, e.g. `http://localhost:18080`. The device flow never redirects.
 3. Tick **Enable Device Flow**. It's off by default, and without it every login fails with
-   `device_flow_disabled`.
+   a message naming `device_flow_disabled`.
 4. **Register application**, then copy the **Client ID** (`Ov23li…`). Don't generate a secret.
 
 The control plane asks GitHub for no scopes: logging in shares your numeric user ID and display
@@ -128,13 +128,13 @@ common first-run failures:
 
 And outside doctor:
 
-| Symptom                                                 | Cause and fix                                                                                                 |
-| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| login fails with `device_flow_disabled`                 | tick **Enable Device Flow** on the OAuth app (step 2)                                                         |
-| login fails with `github device code failed: Not Found` | `SH_GITHUB_CLIENT_ID` is mistyped (GitHub knows no such client)                                               |
-| a turn fails with `endpoint_unresolved`                 | the credential has no **Gateway endpoint**: edit it with `ctrl+x k`                                           |
-| a turn fails on the model call                          | check the credential's key, host and endpoint; a private gateway needs your VPN; only port 443 is allowed out |
-| the script asks "is port … free?"                       | stop whatever holds 18080/18081, or set `MOCACTL_CP_PORT` / `MOCACTL_HARNESS_PORT`                            |
+| Symptom                                        | Cause and fix                                                                                                 |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| login fails with `device_flow_disabled`        | tick **Enable Device Flow** on the OAuth app (step 2)                                                         |
+| login fails with `GitHub knows no OAuth app …` | `SH_GITHUB_CLIENT_ID` is mistyped (GitHub answered `Not Found`)                                               |
+| a turn fails with `endpoint_unresolved`        | the credential has no **Gateway endpoint**: edit it with `ctrl+x k`                                           |
+| a turn fails on the model call                 | check the credential's key, host and endpoint; a private gateway needs your VPN; only port 443 is allowed out |
+| the script asks "is port … free?"              | stop whatever holds 18080/18081, or set `MOCACTL_CP_PORT` / `MOCACTL_HARNESS_PORT`                            |
 
 ## 6. Clean up
 

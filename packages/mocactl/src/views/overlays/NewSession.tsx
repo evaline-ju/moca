@@ -6,6 +6,7 @@ import { describeError } from '../../core/messages.js';
 import {
   SESSION_OPTION_FIELDS,
   checkPreset,
+  fieldRefusedByServer,
   resolveSessionOptions,
   type Resolution,
   type SessionOptionField,
@@ -85,7 +86,10 @@ export function NewSessionOverlay({
       setPhase({ kind: 'creating' });
       await onCreate(r.request, r.values);
     } catch (err) {
-      if (!mountedRef.current || onError?.(err)) return;
+      if (!mountedRef.current) return;
+      const refused = fieldRefusedByServer(err, fields);
+      if (refused) return onBlocked(refused.emptyHint);
+      if (onError?.(err)) return;
       setPhase({ kind: 'error', message: describeError(err) });
     }
   };

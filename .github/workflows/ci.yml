@@ -70,6 +70,13 @@ jobs:
       - name: P4 turn driver, authenticated mode
         run: P4_SMOKE_REQUIRE_AUTH=1 bash deploy/microvm/tests/p4-turn-smoke.test.sh
 
+      # research-smoke.test.sh, likewise, mints real tokens with packages/control-plane's tsx, which
+      # deploy-scripts (no workspace install) does not have, so there it runs only its tsx-free
+      # checks and skips the rest. Here the skip is a FAILURE (MOCA_REQUIRE_WORKSPACE=1), so the
+      # mint-driven checks cannot stop running unseen.
+      - name: Deploy tests that need the workspace
+        run: MOCA_REQUIRE_WORKSPACE=1 bash deploy/vm/tests/research-smoke.test.sh
+
   # Runs the same `make lint` (pre-commit over all files) that contributors run locally, so
   # a config that silently executes zero hooks can no longer look identical to a green
   # build -- which is exactly how the broken `typescript` identify tag survived unnoticed.

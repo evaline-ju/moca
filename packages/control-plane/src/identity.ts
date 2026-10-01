@@ -82,23 +82,40 @@ export class GithubOAuthProvider implements IdentityProvider {
   private async postJson(
     url: string,
     params: Record<string, string>,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<{ status: number; body: Record<string, unknown> }> {
     const res = await this.fetchImpl(url, {
       method: 'POST',
       headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams(params).toString(),
     });
-    return parseBody(await res.text(), res.status);
+    return { status: res.status, body: parseBody(await res.text(), res.status) };
   }
 
   async startDeviceAuth(): Promise<DeviceStart> {
-    const body = await this.postJson(`${this.oauthBase}/login/device/code`, {
+    const { status, body } = await this.postJson(`${this.oauthBase}/login/device/code`, {
       client_id: this.clientId,
       scope: SCOPE,
     });
     if (typeof body.error === 'string') {
-      // device_flow_disabled is the likeliest first-run failure -- it is OFF by default on a GitHub
-      // OAuth app (spec §5.1.1) -- so the provider's own error text is what makes it diagnosable.
+      // The two likeliest first-run failures are the operator's to fix, not the user's: the device
+      // flow is OFF by default on a GitHub OAuth app (spec §5.1.1), and a mistyped client id gets a
+      // bare 404 {"error":"Not Found"} that never mentions the client id. Each gets its own code and
+      // the fix as the message (#405); GitHub's text stays in it so a log still greps for it. The
+      // fix names only settings, never a doc path: the VM README and the kind QUICKSTART both use
+      // these names, and the message is the same in every deployment.
+      if (body.error === 'device_flow_disabled') {
+        throw this.misconfigured(
+          "the control plane's GitHub OAuth app has the device flow off (device_flow_disabled): " +
+            'tick Enable Device Flow on the app',
+        );
+      }
+      // Keyed on the status, not GitHub's text, which is not a documented error code.
+      if (status === 404) {
+        throw this.misconfigured(
+          `GitHub knows no OAuth app with client id ${shortClientId(this.clientId)} ` +
+            `(${body.error}): check SH_GITHUB_CLIENT_ID`,
+        );
+      }
       throw new CpError('unauthorized', `github device code failed: ${body.error}`);
     }
     if (typeof body.device_code !== 'string' || typeof body.user_code !== 'string') {
@@ -117,8 +134,17 @@ export class GithubOAuthProvider implements IdentityProvider {
     };
   }
 
+  /**
+   * Logged as well as returned: the user who sees the reply is not the operator who can fix it, so
+   * the control plane's own log must carry it too.
+   */
+  private misconfigured(message: string): CpError {
+    console.error(`[control-plane] GitHub refused the OAuth app: ${message}`);
+    return new CpError('identity_provider_misconfigured', message);
+  }
+
   async completeDeviceAuth(deviceCode: string): Promise<Principal> {
-    const token = await this.postJson(`${this.oauthBase}/login/oauth/access_token`, {
+    const { body: token } = await this.postJson(`${this.oauthBase}/login/oauth/access_token`, {
       client_id: this.clientId,
       device_code: deviceCode,
       grant_type: GRANT_DEVICE_CODE,
@@ -163,6 +189,17 @@ export class GithubOAuthProvider implements IdentityProvider {
       roles: rolesFor(subject, this.adminSubjects),
     };
   }
+}
+
+/**
+ * Enough of the client id to spot a typo, never all of it. The reply goes to an unauthenticated
+ * caller, and the case it reports is a WRONG value: a pasted client secret or PAT also gets a 404.
+ * Half the value at most, so a short one is not shown whole either; the length catches a truncation.
+ */
+export function shortClientId(clientId: string): string {
+  const shown = clientId.slice(0, Math.min(6, Math.floor(clientId.length / 2)));
+  const n = clientId.length;
+  return `${shown}… (${n} char${n === 1 ? '' : 's'})`;
 }
 
 /** A non-JSON reply (an HTML 502 from a proxy, say) must be `unauthorized`, not a raw SyntaxError. */

@@ -55,6 +55,7 @@ const CODES_USED = [
   'session_mismatch',
   'endpoint_unresolved',
   'authorization_pending',
+  'identity_provider_misconfigured',
   'redis_unavailable',
   'credential_unavailable',
   'internal_error',

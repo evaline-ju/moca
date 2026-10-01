@@ -207,11 +207,23 @@ to store.
    an organization's settings). Any application name. Homepage URL and authorization callback URL
    are required fields, but the device flow never uses them: use the repository URL for both.
 2. On the created app's page, tick **Enable Device Flow** and **Update application**. It is **off by
-   default**, and forgetting it is the likeliest first-run failure: `mocactl login` then prints
-   `login failed: github device code failed: device_flow_disabled`.
+   default**, and forgetting it is the likeliest first-run failure. `mocactl login` then prints this
+   (one line), and the control plane's log carries the same fix:
+
+   ```
+   login failed: the control plane cannot log anyone in until its operator fixes it — the control plane's GitHub OAuth app has the device flow off (device_flow_disabled): tick Enable Device Flow on the app
+   ```
+
 3. Copy the **Client ID** (`Ov23li…` for a new OAuth app). Do not generate a client secret. A
-   mistyped id is a client GitHub does not know: `mocactl login` then prints
-   `login failed: github device code failed: Not Found`.
+   mistyped id is a client GitHub does not know, and the line ends instead with:
+
+   ```
+   GitHub knows no OAuth app with client id Ov23li… (20 chars) (Not Found): check SH_GITHUB_CLIENT_ID
+   ```
+
+   It shows only the start and the length of the id: the reply goes to anyone who can reach the
+   control plane, and a wrong value may be a pasted secret.
+
 4. Give it to the control plane, in either of two ways:
    - on the setup run, through `sudo env` (sudo drops the rest of the environment). The same goes
      for the harness URL, since the control plane starts only once it has both:
@@ -251,17 +263,18 @@ over any session. See "What round one does not claim".
 
 ### Secrets
 
-All three live in `/etc/serverless-harness/credentials/` (directory `0700`, files `0600`, owner
+They all live in `/etc/serverless-harness/credentials/` (directory `0700`, files `0600`, owner
 root), and each unit loads its own with `LoadCredential=` under the setting's own name:
 
-| File                        | Setting                        | Loaded by                      |
-| --------------------------- | ------------------------------ | ------------------------------ |
-| `session-token-private-key` | `SH_SESSION_TOKEN_PRIVATE_KEY` | control plane                  |
-| `credential-kek`            | `SH_CREDENTIAL_KEK`            | control plane                  |
-| `exchange-token`            | `SH_EXCHANGE_TOKEN`            | control plane _and_ supervisor |
+| File                        | Setting                        | Loaded by                       |
+| --------------------------- | ------------------------------ | ------------------------------- |
+| `session-token-private-key` | `SH_SESSION_TOKEN_PRIVATE_KEY` | control plane                   |
+| `credential-kek`            | `SH_CREDENTIAL_KEK`            | control plane                   |
+| `exchange-token`            | `SH_EXCHANGE_TOKEN`            | control plane _and_ supervisor  |
+| `operator-inference-token`  | `SH_OPERATOR_INFERENCE_TOKEN`  | control plane, optional (below) |
 
 The public half of the signing key is not a secret: it is the `SH_SESSION_TOKEN_PUBLIC_KEYS` line
-in `supervisor.env`. Setting any of the three as an env line as well makes the unit refuse to boot
+in `supervisor.env`. Setting any of them as an env line as well makes the unit refuse to boot
 (and `setup-vm.sh` stops before that, naming the line).
 
 `setup-vm.sh` generates them once, with the checkout's own `packages/control-plane/src/genkeys.ts`,
@@ -279,18 +292,54 @@ inherit `CREDENTIALS_DIRECTORY` and the `harness` uid, so they can read the file
 boundary. All three units run as `harness`, so a compromise of the supervisor's uid can read the
 control plane's credentials. A dedicated control-plane user is a follow-up.
 
-**The operator-key fallback** (`SH_ALLOW_OPERATOR_FALLBACK=true`, off by default) needs the
-operator's key as a fourth credential, which `setup-vm.sh` does not create. Put it in a root-only
-file, add a drop-in, and set `SH_ALLOW_OPERATOR_FALLBACK=true` in `control-plane.env`:
+**The operator-key fallback** (`SH_ALLOW_OPERATOR_FALLBACK=true`, off by default) lets a user who
+has stored no inference credential spend the operator's key. Every such turn is audited as
+`operator_fallback_used`. The key is the one secret `setup-vm.sh` does not create: put it in its
+file yourself, set the fallback's settings in `control-plane.env`, and re-run the script. It sees
+the file and installs a drop-in (`sh-control-plane.service.d/50-operator-inference-token.conf`) that
+loads it with `LoadCredential=`. It never reads the value.
 
 ```bash
 sudo install -m 0600 /dev/null /etc/serverless-harness/credentials/operator-inference-token
 sudoedit /etc/serverless-harness/credentials/operator-inference-token   # the key; mode is kept
-sudo systemctl edit sh-control-plane.service
-#   [Service]
-#   LoadCredential=SH_OPERATOR_INFERENCE_TOKEN:/etc/serverless-harness/credentials/operator-inference-token
-sudo systemctl restart sh-control-plane.service
+sudoedit /etc/serverless-harness/control-plane.env
+#   SH_ALLOW_OPERATOR_FALLBACK=true
+#   A gateway token:        SH_DEFAULT_INFERENCE_ENDPOINT=https://<gateway>
+#   An Anthropic API key:   SH_DEFAULT_INFERENCE_ENDPOINT=https://api.anthropic.com
+#                           SH_OPERATOR_INFERENCE_HEADER=x-api-key
+cd /opt/serverless-harness && sudo ./deploy/vm/setup-vm.sh
 ```
+
+The control plane refuses to boot on a fallback that cannot work, naming the setting to fix:
+
+- no token;
+- no default endpoint;
+- an Anthropic key on the Bearer header, or aimed at anything but `https://api.anthropic.com`;
+- an `sk-ant-oat…` OAuth token.
+
+`journalctl -u sh-control-plane` shows which. `setup-vm.sh` itself stops on:
+
+- `SH_ALLOW_OPERATOR_FALLBACK=true` with no token file;
+- a token file that is empty, a dangling symlink, or readable by anyone but its owner (not 0600 or
+  0400; for a symlink, its target's mode);
+- the token as a line in `control-plane.env`, in any spelling systemd accepts (indented, or with
+  spaces around `=`);
+- another drop-in that also loads `SH_OPERATOR_INFERENCE_TOKEN`, such as the `systemctl edit`
+  `override.conf` this README described before.
+
+For that last one, delete the drop-in's `LoadCredential=` line and re-run: the script manages the
+credential itself now.
+
+To turn the fallback off, set `SH_ALLOW_OPERATOR_FALLBACK=false`. To remove the key as well, delete
+the file and re-run: the drop-in goes with it.
+
+A session's credential is fixed when the session is created, in both directions:
+
+- A session started on the fallback keeps spending the operator's key after its user stores a
+  credential of their own. Only a new session picks that credential up. Turning the fallback off ends
+  those sessions' turns with a message saying to start a new one.
+- A session started on the user's own credential never moves onto the operator's key. If the user
+  deletes that credential (because it leaked, say), the session's next turn is refused, naming it.
 
 ### Reaching it: the supported demo topology
 
@@ -483,6 +532,72 @@ the platform. On EC2, require IMDSv2 with a hop limit of 1 (`aws ec2 modify-inst
 obtain a token. On other clouds, use the equivalent, or drop `169.254.0.0/16` from `moca-sandbox0`
 in your own forward-hook table. The in-product fix is tracked in rossoctl/moca#357.
 
+## A research turn: curl and git in the sandbox
+
+**Sandbox egress is open in this round.** The firewall above filters only traffic _to the host_.
+Forwarded traffic isn't filtered, so the agent's bash tool reaches the whole internet from a sandbox
+container: any host, any port, with no proxy and no allowlist. That includes cloud instance metadata:
+close it at the platform first (above, #357). Egress control is MI1 S5's `moca-egress`, not this
+round. The container image guarantees `git`, `curl` and CA certificates (#368), and `HOME` is a
+writable `/home/sandbox`, so `git config --global` works.
+
+Pi shows the model only the last 2000 lines or 50 KB of a command's output, so the prompt steers the
+agent to `curl -o` a file and read it with `grep`/`head`, rather than printing it. The demo's prompt,
+for `mocactl run` or the interactive UI:
+
+```text
+This is a research task. Use your bash tool for every step, and do not answer from memory.
+1. Run: git clone --depth 1 https://github.com/rossoctl/moca /workspace/research-demo/moca
+2. Run: curl -fsSL -o /workspace/research-demo/node-releases.json https://nodejs.org/dist/index.json
+   The file is large: do not print it. Read what you need from it with head, grep or python3.
+3. Find the commit the clone checked out, and the newest Node.js release in the fetched file (its
+   first entry) with its release date.
+Reply with one short paragraph saying what you found, then end with exactly these three lines:
+COMMIT=<the first 12 characters of the commit hash>
+NODE_VERSION=<the version, for example v1.2.3>
+NODE_DATE=<its date, YYYY-MM-DD>
+```
+
+Neither answer can come from a model's memory: the clone's HEAD changes with every merge, and the
+newest Node.js release every few weeks. Check them with `git ls-remote https://github.com/rossoctl/moca HEAD`
+and https://nodejs.org/dist/index.json.
+
+`git clone` refuses a destination that already exists, so to run the prompt a second time on the same
+container, remove `/workspace/research-demo` first (for example
+`sudo podman exec sh-sandbox-0 rm -rf /workspace/research-demo`, on each container), or change the
+directory name in the prompt.
+
+On the container tier, every session shares one `/workspace` per container
+(`remote-worker/internal/exec/runner.go` ignores the workspace key). So a second user's turn can see
+the first user's `research-demo` directory if both land on the same container. It is not a security
+boundary in this round (epic #370).
+
+**The automated check.** `deploy/vm/research-smoke.sh` runs that prompt as a freshly minted user,
+in a per-run directory. It passes only if:
+
+- `git clone` and `curl -o` both appear in the turn's `tool_use` frames and succeed;
+- the answer's three values equal what the **sandbox's own copy** of the fetched files says;
+- the control plane's audit shows the intended credential was spent.
+
+Run it on the VM, as root, on a host with container sandboxes. It refuses to run while a microVM
+worker is in the pool, because that tier has no network (#277).
+
+```bash
+# The user's own credential, from a root-only file holding exactly one line, the key alone (an
+# sk-ant-api… key goes as x-api-key to https://api.anthropic.com; anything else as Bearer to
+# RESEARCH_ENDPOINT):
+sudo install -m 0600 /dev/null /root/inference-key && sudoedit /root/inference-key
+cd /opt/serverless-harness
+sudo VM_RESEARCH_SMOKE=1 RESEARCH_CREDENTIAL_FILE=/root/inference-key ./deploy/vm/research-smoke.sh
+sudo VM_RESEARCH_SMOKE=1 RESEARCH_CREDENTIAL_FILE=/root/gw-token \
+  RESEARCH_ENDPOINT=https://<gateway> ./deploy/vm/research-smoke.sh
+# Or no credential of its own, on the operator-key fallback ("The operator-key fallback", above):
+sudo VM_RESEARCH_SMOKE=1 RESEARCH_USE_OPERATOR_FALLBACK=1 ./deploy/vm/research-smoke.sh
+```
+
+It deletes its credential, session and fetched files afterwards (`KEEP=1` leaves them). A failed run
+keeps its SSE transcript in the directory it names.
+
 ## Reboots
 
 All three units are `WantedBy=multi-user.target`, so systemd brings the relay, the control plane
@@ -568,6 +683,8 @@ Nor does it claim, for the control plane:
   not out of reach of a compromised `harness` process.
 - **Multi-host credentials.** The file store is single-host. Vault, the multi-host store, is not
   wired by `setup-vm.sh`.
+- **Sandbox egress control.** A sandbox container reaches the internet and the cloud's instance
+  metadata ("A research turn" above). Filtering it is MI1 S5.
 - **Sandbox isolation between users.** Session _ownership_ is enforced: each user lists only their
   own sessions, and another user's session answers 404. But on the container tier, every user's
   turns lease the same sandbox containers (`harness/src/select-sandbox.ts` has no owner filter),

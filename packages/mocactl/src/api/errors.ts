@@ -58,6 +58,7 @@ export type UiAction =
   | { kind: 'harness-token-rejected' }
   | { kind: 'session-gone' }
   | { kind: 'endpoint-unresolved'; message: string }
+  | { kind: 'operator-misconfigured'; message: string }
   | { kind: 'retry-after'; seconds: number }
   | { kind: 'unavailable'; source: ErrorSource }
   | { kind: 'connection'; source: ErrorSource; message: string }
@@ -72,6 +73,9 @@ export function classify(err: ApiError): UiAction {
   if (err.code === 'session_not_found') return { kind: 'session-gone' };
   if (err.code === 'endpoint_unresolved')
     return { kind: 'endpoint-unresolved', message: err.message };
+  // Before the >= 500 branch: a 502 here is not "try again shortly" -- retrying never helps (#405).
+  if (err.code === 'identity_provider_misconfigured')
+    return { kind: 'operator-misconfigured', message: err.message };
   if (err.source === 'harness' && err.status === 503 && err.retryAfterS !== undefined) {
     return { kind: 'retry-after', seconds: err.retryAfterS };
   }

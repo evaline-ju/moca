@@ -169,10 +169,10 @@ Open https://github.com/login/device and enter the code ABCD-1234
 logged in as Ada Lovelace
 ```
 
-> If it prints `login failed: github device code failed: device_flow_disabled`, the OAuth app's
-> **Enable Device Flow** box is unticked. `login failed: github device code failed: Not Found` means
-> GitHub knows no such client: `SH_GITHUB_CLIENT_ID` is mistyped. Both are VM-side fixes: nothing
-> the user does helps.
+> If it prints `login failed: the control plane cannot log anyone in until its operator fixes it`,
+> the rest of the line names the fix: `device_flow_disabled` means the OAuth app's **Enable Device
+> Flow** box is unticked, and `GitHub knows no OAuth app with client id …` means
+> `SH_GITHUB_CLIENT_ID` is mistyped. Both are VM-side fixes: nothing the user does helps.
 
 ### 1b. Store an inference credential
 
@@ -425,7 +425,7 @@ Found while preparing this run, checked against `main` @ 6836941. Add what the l
 | 1   | **`/resources` without kubectl.** On a VM, `/v1/sessions/{id}/resources` answers `sandbox.phase: "unknown"`, and `mocactl` never calls the route, so nothing breaks. The route also reports `harness.mode: "knative"` on P6: `resources.ts` guesses the mode from the pod name.    | Cosmetic. Make the mode honest when the route gains a VM consumer.                                    |
 | 2   | **Token expiry mid-demo.** Session tokens (5 min) re-mint on their own. An expired API token (1 h) makes the TUI open its login overlay and replay the prompt, and makes headless `mocactl run` say to run `mocactl login`. So a demo longer than an hour asks for a second login. | Works as designed. For a long demo, set `SH_API_TOKEN_TTL_SECONDS` in `control-plane.env` beforehand. |
 | 3   | **One identity per `XDG_CONFIG_HOME`.** Two users on one machine overwrite each other's `auth.json`.                                                                                                                                                                               | #404: `mocactl --profile`.                                                                            |
-| 4   | **Login misconfiguration has no hint.** The login error is GitHub's, verbatim: `device_flow_disabled` (device flow off) or `Not Found` (mistyped client id). It is diagnosable with this page or the QUICKSTART, but not on its own.                                               | #405: map both to the operator's fix.                                                                 |
+| 4   | **Login misconfiguration had no hint.** The login error was GitHub's, verbatim: `device_flow_disabled` (device flow off) or `Not Found` (mistyped client id). It is diagnosable with this page or the QUICKSTART, but not on its own.                                              | Fixed (#405): mocactl names the operator's fix.                                                       |
 | 5   | **No headless `sessions` or `credentials` command.** Act 2 lists sessions with `curl`, and credentials can be added only in the TUI.                                                                                                                                               | Fixed (#406): `mocactl sessions [--json]`, `mocactl credentials add` (2a, 1b).                        |
 | 6   | **MI1 S2 first-subject pin.** Once it lands, this run under `MOCA_TENANCY=single` refuses user 2 with `403 single_tenant_deployment`.                                                                                                                                              | #407: blocks this run once S2 merges; re-pin tenancy then.                                            |
 | 7   | **Shared `/workspace` on the container tier.** User 2's agent can see user 1's clone ("Notes and limits").                                                                                                                                                                         | #408: per-session directory (not a boundary).                                                         |
