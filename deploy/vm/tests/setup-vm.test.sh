@@ -1238,6 +1238,25 @@ fi
 rm -rf "$SC"
 pass "seed_control_plane_env refuses a malformed value whole, before writing anything"
 
+# The file's value is compared the way systemd reads it: a quoted SH_GITHUB_CLIENT_ID="X" IS X, so an
+# environment saying X is agreement, not a disagreement to warn about. And an operator who commented the
+# slot out (#SH_GITHUB_CLIENT_ID=) has no value: the seed replaces that line, leaving one active line.
+SC="$(mu1_dir)"; cpf="$SC/control-plane.env"
+set_env_line "$cpf" SH_GITHUB_CLIENT_ID '"Ov23liDemo"'
+seed_out="$(SH_ENV_DIR="$SC" SH_GITHUB_CLIENT_ID=Ov23liDemo seed_control_plane_env 2>&1)"
+[[ -z "$seed_out" ]] || fail "a quoted file value equal to the environment's must be silent: $seed_out"
+grep -qxF 'SH_GITHUB_CLIENT_ID="Ov23liDemo"' "$cpf" || fail "seeding rewrote a quoted value that agreed: $(cat "$cpf")"
+rm -rf "$SC"; SC="$(mu1_dir)"; cpf="$SC/control-plane.env"
+sed -i.bak 's/^SH_GITHUB_CLIENT_ID=$/#SH_GITHUB_CLIENT_ID=/' "$cpf" && rm -f "$cpf.bak"
+grep -qxF '#SH_GITHUB_CLIENT_ID=' "$cpf" || fail "fixture: the template's slot was not commented out"
+SH_ENV_DIR="$SC" SH_GITHUB_CLIENT_ID=Ov23liDemo seed_control_plane_env >/dev/null 2>&1 ||
+  fail "seeding a commented-out slot failed"
+if [[ "$(grep -cE '^#?SH_GITHUB_CLIENT_ID=' "$cpf")" != 1 ]] || ! grep -qxF 'SH_GITHUB_CLIENT_ID=Ov23liDemo' "$cpf"; then
+  fail "a commented-out slot must become the one active line: $(grep -E 'SH_GITHUB_CLIENT_ID' "$cpf")"
+fi
+rm -rf "$SC"
+pass "seed_control_plane_env reads quoted values as systemd does, and fills a commented-out slot"
+
 # main() under errexit, as `sudo ./setup-vm.sh` runs it. `main || fail` would not do: bash ignores
 # set -e inside anything on the left of ||, so a failing step would be skipped, not reported. errexit
 # is suspended here only around a subshell that turns it back on; run_main <out> sets MAIN_RC.
@@ -1378,6 +1397,32 @@ grep -qxF 'SH_REQUIRE_AUTH=true' "$SH_ENV_DIR/supervisor.env" || fail "the upgra
 grep -qE '^systemctl try-restart sh-control-plane\.service$' "$MOCK_LOG" ||
   fail "the upgrade must not start an unconfigured control plane: $(cat "$MOCK_LOG")"
 pass "main() upgrade: a VM with no control plane gains it, keeps its settings, requires auth"
+
+# A fresh VM's FIRST run, given both control-plane settings: it stops at the relay-token check (no
+# SH_RELAY_TOKEN yet), and the settings it was given must already be in control-plane.env -- the
+# operator's second run, without them, then starts a configured control plane. Run, not inferred from
+# main()'s line order.
+export SH_UNIT_DIR="$TMP/units4" SH_ENV_DIR="$TMP/etc4"
+mkdir -p "$SH_UNIT_DIR" "$SH_ENV_DIR"
+SH_GITHUB_CLIENT_ID=Ov23liFirstRun SH_PUBLIC_HARNESS_URL=http://127.0.0.1:8080 run_main "$TMP/main-first.out"
+((MAIN_RC != 0)) || fail "a first run with no SH_RELAY_TOKEN must stop: $(cat "$TMP/main-first.out")"
+grep -q 'SH_RELAY_TOKEN is not set' "$TMP/main-first.out" ||
+  fail "the first run must stop at the relay-token check: $(cat "$TMP/main-first.out")"
+[[ "$(env_file_value SH_GITHUB_CLIENT_ID "$SH_ENV_DIR/control-plane.env")" == Ov23liFirstRun &&
+  "$(env_file_value SH_PUBLIC_HARNESS_URL "$SH_ENV_DIR/control-plane.env")" == http://127.0.0.1:8080 ]] ||
+  fail "a first run that stops at the relay token lost the settings it was given: $(cat "$SH_ENV_DIR/control-plane.env")"
+cp_configured || fail "after the first run, the control plane must count as configured"
+pass "main() first run: stops at the relay token, keeps the control-plane settings it was given"
+export SH_UNIT_DIR="$TMP/units3" SH_ENV_DIR="$TMP/etc3"
+
+# The unconfigured closing message must not offer `systemctl start`: with a setting missing the unit
+# cannot boot, or boots advertising no harness. It names both settings and the sudo env route.
+unconfigured_out="$(report_done 2>&1)"
+grep -qE 'systemctl start sh-control-plane' <<<"$unconfigured_out" &&
+  fail "the unconfigured closing message must not suggest starting the control plane: $unconfigured_out"
+grep -qE 'sudo env SH_GITHUB_CLIENT_ID=.* SH_PUBLIC_HARNESS_URL=' <<<"$unconfigured_out" ||
+  fail "the unconfigured closing message must name the sudo env route: $unconfigured_out"
+pass "unconfigured closing message: both settings and the sudo env route, no bare systemctl start"
 
 # The closing message must match the behaviour we actually land on: the supervisor is enabled
 # but not started, so the message must say to set SH_TURNS_PER_WORKER and then start it --

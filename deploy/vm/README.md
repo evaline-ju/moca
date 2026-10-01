@@ -203,7 +203,7 @@ to store.
 
 1. On GitHub: **Settings → Developer settings → OAuth Apps → New OAuth App** (or the same page under
    an organization's settings). Any application name. Homepage URL and authorization callback URL
-   are required fields but the device flow never uses them: the repository URL does for both.
+   are required fields, but the device flow never uses them: use the repository URL for both.
 2. On the created app's page, tick **Enable Device Flow** and **Update application**. It is **off by
    default**, and forgetting it is the likeliest first-run failure: `mocactl login` then prints
    `login failed: github device code failed: device_flow_disabled`.
@@ -230,7 +230,7 @@ to store.
 The login asks for the `read:user` scope only. The subject is the **numeric** GitHub user id
 (`github:<id>`), never the login name, and GitHub's access token is used once, to read that id, and
 then dropped. To make someone an admin (`GET /v1/sessions?owner=…`), put their subject in
-`SH_ADMIN_SUBJECTS`. `GET /v1/me` with their API token shows it.
+`SH_ADMIN_SUBJECTS` and restart the control plane. Roles are computed at login and carried in the API token, so the user must then log in again (`mocactl login`). `GET /v1/me` with the new token shows the role.
 
 **Network.** The VM must reach `https://github.com` (the device-code and token endpoints) and
 `https://api.github.com` (`/user`) outbound. Each user's browser must reach

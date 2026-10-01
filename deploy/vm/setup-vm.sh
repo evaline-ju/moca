@@ -201,7 +201,7 @@ install_env() {
   install -d -m 0750 "$SH_ENV_DIR"
   install_env_file supervisor "set SH_TURNS_PER_WORKER before starting"
   install_env_file relay "set SH_RELAY_TOKEN before starting"
-  install_env_file control-plane "set SH_GITHUB_CLIENT_ID and SH_PUBLIC_HARNESS_URL before starting"
+  install_env_file control-plane "set SH_GITHUB_CLIENT_ID and SH_PUBLIC_HARNESS_URL before starting (or pass both to this script: sudo env SH_GITHUB_CLIENT_ID=... SH_PUBLIC_HARNESS_URL=... $0)"
 }
 
 start_redis() {
@@ -810,8 +810,11 @@ report_done() {
     log "control plane: http://127.0.0.1:$(env_file_value SH_CONTROL_PLANE_PORT "$SH_ENV_DIR/control-plane.env")" \
       "on this VM (reach it through an SSH tunnel: deploy/vm/README.md, \"The control plane\")"
   else
+    # Not "or systemctl start": with either value missing the unit cannot boot, or boots advertising
+    # no harness. Both routes below set both.
     log "control plane installed but not started: set SH_GITHUB_CLIENT_ID and SH_PUBLIC_HARNESS_URL in" \
-      "$SH_ENV_DIR/control-plane.env, then re-run this script (or: systemctl start sh-control-plane.service)"
+      "$SH_ENV_DIR/control-plane.env and re-run this script, or pass both to it:" \
+      "sudo env SH_GITHUB_CLIENT_ID=... SH_PUBLIC_HARNESS_URL=... $0"
   fi
 }
 

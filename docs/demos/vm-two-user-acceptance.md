@@ -32,19 +32,30 @@ run proves the real login.
 
 A VM brought up by `deploy/vm/setup-vm.sh` (item A, #366), with the control plane running and the
 supervisor started. Use a GitHub OAuth app with **Enable Device Flow** ticked
-(`deploy/vm/README.md`, "The GitHub OAuth app"). On the default SSH-tunnel topology:
+(`deploy/vm/README.md`, "The GitHub OAuth app"). On the default SSH-tunnel topology, run setup
+with both control-plane settings. On a fresh VM this is the **second** run, once `SH_RELAY_TOKEN`
+is set; the first stops at that check (README, "Bring it up"):
 
 ```bash
 sudo env SH_GITHUB_CLIENT_ID=Ov23li... SH_PUBLIC_HARNESS_URL=http://127.0.0.1:8080 \
   ./deploy/vm/setup-vm.sh
-curl -s 127.0.0.1:8090/readyz; echo
-sudo grep -E '^SH_REQUIRE_AUTH=' /etc/serverless-harness/supervisor.env
-sudo sh -c 'grep -hE "^MOCA_TENANCY=" /etc/serverless-harness/*.env; [ $? -eq 1 ] && echo "MOCA_TENANCY unset"'
 ```
 
-The env files are root-only (directory `0750`, files `0640`), so both greps run under `sudo`, and
-the glob is expanded by root's shell, not yours. "unset" is printed only when grep finds no match
-(exit 1), never when it cannot read the files (exit 2).
+Then check what the **running** supervisor was started with, not what its env file says now. A
+supervisor that was never restarted, or a systemd drop-in, would make the file lie:
+
+```bash
+curl -s 127.0.0.1:8090/readyz; echo
+sudo sh <<'EOF'
+pid=$(systemctl show -p MainPID --value sh-supervisor.service)
+[ "${pid:-0}" -gt 0 ] || { echo 'sh-supervisor is not running' >&2; exit 1; }
+env=$(tr '\0' '\n' <"/proc/$pid/environ") || exit 1
+printf '%s\n' "$env" | grep -E '^SH_REQUIRE_AUTH=' || echo 'SH_REQUIRE_AUTH unset'
+printf '%s\n' "$env" | grep -E '^MOCA_TENANCY=' || echo 'MOCA_TENANCY unset'
+EOF
+curl -s -w ' %{http_code}\n' -H 'Content-Type: application/json' \
+  -d '{"sessionId":"sess-does-not-exist","prompt":"hello"}' 127.0.0.1:8080/v1/turn
+```
 
 Expected output:
 
@@ -52,11 +63,16 @@ Expected output:
 ok
 SH_REQUIRE_AUTH=true
 MOCA_TENANCY unset
+{"error":"token_required","message":"this deployment requires a token","sessionId":"sess-does-not-exist"} 401
 ```
 
-> Say: `SH_REQUIRE_AUTH=true` is what makes the harness demand a session token on every turn. Without
-> it, the harness would accept an unauthenticated turn, and ownership would mean nothing past the
-> control plane.
+The script exits before printing anything if it cannot read the process, so "unset" always means
+"read, and not there". The last line is the behaviour itself: a turn with no token is refused.
+
+> Say: `SH_REQUIRE_AUTH=true` is what makes the harness demand a session token on every turn.
+> Without it, that last turn would have been accepted. 2c's `session_mismatch` would still appear
+> (a token that is presented is always checked), so this line is the only proof that the harness
+> refuses a turn with no token at all.
 
 The VM needs outbound HTTPS to `github.com` and `api.github.com`. On a cloud host, **require IMDSv2
 with hop limit 1**: container sandboxes have open egress in this round (#357).
@@ -164,30 +180,41 @@ curl -s -H @"$API_HDR" "$CP/v1/me"; echo
 Expected: `{"subject":"github:<numeric id>","tenant":"github:<numeric id>","roles":[]}`. The two
 users' subjects differ.
 
-Exchange session ids (from 1d) and set both. On user 1's laptop, `MINE` is user 1's id and
-`THEIRS` is user 2's, and the other way round on user 2's:
+Two helpers. `probe <method> <session id> [suffix]` prints the response body (which carries the
+error code) and then the HTTP status. `ids_set` refuses an empty or unedited `MINE` or `THEIRS`.
+(The blocks on this page have no `#` comments, so they paste cleanly into macOS's default zsh.)
 
 ```bash
-MINE='<your session id>'
-THEIRS='<their session id>'
-```
-
-> Trap: every check below names a session id. With an empty one, the URL matches no route at all,
-> and the router's own 404 (`{"error":"not_found"}`) would look like a pass. So each check refuses
-> an empty or unedited id, and prints the error **code**, not just the status.
-
-```bash
-# ids_set: refuses an empty or unedited MINE / THEIRS.
 ids_set() {
   for id in "$MINE" "$THEIRS"; do
     case "$id" in '' | *'<'*) echo 'set MINE and THEIRS to real session ids first' >&2; return 1 ;; esac
   done
 }
-# probe <method> <session id> [suffix]: the response body (the error code), then the HTTP status.
 probe() {
   case "$2" in '' | *'<'*) echo 'set MINE and THEIRS to real session ids first' >&2; return 1 ;; esac
   curl -s -w ' %{http_code}\n' -H @"$API_HDR" -X "$1" "$CP/v1/sessions/$2${3:-}"
 }
+```
+
+> Trap: every check below names a session id, and a wrong one fails exactly like a refusal. With
+> an **empty** id the URL matches no route, and the router's own 404 (`{"error":"not_found"}`)
+> would look like a pass, so `probe` refuses one. With a **mistyped** id, the ownership check
+> answers `session_not_found` because no such session exists, which is the very result 2b is
+> trying to prove. So the ids are exchanged only after their owners have shown them working.
+
+Each user sets `MINE` to their own session id from 1d and proves it is real:
+
+```bash
+MINE='<your session id>'
+probe GET "$MINE"
+```
+
+Expected: the session's summary, `"sessionId":"<your id>"`, and `200`. **Copy the `sessionId`
+value from that output** (not from memory) and send it to the other user. Each user then sets
+the id they received:
+
+```bash
+THEIRS='<their session id>'
 ```
 
 ### 2a. Session lists are disjoint
@@ -209,7 +236,8 @@ probe GET sess-does-not-exist
 ```
 
 Expected: `session_not_found` and `404` four times. That code comes from the control plane's
-ownership check, not from the router:
+ownership check, not from the router. Compare the `sessionId` echoed in the first three lines with
+the one the other user just showed answering `200`: they must be the same string.
 
 ```
 {"error":"session_not_found","sessionId":"<theirs>"} 404
@@ -219,7 +247,7 @@ ownership check, not from the router:
 ```
 
 Then the other user checks that the DELETE did nothing: `probe GET "$MINE"` on **their** laptop
-prints their session's summary and `200`.
+still prints their session's summary and `200`, exactly as it did before the exchange.
 
 > Say: the fourth line is the point. Another user's session and a session that never existed get
 > the same answer, so the API cannot be used to learn which session ids exist. A 403 would confirm
@@ -262,9 +290,11 @@ Copy this into the run's report (the issue, or the PR that closes it):
 | ----------------------------------------------------------- | ------ | ------ |
 | Commit / release on the VM                                  |        |        |
 | `MOCA_TENANCY`                                              | unset  | unset  |
+| 0a token-less turn → `token_required` 401                   |        |        |
 | 1a `mocactl login` (subject)                                |        |        |
 | 1c `doctor` all seven green                                 |        |        |
 | 1d `run` + resume                                           |        |        |
+| 2 own id → 200 before the exchange                          |        |        |
 | 2a own list excludes the other's sessions                   |        |        |
 | 2b GET / DELETE / token / unknown → `session_not_found` 404 |        |        |
 | 2c cross-session turn → 400 mismatch                        |        |        |
