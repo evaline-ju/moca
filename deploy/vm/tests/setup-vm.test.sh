@@ -1276,28 +1276,33 @@ pass "operator fallback: an empty token file refuses"
 
 # The token as an env line is refused, as the MU1 secrets are, and the value is not echoed.
 op_token "$OP_SECRET"
-for line in "SH_OPERATOR_INFERENCE_TOKEN=$OP_SECRET" "  SH_OPERATOR_INFERENCE_TOKEN=$OP_SECRET"; do
-  # Leading whitespace too: systemd's EnvironmentFile= accepts it.
+# Every spelling systemd's EnvironmentFile= accepts: leading whitespace, and whitespace around `=`
+# (parse_env_file_internal trims the key and skips blanks after `=`).
+for line in "SH_OPERATOR_INFERENCE_TOKEN=$OP_SECRET" "  SH_OPERATOR_INFERENCE_TOKEN=$OP_SECRET" \
+  "SH_OPERATOR_INFERENCE_TOKEN = $OP_SECRET" "SH_OPERATOR_INFERENCE_TOKEN =$OP_SECRET"; do
   printf '%s\n' "$line" >>"$OP/control-plane.env"
   if op_err=$(op_run 2>&1); then fail "SH_OPERATOR_INFERENCE_TOKEN as an env line was accepted: '$line'"; fi
   grep -qF 'systemd credential' <<<"$op_err" || fail "the refusal must say it is a systemd credential: $op_err"
   grep -qF -- "$OP_SECRET" <<<"$op_err" && fail "the refusal echoed the token"
-  sed -i.bak '/SH_OPERATOR_INFERENCE_TOKEN=/d' "$OP/control-plane.env" && rm -f "$OP/control-plane.env.bak"
+  sed -i.bak '/SH_OPERATOR_INFERENCE_TOKEN/d' "$OP/control-plane.env" && rm -f "$OP/control-plane.env.bak"
 done
 pass "operator fallback: the token as an env line refuses without echoing it"
 
-# An INDENTED fallback line counts too: systemd's EnvironmentFile= accepts it, so the control plane
-# would see the fallback on (#411 review).
+# Every spelling of the fallback line systemd's EnvironmentFile= reads as on (#411 review): indented,
+# trailing-spaced, whitespace around `=`. Each is tested ALONE: the file's earlier unindented
+# `SH_ALLOW_OPERATOR_FALLBACK=true` is removed first, or it would make every case pass by itself.
 mv "$OP/credentials/operator-inference-token" "$OP/token.aside"
-printf '  SH_ALLOW_OPERATOR_FALLBACK=true\n' >>"$OP/control-plane.env"
-if op_err=$(op_run 2>&1); then fail "an indented SH_ALLOW_OPERATOR_FALLBACK=true with no token file was accepted"; fi
-grep -qF 'does not exist' <<<"$op_err" || fail "the refusal must say the token file does not exist: $op_err"
-sed -i.bak '/SH_ALLOW_OPERATOR_FALLBACK=true/d' "$OP/control-plane.env" && rm -f "$OP/control-plane.env.bak"
-printf 'SH_ALLOW_OPERATOR_FALLBACK=true  \n' >>"$OP/control-plane.env" # trailing spaces: systemd drops them
-if op_run >/dev/null 2>&1; then fail "SH_ALLOW_OPERATOR_FALLBACK=true with trailing spaces and no token file was accepted"; fi
-sed -i.bak '/SH_ALLOW_OPERATOR_FALLBACK=true/d' "$OP/control-plane.env" && rm -f "$OP/control-plane.env.bak"
+sed -i.bak '/SH_ALLOW_OPERATOR_FALLBACK/d' "$OP/control-plane.env" && rm -f "$OP/control-plane.env.bak"
+op_run || fail "fixture: with no fallback line at all, a missing token file must pass"
+for line in '  SH_ALLOW_OPERATOR_FALLBACK=true' 'SH_ALLOW_OPERATOR_FALLBACK=true  ' \
+  'SH_ALLOW_OPERATOR_FALLBACK = true' 'SH_ALLOW_OPERATOR_FALLBACK= "true"'; do
+  printf '%s\n' "$line" >>"$OP/control-plane.env"
+  if op_err=$(op_run 2>&1); then fail "'$line' with no token file was accepted"; fi
+  grep -qF 'does not exist' <<<"$op_err" || fail "'$line': the refusal must say the token file does not exist: $op_err"
+  sed -i.bak '/SH_ALLOW_OPERATOR_FALLBACK/d' "$OP/control-plane.env" && rm -f "$OP/control-plane.env.bak"
+done
 mv "$OP/token.aside" "$OP/credentials/operator-inference-token"
-pass "operator fallback: an indented or trailing-spaced fallback line counts, as systemd reads it"
+pass "operator fallback: every spelling of the fallback line systemd reads as on counts, each alone"
 
 # Token removed later with the fallback off -> the drop-in goes too (Review Focus 4).
 sed -i.bak '/^SH_ALLOW_OPERATOR_FALLBACK=/d' "$OP/control-plane.env" && rm -f "$OP/control-plane.env.bak"

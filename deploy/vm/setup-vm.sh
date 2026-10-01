@@ -578,8 +578,11 @@ file_mode() { stat -L -c '%a' "$1" 2>/dev/null || stat -L -f '%Lp' "$1"; }
 # -- leading whitespace allowed, like the SH_OPERATOR_INFERENCE_TOKEN guard below -- with quotes removed.
 operator_fallback_value() {
   local v
-  v="$( (grep -E '^[[:space:]]*SH_ALLOW_OPERATOR_FALLBACK=' "$1" 2>/dev/null || true) | tail -1)"
+  # Whitespace around the key and after `=` too: parse_env_file_internal (systemd's env-file.c) trims
+  # the key and skips blanks after `=`.
+  v="$( (grep -E '^[[:space:]]*SH_ALLOW_OPERATOR_FALLBACK[[:space:]]*=' "$1" 2>/dev/null || true) | tail -1)"
   v="${v#*=}"
+  v="${v#"${v%%[![:space:]]*}"}"
   # Trailing whitespace goes, as systemd drops it from an unquoted value; then a matched pair of
   # quotes only, exactly as env_file_value strips them.
   v="${v%"${v##*[![:space:]]}"}"
@@ -617,8 +620,8 @@ ensure_operator_fallback() {
       "file, if it holds nothing else), then re-run." >&2
     return 1
   fi
-  # Leading whitespace too: systemd's EnvironmentFile= accepts it.
-  if grep -qE '^[[:space:]]*SH_OPERATOR_INFERENCE_TOKEN=' "$cp" 2>/dev/null; then
+  # Every spelling systemd's EnvironmentFile= accepts: leading whitespace, and whitespace around `=`.
+  if grep -qE '^[[:space:]]*SH_OPERATOR_INFERENCE_TOKEN[[:space:]]*=' "$cp" 2>/dev/null; then
     echo "$cp sets SH_OPERATOR_INFERENCE_TOKEN, which on this VM is a systemd credential ($f): with" \
       "both, the control plane refuses to boot. Move the value into that file (mode 0600), delete the" \
       "line, then re-run." >&2
