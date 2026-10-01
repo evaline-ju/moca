@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CpError } from '../src/errors.js';
 import {
   GithubOAuthProvider,
   adminSubjectsFromEnv,
   rolesFor,
+  shortClientId,
   type FetchLike,
 } from '../src/identity.js';
 
@@ -24,14 +25,16 @@ function fakeFetch(script: Record<string, { status: number; body: unknown }[]>) 
 const provider = (fetch: FetchLike, adminSubjects: string[] = []) =>
   new GithubOAuthProvider({ clientId: 'Iv1.fakeclientid', adminSubjects, fetch }); // notsecret
 
-const codeOf = async (fn: () => Promise<unknown>): Promise<string> => {
+const errOf = async (fn: () => Promise<unknown>): Promise<CpError> => {
   try {
     await fn();
   } catch (e) {
-    return (e as CpError).code;
+    return e as CpError;
   }
   throw new Error('expected a throw');
 };
+
+const codeOf = async (fn: () => Promise<unknown>): Promise<string> => (await errOf(fn)).code;
 
 describe('the constructor refuses a missing client id', () => {
   // main.ts already validates SH_GITHUB_CLIENT_ID, but this guard is the one that holds if a second
@@ -116,29 +119,66 @@ describe('startDeviceAuth', () => {
     expect(await codeOf(() => provider(fetch).startDeviceAuth())).toBe('unauthorized');
   });
 
-  it('reports a device-flow-disabled app as identity_provider_misconfigured, naming the fix', async () => {
-    // Device flow is OFF by default on a GitHub OAuth app (spec §5.1.1): the likeliest first-run
-    // failure, and one only the operator can fix -- so the message is the fix, not GitHub's code (#405).
-    const { fetch } = fakeFetch({
-      '/login/device/code': [
-        { status: 400, body: { error: 'device_flow_disabled', error_description: 'not enabled' } },
-      ],
-    });
-    const p = provider(fetch).startDeviceAuth();
-    await expect(p).rejects.toMatchObject({ code: 'identity_provider_misconfigured' });
-    await expect(p).rejects.toThrow(/Enable Device Flow/);
-    await expect(p).rejects.toThrow(/device_flow_disabled/);
-  });
+  describe('an OAuth app GitHub refuses (#405)', () => {
+    // The control plane logs these too (the operator reads its log, not the user's terminal);
+    // silence that here and assert on it where it matters.
+    const logged = () => vi.mocked(console.error).mock.calls.map((c) => String(c[0]));
+    afterEach(() => vi.restoreAllMocks());
 
-  it('reports a mistyped client id (GitHub 404 Not Found) as identity_provider_misconfigured', async () => {
-    // GitHub's reply never mentions the client id; the message must, or the 404 is undiagnosable.
-    const { fetch } = fakeFetch({
-      '/login/device/code': [{ status: 404, body: { error: 'Not Found' } }],
+    it('reports a device-flow-disabled app as identity_provider_misconfigured, naming the fix', async () => {
+      // Device flow is OFF by default on a GitHub OAuth app (spec §5.1.1): the likeliest first-run
+      // failure, and one only the operator can fix -- so the message is the fix, not GitHub's code.
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const { fetch } = fakeFetch({
+        '/login/device/code': [
+          {
+            status: 400,
+            body: { error: 'device_flow_disabled', error_description: 'not enabled' },
+          },
+        ],
+      });
+      const p = provider(fetch).startDeviceAuth();
+      await expect(p).rejects.toMatchObject({ code: 'identity_provider_misconfigured' });
+      await expect(p).rejects.toThrow(/Enable Device Flow/);
+      await expect(p).rejects.toThrow(/device_flow_disabled/);
+      expect(logged().join('\n')).toMatch(/device_flow_disabled/);
     });
-    const p = provider(fetch).startDeviceAuth();
-    await expect(p).rejects.toMatchObject({ code: 'identity_provider_misconfigured' });
-    await expect(p).rejects.toThrow(/SH_GITHUB_CLIENT_ID/);
-    await expect(p).rejects.toThrow(/Iv1\.fakeclientid/);
+
+    it('reports a mistyped client id (GitHub 404) without echoing the whole id', async () => {
+      // GitHub's reply never mentions the client id, so the message must, or the 404 is
+      // undiagnosable. But only part of it: a wrong value may be a pasted secret, and this reply
+      // reaches an unauthenticated caller. The log gets the same shortened form.
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const { fetch } = fakeFetch({
+        '/login/device/code': [{ status: 404, body: { error: 'Not Found' } }],
+      });
+      const err = await errOf(() => provider(fetch).startDeviceAuth());
+      expect(err).toMatchObject({ code: 'identity_provider_misconfigured' });
+      expect(err.message).toMatch(/SH_GITHUB_CLIENT_ID/);
+      expect(err.message).toMatch(/\(Not Found\)/);
+      expect(err.message).toContain('Iv1.fa… (16 chars)');
+      expect(err.message).not.toContain('Iv1.fakeclientid');
+      expect(logged().join('\n')).not.toContain('Iv1.fakeclientid');
+    });
+
+    it("keys the unknown-client case on the 404, not on GitHub's wording", async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const { fetch } = fakeFetch({
+        '/login/device/code': [{ status: 404, body: { error: 'no_such_application' } }],
+      });
+      const err = await errOf(() => provider(fetch).startDeviceAuth());
+      expect(err).toMatchObject({ code: 'identity_provider_misconfigured' });
+      // GitHub's own text is interpolated, so a log grep for it still works when it changes.
+      expect(err.message).toMatch(/\(no_such_application\)/);
+    });
+  });
+});
+
+describe('shortClientId', () => {
+  it('shows at most six characters, and never more than half the value', () => {
+    expect(shortClientId('Ov23liAbCdEfGhIjKlMn')).toBe('Ov23li… (20 chars)');
+    expect(shortClientId('abcd')).toBe('ab… (4 chars)');
+    expect(shortClientId('a')).toBe('… (1 char)');
   });
 });
 

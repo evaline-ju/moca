@@ -125,8 +125,8 @@ case "${1:-}" in
 esac
 exit 0
 EOF
-# curl: every control-plane call returns an empty object, so `login` finds no token and no
-# authorization_pending and returns 1 -- killing the script under `set -e` at Claim 1.
+# curl: every control-plane call returns an empty object, so `login` finds no deviceCode and
+# returns 1 -- killing the script under `set -e` at Claim 1.
 cat > "$TMP/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 echo "curl $*" >> "$MOCK_LOG"
@@ -156,6 +156,29 @@ check "the flip precedes the restore in the call log" \
   "$(awk '/"value":"true"/{t=NR} /"value":"false"/{f=NR} END{print (t>0 && f>t) ? 1 : 0}' "$MOCK_LOG")" "1"
 check "no secret value reached the transcript of a mocked run" \
   "$(grep -c 'sk-mock' "$MOCK_LOG")" "0"
+
+echo "== behaviour: a refused device-flow start is reported, not polled (#405)"
+# The control plane refuses the start with its own code and the operator's fix. Before #405 the demo
+# took deviceCode "null" from that body and polled with it, so it reported GitHub's reply to a bogus
+# code instead. This curl answers the start with the refusal and records any poll that follows.
+cat > "$TMP/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+echo "curl $*" >> "$MOCK_LOG"
+case "$*" in
+  */v1/auth/device/token*) echo '{"error":"unauthorized"}' ;;
+  */v1/auth/device*) echo '{"error":"identity_provider_misconfigured","message":"tick Enable Device Flow on the app"}' ;;
+  *) echo '{}' ;;
+esac
+exit 0
+EOF
+: > "$MOCK_LOG"
+refused="$( (PATH="$TMP/bin:$PATH" MULTIUSER_LIVE_SMOKE=1 SH_GITHUB_CLIENT_ID=Iv1.mock \
+  ANTHROPIC_AUTH_TOKEN=sk-mock ANTHROPIC_BASE_URL=https://mock/v1 \
+  bash "$SCRIPT") 2>&1 >/dev/null || true)"
+check "prints the control plane's code and fix for a refused start" \
+  "$(grep -c 'login failed for Alice: identity_provider_misconfigured: tick Enable Device Flow on the app' <<<"$refused")" "1"
+check "never polls the token route after a refused start" \
+  "$(grep -c '/v1/auth/device/token' "$MOCK_LOG")" "0"
 
 if [ "$fails" -gt 0 ]; then echo "FAILED: $fails"; exit 1; fi
 echo "all ok"
