@@ -8,15 +8,17 @@
 > to the microVM tier, and every tool call runs in a fresh Firecracker VM over a per-session
 > workspace.
 
-**Status: drafted, not yet performed end to end.** Every step comes from a verified piece:
-the two-user acceptance runbook ([`vm-two-user-acceptance.md`](./vm-two-user-acceptance.md), #403),
-the P4 tier on a P6 host ([`deploy/microvm/P4-ON-P6.md`](../../deploy/microvm/P4-ON-P6.md),
-#376 and #409), and the research turn ("A research turn" in
-[`deploy/vm/README.md`](../../deploy/vm/README.md), and `deploy/vm/research-smoke.sh`, from #368
-via #411). The whole sequence on one VM, with two
-real GitHub accounts, has not been run. Expected output marked _illustrative_ is the shape to
-look for, not a recorded run. Act 5 is the record to fill in, and the first run replaces this
-paragraph.
+**Performed 2026-10-01** on the shared KVM rig (`m8i.xlarge`, Amazon Linux 2023, 16 GiB), at
+`main` @ 03d2ee8 plus this page. Every act held; Act 5 is the record. One person played both
+users, with two GitHub accounts on one laptop (two `XDG_CONFIG_HOME` directories, one tunnel).
+Two people on two laptops is the same set of steps, and was not tried. The outputs shown below are
+that run's, trimmed.
+
+The steps come from three verified pieces: the two-user acceptance runbook
+([`vm-two-user-acceptance.md`](./vm-two-user-acceptance.md), #403), the P4 tier on a P6 host
+([`deploy/microvm/P4-ON-P6.md`](../../deploy/microvm/P4-ON-P6.md), #376 and #409), and the
+research turn ("A research turn" in [`deploy/vm/README.md`](../../deploy/vm/README.md), and
+`deploy/vm/research-smoke.sh`, #411).
 
 | A shared agent deployment usually needs                          | This needs                                                                                   |
 | ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
@@ -27,7 +29,7 @@ paragraph.
 
 **Roles.** The **operator** has a shell on the VM. **User 1** and **user 2** each have a laptop, a
 GitHub account, and an SSH account restricted to the tunnel (0c). The operator can also play
-user 1.
+user 1, and one person with two GitHub accounts can play both (1a, the trap).
 
 **Order matters.** The container tier comes first (Acts 1 to 3), the microVM tier last (Act 4).
 A host serves one tier at a time, and going back to containers means re-running `setup-vm.sh`,
@@ -47,6 +49,10 @@ against (Act 5).
 - The research turn: `deploy/vm/research-smoke.sh` (#411, `VM_RESEARCH_SMOKE=1`).
 - The P4 tier with auth on: `deploy/microvm/p4-turn-smoke.sh --auth` (#409).
 
+On this rig, `sudo` does not find podman-static under `/usr/local/bin`, so every `sudo podman` and
+`sudo ./deploy/...` command on this page ran as `sudo env PATH="/usr/local/bin:$PATH" …`
+(`deploy/vm/README.md`, "Prerequisites"). On a host whose `secure_path` has it, drop the prefix.
+
 ## Act 0 — Preparation (operator, the day before)
 
 ### 0a. P6 with the control plane and the GitHub OAuth app
@@ -61,6 +67,18 @@ cd /opt/serverless-harness
 sudo env SH_GITHUB_CLIENT_ID=<client id> SH_PUBLIC_HARNESS_URL=http://127.0.0.1:8080 \
   ./deploy/vm/setup-vm.sh
 ```
+
+**Pull the current sandbox image first.** `setup-vm.sh` runs whatever
+`ghcr.io/rossoctl/moca-remote-worker:latest` the host already has, and never pulls. The rig's copy
+predated #372, so its `HOME` was the shared `/workspace` instead of `/home/sandbox`:
+
+```bash
+sudo podman pull ghcr.io/rossoctl/moca-remote-worker:latest
+sudo podman run --rm --entrypoint sh ghcr.io/rossoctl/moca-remote-worker:latest -c 'echo $HOME; command -v curl git'
+```
+
+Expected: `/home/sandbox`, `/usr/bin/curl`, `/usr/bin/git`. The containers pick the new image up at
+0b's `setup-vm.sh` re-run.
 
 **Lengthen the login for the demo.** An API token lasts an hour (`SH_API_TOKEN_TTL_SECONDS=3600`).
 When it lapses mid-demo, the interactive UI opens its login overlay and replays the prompt, and a
@@ -85,18 +103,18 @@ sandboxes to `github.com` and `nodejs.org`.
 The microVM worker is installed now, while nobody depends on the sessions, and stopped until
 Act 4. Follow `deploy/microvm/P4-ON-P6.md`:
 
-1. **Build the golden snapshot** ("Build the golden snapshot"). The container sandboxes can keep
-   running for this.
+1. **Build the golden snapshot** ("Build the golden snapshot"), from the image 0a pulled. The
+   container sandboxes can keep running for this.
 2. **Remove the container sandboxes and install the worker.** `setup-microvm.sh` refuses while
    any `sh-sandbox-*` container exists:
 
    ```bash
    sudo podman rm -f $(sudo podman ps -a --format '{{.Names}}' --filter 'name=^sh-sandbox-')
-   cd /opt/serverless-harness && sudo deploy/microvm/setup-microvm.sh        # on a host under 24 GiB: MICROVM_MAX_COMMITTED_MB=8192
+   cd /opt/serverless-harness && sudo deploy/microvm/setup-microvm.sh   # under 24 GiB: MICROVM_MAX_COMMITTED_MB=8192
    ```
 
 3. **Rehearse it:** `p4-turn-smoke.sh --auth --failure-paths` ("Automated check"), then its
-   cleanup.
+   cleanup. The run passed 34/34, and the cleanup's four deletes answered 204.
 4. **Park it, and bring the containers back.** This `setup-vm.sh` re-run recreates Redis and so
    forgets every session (#410). That is harmless now, and is why it happens today:
 
@@ -105,6 +123,9 @@ Act 4. Follow `deploy/microvm/P4-ON-P6.md`:
    sudo podman exec sh-redis redis-cli HDEL sh:sandbox:records moca_microvm_0
    cd /opt/serverless-harness && sudo ./deploy/vm/setup-vm.sh
    ```
+
+   The `HDEL` answered `0` on the run: the worker's record was already gone, removed when it
+   disconnected. It stays as a backstop for a relay that was down at the time.
 
 The relay keeps the worker's token: `setup-vm.sh` leaves `setup-microvm.sh`'s relay drop-in in
 place. So in Act 4, starting the worker is enough to attach it.
@@ -119,6 +140,13 @@ sudo VM_RESEARCH_SMOKE=1 RESEARCH_CREDENTIAL_FILE=/root/inference-key ./deploy/v
 sudo rm -f /root/inference-key
 ```
 
+The run passed 13/13 on a raw Anthropic key. It leaves its minted subject's empty record in
+`/var/lib/moca-control-plane/` (fix list): delete it in Cleanup.
+
+**Rehearse one real login** from a laptop (1a, 1b). The smokes mint their tokens, so they never
+touch GitHub, and a device-flow misconfiguration would otherwise show up first in front of the
+room.
+
 > Trap: from here until Cleanup, **do not re-run `setup-vm.sh`.** Every re-run loses every user's
 > sessions (#410), and a re-run while the microVM worker is enabled starts the containers next to
 > it, so both tiers attach and sessions hop between them.
@@ -127,7 +155,9 @@ sudo rm -f /root/inference-key
 
 Restrict each participant's account to the two forwarded ports: `vm-two-user-acceptance.md`, 0a,
 "Restrict the participants' SSH accounts to the tunnel". Loopback Redis holds the ownership index
-with no authentication, so an unrestricted account could take over any session.
+with no authentication, so an unrestricted account could take over any session. The run used two
+accounts, `user1` and `user2`, created with `useradd -m -s /usr/sbin/nologin` and an
+`authorized_keys` each.
 
 ### 0d. Check what is running (operator, on the day)
 
@@ -149,7 +179,7 @@ systemctl is-enabled microvm-worker.service
 sudo podman exec sh-redis redis-cli HKEYS sh:sandbox:records
 ```
 
-Expected output:
+Expected output (the two records come in either order):
 
 ```
 ok
@@ -158,14 +188,14 @@ MOCA_TENANCY unset
 SH_ALLOW_OPERATOR_FALLBACK unset
 SH_API_TOKEN_TTL_SECONDS=14400
 disabled
-sh-sandbox-0
 sh-sandbox-1
+sh-sandbox-0
 ```
 
 The script reads the **running** processes, not their env files, and exits before printing more
 if it cannot. `SH_ALLOW_OPERATOR_FALLBACK=false` passes too: the fallback is on only at `true`,
-and with it off every turn has to spend its user's own credential. The last line is the tier: two
-container sandboxes, and no `moca_microvm_0`.
+and with it off every turn has to spend its user's own credential. The last lines are the tier:
+two container sandboxes, and no `moca_microvm_0`.
 
 ## Act 1 — Two users log in
 
@@ -191,12 +221,19 @@ ssh <account>@<vm> true
 printf 'PING\r\n' | ssh -W 127.0.0.1:6379 <account>@<vm>
 ```
 
-Expected: `This account is currently not available.`, then `administratively prohibited: open
-failed`. A `+PONG` means 0c does not apply to this account: stop and fix it.
+Expected, as on the run for both accounts:
 
-> Trap: to rehearse both users on one machine, give each its own `XDG_CONFIG_HOME`
-> (`export XDG_CONFIG_HOME=/tmp/user1`). `mocactl` keeps one identity per config directory (#404),
-> and open the tunnel once only.
+```
+This account is currently not available.
+channel 0: open failed: administratively prohibited: open failed
+stdio forwarding failed
+```
+
+A `+PONG` means 0c does not apply to this account: stop and fix it.
+
+> Trap: to play both users on one machine, give each its own `XDG_CONFIG_HOME`
+> (`export XDG_CONFIG_HOME=/tmp/user2` in user 2's terminal). `mocactl` keeps one identity per
+> config directory (#404). Open the tunnel once only.
 
 ### 1b. Log in
 
@@ -208,16 +245,20 @@ Expected: a code, then, once it is entered at `https://github.com/login/device` 
 approved:
 
 ```
-Open https://github.com/login/device and enter the code ABCD-1234
+Open https://github.com/login/device and enter the code 7950-E495
 logged in as <your GitHub name>
 ```
+
+> Trap: the device flow approves for **whichever GitHub account the browser is signed into**. One
+> person playing both users approves user 2's code in a private window signed in as the second
+> account. Approving it in the first account's window logs user 2 in as user 1, and every
+> cross-user check after that passes for the wrong reason.
 
 > If it prints `login failed: the control plane cannot log anyone in until its operator fixes it`,
 > the rest of the line names the fix (#405): `device_flow_disabled` means the OAuth app's **Enable
 > Device Flow** box is unticked, and `GitHub knows no OAuth app with client id …` means
 > `SH_GITHUB_CLIENT_ID` is mistyped. Both are fixed on the VM and on GitHub; nothing the user does
-> helps. A rehearsal `mocactl login` the day before catches both: 0b's smokes mint their tokens,
-> so they never touch GitHub.
+> helps. 0b's rehearsal login catches both.
 
 ### 1c. Store your own inference credential
 
@@ -227,6 +268,9 @@ Start `mocactl`, open **Credentials** with `ctrl+x k`, and add one with consumer
   gateway endpoint `https://api.anthropic.com` (no `/v1`), and the key pasted as is into the
   **API key** field.
 - **A gateway token:** kind `bearer`, with the fields in `packages/mocactl/QUICKSTART.md`, step 4.
+
+Give the two users' credentials different names (the run used `anthropic` and `anthropic-dev`), so
+2c's audit tells them apart at a glance.
 
 > Say: this key is yours, not the operator's. The control plane stores it encrypted, and resolves
 > it for each of your turns. There is no shared model key on this VM: the operator-key fallback is
@@ -274,21 +318,26 @@ mocactl run "$P" --json | jq -j '
 ```
 
 `--json` streams the turn's frames, so the room sees each command as the agent runs it. Plain
-`mocactl run` prints only the answer. Expected (_illustrative_):
+`mocactl run` prints only the answer. On the run:
 
 ```
-session 6f1c…
-$ git clone --depth 1 https://github.com/rossoctl/moca /workspace/research-user1/moca
-$ curl -fsSL -o /workspace/research-user1/node-releases.json https://nodejs.org/dist/index.json
+session 7ce498ad-6776-40f2-b0c0-2b3166e3f49c
+I'll run the steps using bash.
+$ git clone --depth 1 https://github.com/rossoctl/moca /workspace/research-user1/moca 2>&1; echo "---EXIT: $?"
+$ curl -fsSL -o /workspace/research-user1/node-releases.json https://nodejs.org/dist/index.json 2>&1; echo "---EXIT: $?"; ls -la /workspace/research-user1/node-releases.json
 $ cd /workspace/research-user1/moca && git rev-parse HEAD
-$ python3 -c "import json; r=json.load(open('/workspace/research-user1/node-releases.json'))[0]; print(r['version'], r['date'])"
-The clone checked out … and the newest Node.js release is …
-COMMIT=<12 hex digits>
-NODE_VERSION=v<x.y.z>
-NODE_DATE=<YYYY-MM-DD>
+$ python3 -c "import json;d=json.load(open('/workspace/research-user1/node-releases.json'));print(d[0]['version'],d[0]['date'])"
+I cloned the `rossoctl/moca` repository (shallow clone), which checked out commit `03d2ee8c067d`. I
+then downloaded the Node.js release index and read its first entry, which is the newest release:
+Node.js v26.10.0, released on 2026-09-21.
+
+COMMIT=03d2ee8c067d
+NODE_VERSION=v26.10.0
+NODE_DATE=2026-09-21
 ```
 
-**Write the session id down** (`session <id>`, on stderr). Act 3 uses it.
+The agent words its commands its own way; what matters is that the clone and the fetch ran in the
+sandbox. **Write the session id down** (`session <id>`, on stderr). Act 3 uses it.
 
 ### 2b. Check the answer against the world
 
@@ -299,7 +348,8 @@ git ls-remote https://github.com/rossoctl/moca HEAD | cut -c1-12
 curl -fsSL https://nodejs.org/dist/index.json | jq -r '.[0] | "\(.version) \(.date)"'
 ```
 
-Expected: the same commit and release as the agent's last three lines.
+Expected: the same commit and release as the agent's last three lines. On the run,
+`03d2ee8c067d` and `v26.10.0 2026-09-21`.
 
 > Say: neither value can come from a model's memory. The clone's HEAD changes with every merge, and
 > the newest Node.js release every few weeks. The file is about 330 KB, past the 50 KB of output
@@ -308,16 +358,28 @@ Expected: the same commit and release as the agent's last three lines.
 
 ### 2c. User 2 does the same, on their own key
 
-User 2 runs 2a with `D=research-user2`, then 2b. Then the operator shows whose credential each turn
-spent:
+User 2 runs 2a with `D=research-user2`, then 2b. On the run, user 2's agent read the file with
+`head -c 400` instead of `python3`, and reached the same three values. Then the operator shows
+whose credential each turn spent:
 
 ```bash
 sudo podman exec sh-redis redis-cli XREVRANGE sh:cp:audit + - COUNT 6
 ```
 
-Expected (_illustrative_): entries with `decision credential_issued`, the two users' `subject`
-values (`github:<numeric id>`), their own `sessionId`s, and each user's own credential **name**.
-The audit stream records names, never values.
+Expected: for each user's session, a `session_created` entry and then a `credential_issued` one,
+each with that user's `subject` and their own credential **name**. On the run (newest first, one
+line per entry):
+
+```
+github:228572680  credential_issued  a961ec51-…  anthropic-dev
+github:228572680  session_created    a961ec51-…  anthropic-dev
+github:6678093    credential_issued  7ce498ad-…  anthropic
+github:6678093    session_created    7ce498ad-…  anthropic
+```
+
+`redis-cli` prints each field on its own line. A `session_created` and `session_deleted` pair with
+no turn between them is `doctor`'s check 7, which creates a scratch session and deletes it. The
+audit stream records names, never values.
 
 > Say: two users, two subjects, two keys. Each turn resolved its owner's credential at the control
 > plane, and with the operator-key fallback off, a user with no credential gets no turn at all.
@@ -328,8 +390,15 @@ The audit stream records names, never values.
 for c in sh-sandbox-0 sh-sandbox-1; do echo "$c:"; sudo podman exec "$c" ls /workspace; done
 ```
 
-Expected: the users' research directories, each in whichever container its turn leased, possibly
-both in one.
+Expected: the users' research directories, each in whichever container its turn leased. On the
+run, both landed in one:
+
+```
+sh-sandbox-0:
+sh-sandbox-1:
+research-user1
+research-user2
+```
 
 > Say: this is the limit to say out loud. Session **ownership** is enforced (Act 3), but the
 > container tier has no sandbox isolation between users. Both users' turns lease the same
@@ -341,8 +410,34 @@ both in one.
 
 ### 3a. Session lists are disjoint
 
-Each user opens **Sessions** in `mocactl` (`ctrl+x l`). Expected: their own sessions from Act 2,
-and nothing of the other user's.
+**Sessions** in `mocactl` (`ctrl+x l`) titles each session by its first prompt, and both users ran
+the same prompt, so the two lists look alike. Show the ids instead. Each user, from their own
+login cache:
+
+```bash
+AUTH="${XDG_CONFIG_HOME:-$HOME/.config}/mocactl/auth.json"
+API_HDR="$(mktemp)"; jq -r '.apiToken // empty | "Authorization: Bearer " + .' "$AUTH" >"$API_HDR"
+curl -s -H @"$API_HDR" "$SH_CONTROL_PLANE_URL/v1/sessions" | jq -r '.sessions[].sessionId'
+```
+
+Expected: each user's own sessions from Act 2, and nothing of the other user's. (This `curl` is
+the acceptance doc's; the run checked the lists at the owner index instead.) On the run each
+user held exactly one session:
+
+```bash
+for k in $(sudo podman exec sh-redis redis-cli --scan --pattern 'sh:cp:owner:*'); do
+  echo "$k:"; sudo podman exec sh-redis redis-cli ZRANGE "$k" 0 -1
+done
+```
+
+```
+sh:cp:owner:f4cd8a8c45409c53:sessions:
+7ce498ad-6776-40f2-b0c0-2b3166e3f49c
+sh:cp:owner:53ac7ade737ad301:sessions:
+a961ec51-d77f-4c63-9b74-ccc73b6c5d93
+```
+
+The key names a subject by the first 16 hex digits of its hash, not by name.
 
 ### 3b. Another user's session does not exist
 
@@ -354,7 +449,7 @@ mocactl run "what did you find?" --session <user 1's session id>; echo "exit $?"
 mocactl run "what did you find?" --session sess-does-not-exist; echo "exit $?"
 ```
 
-Expected, both times:
+Expected, and on the run, both times:
 
 ```
 that session no longer exists, or is not yours
@@ -384,7 +479,11 @@ User 1:
 mocactl run "Run uname -a in your sandbox and reply with its output only."
 ```
 
-Expected: the **VM's own kernel**, because a container shares its host's.
+Expected: the **VM's own kernel**, because a container shares its host's. On the run:
+
+```
+Linux 975fcff1af5d 6.18.44-99.149.amzn2023.x86_64 #2 SMP PREEMPT_DYNAMIC Tue Aug 25 21:16:03 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+```
 
 ### 4b. Switch the host to the microVM tier (operator)
 
@@ -397,21 +496,25 @@ sudo timeout 60 sh -c 'until [ "$(podman exec sh-redis redis-cli HEXISTS sh:sand
   sudo podman exec sh-redis redis-cli HKEYS sh:sandbox:records
 ```
 
-Expected: `moca_microvm_0`, alone. A container's presence record goes when its worker
-disconnects, so no record of the removed containers is left behind to be leased.
+Expected: `moca_microvm_0`, alone. On the run it attached in two seconds. A container's presence
+record goes when its worker disconnects, so no record of the removed containers is left behind to
+be leased.
 
 > Say: nothing was reinstalled, and no session was lost. The users stay logged in, and their
 > sessions and credentials are where they were. Only the place where tool calls run changed.
 
 ### 4c. The same question, on a microVM
 
-User 1, as in 4a:
+User 1, as in 4a. On the run:
 
-```bash
-mocactl run "Run uname -a in your sandbox and reply with its output only."
+```
+Linux (none) 6.18.44+ #1 SMP PREEMPT_DYNAMIC Wed Sep  9 03:29:40 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
 ```
 
-Expected: `Linux (none) …`, the guest's kernel (`6.18.44+` on the verified rig), not the VM's.
+> Say: point at the hostname and the suffix, not the version. The guest kernel the snapshot was
+> built with happens to be the same 6.18.44 as the VM's. But the hostname is `(none)`, not a
+> container id, and the kernel is Firecracker's own build (`+`, built Sep 9), not Amazon Linux's
+> (`-99.149.amzn2023`, built Aug 25).
 
 ### 4d. A session's workspace outlives its VMs
 
@@ -422,7 +525,10 @@ mocactl run "In your sandbox: write uname -a and python3 --version to notes.txt,
 mocactl run "Show git log --oneline and notes.txt." --session <the id it printed>
 ```
 
-Expected: turn 2 shows turn 1's commit and file. Then the operator shows where the tool calls ran:
+Expected: turn 2 shows turn 1's commit and file. On the run, turn 1 committed `6dcad49` and turn 2
+printed `6dcad49 Add system info to notes.txt` and the file. The guest has no git identity, so the
+agent's first `git commit` failed, and it set a local identity and retried (fix list). Then the
+operator shows where the tool calls ran:
 
 ```bash
 sudo journalctl -u microvm-worker --since -10min | grep 'vmpool: exec' | grep 'workspace_key="<the id>"'
@@ -431,11 +537,12 @@ sudo ls /srv/workspaces/
 
 Expected: one line per tool call, each with its own `vm=`, all under the session's id, and the
 session's directory under `/srv/workspaces`. The line names the workspace and the VM, never the
-command.
+command. On the run (`exit=128` is the failed commit):
 
 ```
-vmpool: exec req=… workspace_key="<the id>" vm=vm-13 cold="first-exec" exit=0 err=<nil>
-vmpool: exec req=… workspace_key="<the id>" vm=vm-15 cold="exhausted" exit=0 err=<nil>
+vmpool: exec req=… workspace_key="c3bb0aa1-d61a-42d1-a1be-4f46efafb392" vm=vm-5 cold="first-exec" exit=128 err=<nil>
+vmpool: exec req=… workspace_key="c3bb0aa1-d61a-42d1-a1be-4f46efafb392" vm=vm-7 cold="" exit=0 err=<nil>
+vmpool: exec req=… workspace_key="c3bb0aa1-d61a-42d1-a1be-4f46efafb392" vm=vm-8 cold="" exit=0 err=<nil>
 ```
 
 > Say: every tool call got a fresh Firecracker VM, which was destroyed when the call returned. The
@@ -443,8 +550,18 @@ vmpool: exec req=… workspace_key="<the id>" vm=vm-15 cold="exhausted" exit=0 e
 
 ### 4e. User 2 gets a workspace of their own
 
-User 2 runs 4d's two turns in a new session of their own. The operator's `ls /srv/workspaces/`
-then shows two directories, one per session, and user 2's journal lines name only user 2's id.
+User 2 runs 4d's turns in a new session of their own, asking turn 2 to list the workspace too:
+
+```bash
+mocactl run "In your sandbox: write uname -a and python3 --version to notes.txt, git init, commit it, and tell me the hash."
+mocactl run "Show git log --oneline and notes.txt, and list everything in your current directory." --session <the id it printed>
+```
+
+Expected: user 2's own commit and file, and nothing of user 1's. On the run, turn 2 showed
+`c8f6851 Add notes.txt with system info`, and `/workspace` held only `.git/`, `notes.txt` and
+`lost+found/` (the workspace is a filesystem image of its own). The operator's `ls /srv/workspaces/`
+shows a directory per session, and user 2's journal lines (`vm-10`, `vm-12`, `vm-13` on the run)
+name only user 2's id.
 
 > Say: compare 2d. On this tier each session has its own workspace, so user 2's agent cannot see
 > user 1's files. It is not yet a security boundary: anyone holding the relay's exec token can name
@@ -458,32 +575,40 @@ User 1:
 mocactl run "Run: curl -sS -o /dev/null -w '%{http_code}' https://nodejs.org/dist/index.json; then tell me the exact output or error."
 ```
 
-Expected: a curl error (the exact text is for the first run to record). The guest has no network
-device, no DNS and no NAT (#277). Act 2's research works only on the container tier, and this
-tier works on local content.
+Expected, as on the run:
 
-## Act 5 — Record the run
+```
+curl: (6) Could not resolve host: nodejs.org
+000 (exit: 6)
+```
 
-Copy this into the run's report (#370, or the PR that closes it):
+The guest has no network device, no DNS and no NAT (#277). Act 2's research works only on the
+container tier, and this tier works on local content.
 
-| Item                                                          | Result |
-| ------------------------------------------------------------- | ------ |
-| Commit on the VM; instance type; Firecracker version          |        |
-| 0b `p4-turn-smoke.sh --auth --failure-paths` (n/n)            |        |
-| 0b `research-smoke.sh` (n/n)                                  |        |
-| 0d running config as expected; two container records only     |        |
-| 1a both accounts: no shell, Redis forward prohibited          |        |
-| 1b user 1 / user 2 subjects                                   |        |
-| 1d both `doctor` all seven green                              |        |
-| 2a/2b user 1's answer equals `ls-remote` and `index.json`     |        |
-| 2c user 2's answer equals them; audit shows two own creds     |        |
-| 2d where the two research directories landed                  |        |
-| 3a lists disjoint; 3b both refusals identical, owner resumes  |        |
-| 4a container `uname -a`; 4c guest `uname -a`                  |        |
-| 4d turn 2 saw turn 1's commit; Execs and distinct `vm=` count |        |
-| 4e two workspaces, user 2's lines name only user 2's id       |        |
-| 4f the guest's curl error                                     |        |
-| Elapsed time; anything unexpected (add to the fix list)       |        |
+## Act 5 — The record
+
+The 2026-10-01 run. Copy the table, empty, into the report for a later run.
+
+| Item                                                          | Result                                                                                                       |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Commit on the VM; instance type; Firecracker version          | `main` @ 03d2ee8 + this page (`a2a5254`); `m8i.xlarge`, AL2023, 16 GiB; Firecracker v1.17.0 (#376's install) |
+| 0a sandbox image                                              | pulled `102ed4c1cfb9` (`HOME=/home/sandbox`); the host had a pre-#372 image                                  |
+| 0b `p4-turn-smoke.sh --auth --failure-paths` (n/n)            | 34/34; cleanup 4 × 204. f2: `vsock-short-response: vmpool: guest closed before End: EOF`                     |
+| 0b `research-smoke.sh` (n/n)                                  | 13/13, raw Anthropic key                                                                                     |
+| 0d running config as expected; two container records only     | as expected; records listed `sh-sandbox-1`, `sh-sandbox-0`                                                   |
+| 1a both accounts: no shell, Redis forward prohibited          | both                                                                                                         |
+| 1b user 1 / user 2 subjects                                   | `github:6678093` / `github:228572680`: one person, two accounts, one laptop                                  |
+| 1d both `doctor` all seven green                              | yes                                                                                                          |
+| 2a/2b user 1's answer equals `ls-remote` and `index.json`     | `03d2ee8c067d`, `v26.10.0`, `2026-09-21`: equal                                                              |
+| 2c user 2's answer equals them; audit shows two own creds     | equal; audit: `anthropic` (user 1), `anthropic-dev` (user 2), two different keys                             |
+| 2d where the two research directories landed                  | both in `sh-sandbox-1`                                                                                       |
+| 3a lists disjoint; 3b both refusals identical, owner resumes  | disjoint (one session each, owner index checked); both refusals identical, exit 1; owner resumed             |
+| 4a container `uname -a`; 4c guest `uname -a`                  | `Linux 975fcff1af5d 6.18.44-99.149.amzn2023…` / `Linux (none) 6.18.44+…`                                     |
+| 4b switch                                                     | `moca_microvm_0` alone, attached in 2 s; no re-login                                                         |
+| 4d turn 2 saw turn 1's commit; Execs and distinct `vm=` count | yes (`6dcad49`); 3 Execs, 3 VMs                                                                              |
+| 4e two workspaces, user 2's lines name only user 2's id       | yes; 3 Execs, 3 VMs; user 2 saw only its own `c8f6851`                                                       |
+| 4f the guest's curl error                                     | `curl: (6) Could not resolve host: nodejs.org`                                                               |
+| Elapsed time; anything unexpected (add to the fix list)       | not timed; fix list 4 to 9                                                                                   |
 
 ## What just happened
 
@@ -524,28 +649,33 @@ Say these in the room. They are what stops someone over-promising.
 - **Tenancy as of this writing:** `MOCA_TENANCY` unset, with no first-subject pin. See the top of
   this page for when that stops working (#407).
 - **A `setup-vm.sh` re-run forgets every session** (#410).
+- **Not performed:** two people on two laptops. The run was one person with two GitHub accounts.
 
 ## Fix list
 
-Found while writing this runbook, on top of `vm-two-user-acceptance.md`'s list. Add what the live
-run finds.
+Found while writing and running this demo, on top of `vm-two-user-acceptance.md`'s list. Items 4
+to 9 come from the 2026-10-01 run.
 
-| #   | Finding                                                                                                                                                                                                         | Status                                                           |
-| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| 1   | **Login expiry mid-demo.** The 1-hour API token makes a long demo ask for a second device-flow login. The TUI recovers by itself (login overlay, prompt replayed); headless `mocactl run` says to log in again. | Works as designed. 0a sets `SH_API_TOKEN_TTL_SECONDS=14400`.     |
-| 2   | **`device_flow_disabled` and `Not Found` carried no hint.** The login error was GitHub's, verbatim.                                                                                                             | Fixed (#405, #413): mocactl names the operator's fix.            |
-| 3   | **The switch back to containers loses every session.** It needs a `setup-vm.sh` re-run, which recreates `sh-redis` with no volume.                                                                              | #410. The demo switches once, to P4, and only Cleanup goes back. |
-| 4   | **No headless view of a turn's tool calls.** 2a needs `--json` and `jq` to show the room the commands.                                                                                                          | Open. A `mocactl run --show-tools` would replace the filter.     |
-| 5   | **One identity per `XDG_CONFIG_HOME`.** Two users rehearsing on one machine overwrite each other's login.                                                                                                       | #404: `mocactl --profile`.                                       |
-| 6   | **MI1 S2's first-subject pin** will refuse user 2 under `single`.                                                                                                                                               | #407.                                                            |
+| #   | Finding                                                                                                                                                                                                                     | Status                                                                             |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| 1   | **Login expiry mid-demo.** The 1-hour API token makes a long demo ask for a second device-flow login. The TUI recovers by itself (login overlay, prompt replayed); headless `mocactl run` says to log in again.             | Works as designed. 0a sets `SH_API_TOKEN_TTL_SECONDS=14400`.                       |
+| 2   | **`device_flow_disabled` and `Not Found` carried no hint.** The login error was GitHub's, verbatim.                                                                                                                         | Fixed (#405, #413): mocactl names the operator's fix.                              |
+| 3   | **The switch back to containers loses every session.** It needs a `setup-vm.sh` re-run, which recreates `sh-redis` with no volume.                                                                                          | #410. The demo switches once, to P4, and only Cleanup goes back.                   |
+| 4   | **`setup-vm.sh` never pulls the sandbox image.** A host keeps running whatever `:latest` it pulled first. The rig's predated #372 (`HOME=/workspace`).                                                                      | Open. 0a pulls by hand. `setup-vm.sh` could pull, or pin a digest.                 |
+| 5   | **The guest has no git identity.** On the P4 tier, the agent's first `git commit` fails (`exit=128`) until it sets one. The container tier's #372 image has a writable `HOME`, but no identity either.                      | Open. Set `user.name`/`user.email` in the image (system gitconfig).                |
+| 6   | **Sessions show only their first prompt.** Two users running the same prompt get identical-looking lists, so 3a cannot be shown in the TUI. The rows also read `0 turns · local history` after a headless `mocactl run`.    | Open. Show a short session id; count turns from the server. #406 adds `sessions`.  |
+| 7   | **`research-smoke.sh` leaves its minted subject's empty record** in `/var/lib/moca-control-plane/`. It deletes the credential, session and files, but not the record.                                                       | Open. Delete it on exit, as `P4-ON-P6.md`'s cleanup does by hand for its subjects. |
+| 8   | **No headless view of a turn's tool calls.** 2a needs `--json` and `jq` to show the room the commands.                                                                                                                      | Open. A `mocactl run --show-tools` would replace the filter.                       |
+| 9   | **One identity per `XDG_CONFIG_HOME`**, and the device flow approves for whichever account the browser is signed into. Playing two users on one machine needs two config directories and a private browser window (1a, 1b). | #404: `mocactl --profile`.                                                         |
+| 10  | **MI1 S2's first-subject pin** will refuse user 2 under `single`.                                                                                                                                                           | #407.                                                                              |
 
 ## Cleanup
 
 **On each laptop:** delete this run's sessions in **Sessions** (`ctrl+x l`, then `d`), remove
-`"${XDG_CONFIG_HOME:-$HOME/.config}/mocactl/auth.json"` to log out, and close the tunnel with
-`ssh -S ~/.ssh/moca-tunnel -O exit <account>@<vm>`. Each user can delete their credential in
-**Credentials** first, and revoke the app on GitHub under **Settings → Applications → Authorized
-OAuth Apps**.
+`"${XDG_CONFIG_HOME:-$HOME/.config}/mocactl/auth.json"` to log out, `rm -f "$API_HDR"`, and close
+the tunnel with `ssh -S ~/.ssh/moca-tunnel -O exit <account>@<vm>`. Each user can delete their
+credential in **Credentials** first, and revoke the app on GitHub under **Settings → Applications
+→ Authorized OAuth Apps**.
 
 **On the VM**, put the container tier back. Stop the worker **first**, so the re-run does not start
 the containers next to it. The re-run recreates Redis, which also drops whatever sessions are left
@@ -558,7 +688,13 @@ cd /opt/serverless-harness && sudo ./deploy/vm/setup-vm.sh
 ```
 
 Then restore what 0a changed: remove `SH_API_TOKEN_TTL_SECONDS` from `control-plane.env` and
-`sudo systemctl restart sh-control-plane`. The research directories go with the containers, which
+`sudo systemctl restart sh-control-plane`. Delete the research smoke's leftover subject record
+(fix list 7): the file in `/var/lib/moca-control-plane/` named by the first 16 hex digits of
+`sha256` of the subject the smoke printed. The research directories go with the containers, which
 the re-run recreated. The microVM workspaces under `/srv/workspaces` stay until idle reclaim (8 h);
 to remove the P4 tier entirely, follow `deploy/microvm/P4-ON-P6.md`, "Uninstall". Remove the
-participants' SSH accounts and their `Match` block, and delete the OAuth app when the demo is over.
+participants' SSH accounts (`sudo userdel -r user1 user2`) and their `Match` block, and delete the
+OAuth app when the demo is over.
+
+A host that was P4-only before the demo goes back to P4-only instead: skip the re-run above, and
+leave the worker enabled.
