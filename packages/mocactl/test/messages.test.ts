@@ -25,6 +25,15 @@ describe('describeError', () => {
       new ApiError('control-plane', 503, 'redis_unavailable'),
       'the control plane is unavailable — try again shortly',
     ],
+    [
+      new ApiError(
+        'control-plane',
+        502,
+        'identity_provider_misconfigured',
+        'tick Enable Device Flow',
+      ),
+      'the control plane cannot log anyone in until its operator fixes it — tick Enable Device Flow',
+    ],
     [new HarnessUntrustedError(), new HarnessUntrustedError().message],
     ['plain', 'plain'],
   ])('%#', (err, text) => {

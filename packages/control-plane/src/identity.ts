@@ -82,23 +82,39 @@ export class GithubOAuthProvider implements IdentityProvider {
   private async postJson(
     url: string,
     params: Record<string, string>,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<{ status: number; body: Record<string, unknown> }> {
     const res = await this.fetchImpl(url, {
       method: 'POST',
       headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams(params).toString(),
     });
-    return parseBody(await res.text(), res.status);
+    return { status: res.status, body: parseBody(await res.text(), res.status) };
   }
 
   async startDeviceAuth(): Promise<DeviceStart> {
-    const body = await this.postJson(`${this.oauthBase}/login/device/code`, {
+    const { status, body } = await this.postJson(`${this.oauthBase}/login/device/code`, {
       client_id: this.clientId,
       scope: SCOPE,
     });
     if (typeof body.error === 'string') {
-      // device_flow_disabled is the likeliest first-run failure -- it is OFF by default on a GitHub
-      // OAuth app (spec §5.1.1) -- so the provider's own error text is what makes it diagnosable.
+      // The two likeliest first-run failures are the operator's to fix, not the user's: the device
+      // flow is OFF by default on a GitHub OAuth app (spec §5.1.1), and a mistyped client id gets a
+      // bare 404 {"error":"Not Found"} that never mentions the client id. Each gets its own code and
+      // the fix as the message (#405); GitHub's text stays in it so a log still greps for it.
+      if (body.error === 'device_flow_disabled') {
+        throw new CpError(
+          'identity_provider_misconfigured',
+          "the control plane's GitHub OAuth app has the device flow off (device_flow_disabled): " +
+            'tick Enable Device Flow on the app (deploy/vm/README.md, "The GitHub OAuth app")',
+        );
+      }
+      if (status === 404) {
+        throw new CpError(
+          'identity_provider_misconfigured',
+          `GitHub knows no OAuth app with client id ${this.clientId} (Not Found): ` +
+            'check SH_GITHUB_CLIENT_ID (deploy/vm/README.md, "The GitHub OAuth app")',
+        );
+      }
       throw new CpError('unauthorized', `github device code failed: ${body.error}`);
     }
     if (typeof body.device_code !== 'string' || typeof body.user_code !== 'string') {
@@ -118,7 +134,7 @@ export class GithubOAuthProvider implements IdentityProvider {
   }
 
   async completeDeviceAuth(deviceCode: string): Promise<Principal> {
-    const token = await this.postJson(`${this.oauthBase}/login/oauth/access_token`, {
+    const { body: token } = await this.postJson(`${this.oauthBase}/login/oauth/access_token`, {
       client_id: this.clientId,
       device_code: deviceCode,
       grant_type: GRANT_DEVICE_CODE,

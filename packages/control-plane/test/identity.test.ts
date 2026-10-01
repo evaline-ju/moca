@@ -109,22 +109,36 @@ describe('startDeviceAuth', () => {
     expect((await provider(fetch).startDeviceAuth()).interval).toBe(5);
   });
 
-  it('surfaces a GitHub error as unauthorized, not as a 500', async () => {
+  it('surfaces any other GitHub error as unauthorized, not as a 500', async () => {
     const { fetch } = fakeFetch({
-      '/login/device/code': [{ status: 404, body: { error: 'Not Found' } }],
+      '/login/device/code': [{ status: 400, body: { error: 'unsupported_grant_type' } }],
     });
     expect(await codeOf(() => provider(fetch).startDeviceAuth())).toBe('unauthorized');
   });
 
-  it('reports a device-flow-disabled app as unauthorized with a message an operator can act on', async () => {
-    // Device flow is OFF by default on a GitHub OAuth app (spec §5.1.1); this is the most likely
-    // first-run failure and the message is the only thing that makes it diagnosable.
+  it('reports a device-flow-disabled app as identity_provider_misconfigured, naming the fix', async () => {
+    // Device flow is OFF by default on a GitHub OAuth app (spec §5.1.1): the likeliest first-run
+    // failure, and one only the operator can fix -- so the message is the fix, not GitHub's code (#405).
     const { fetch } = fakeFetch({
       '/login/device/code': [
         { status: 400, body: { error: 'device_flow_disabled', error_description: 'not enabled' } },
       ],
     });
-    await expect(provider(fetch).startDeviceAuth()).rejects.toThrow(/device_flow_disabled/);
+    const p = provider(fetch).startDeviceAuth();
+    await expect(p).rejects.toMatchObject({ code: 'identity_provider_misconfigured' });
+    await expect(p).rejects.toThrow(/Enable Device Flow/);
+    await expect(p).rejects.toThrow(/device_flow_disabled/);
+  });
+
+  it('reports a mistyped client id (GitHub 404 Not Found) as identity_provider_misconfigured', async () => {
+    // GitHub's reply never mentions the client id; the message must, or the 404 is undiagnosable.
+    const { fetch } = fakeFetch({
+      '/login/device/code': [{ status: 404, body: { error: 'Not Found' } }],
+    });
+    const p = provider(fetch).startDeviceAuth();
+    await expect(p).rejects.toMatchObject({ code: 'identity_provider_misconfigured' });
+    await expect(p).rejects.toThrow(/SH_GITHUB_CLIENT_ID/);
+    await expect(p).rejects.toThrow(/Iv1\.fakeclientid/);
   });
 });
 

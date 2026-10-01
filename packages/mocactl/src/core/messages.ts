@@ -21,6 +21,8 @@ function describe(err: unknown): string {
         return 'that session no longer exists, or is not yours';
       case 'endpoint-unresolved':
         return `the inference credential has no gateway endpoint (${action.message}) — edit it in /credentials`;
+      case 'operator-misconfigured':
+        return `the control plane cannot log anyone in until its operator fixes it — ${action.message}`;
       case 'retry-after':
         return `the harness has no capacity — retry in ${action.seconds}s`;
       case 'unavailable':
