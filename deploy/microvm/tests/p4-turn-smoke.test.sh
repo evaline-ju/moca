@@ -229,11 +229,11 @@ if [ -e "$DIR/../../packages/control-plane/node_modules/tsx" ]; then
   check "each subject stored the mock credential" "$(grep -c '^credential-put .*/v1/credentials/p4-smoke-mock$' "$MOCK_LOG")" "2"
   check "every turn went through mocactl" "$(grep -c '^mocactl run ' "$MOCK_LOG")" "5"
   check "no api token on any argv" "$(grep -c 'eyJ' "$MOCK_LOG")" "0"
-  mode() { node -e 'process.stdout.write((require("fs").statSync(process.argv[1]).mode & 0o777).toString(8))' "$1"; }
+  mode() { node -e 'process.stdout.write((require("fs").statSync(process.argv[1]).mode & 0o7777).toString(8))' "$1"; }
   check "the --out directory is 0700" "$(mode "$TMP/out3")" "700"
   check "each subject's config directory is 0700" "$(mode "$TMP/out3/xdg-a")$(mode "$TMP/out3/xdg-b")" "700700"
   check "api.hdr is 0600" "$(mode "$TMP/out3/xdg-b/api.hdr")" "600"
-  check "auth.json is 0600" "$(node -e 'process.stdout.write((require("fs").statSync(process.argv[1]).mode & 0o777).toString(8))' "$TMP/out3/xdg-a/mocactl/auth.json")" "600"
+  check "auth.json is 0600" "$(mode "$TMP/out3/xdg-a/mocactl/auth.json")" "600"
 
   # The checks above must be able to fail for the regressions they name (#409 review): run mutated
   # copies of the driver. MOCA_ROOT is set because a copy in $TMP cannot find the checkout itself.
@@ -280,11 +280,21 @@ if [ -e "$DIR/../../packages/control-plane/node_modules/tsx" ]; then
     MOCA_ROOT="$DIR/../.." MOCA_CRED_DIR="$TMP/cred" MOCACTL=mocactl bash "$m" --auth --out "$TMP/out9" >"$TMP/run9.log" 2>&1
     check "the PUT is named as refused" "$(grep -c "FAIL: stored subject a's inference credential (want '204', got '400')" "$TMP/out9/SUMMARY")" "1"
   else check "the bad-consumer mutation applied" no yes; fi
-  echo "== --auth refuses an --out that is a symlink (it would hold tokens)"
-  mkdir -p "$TMP/real-out"; ln -s "$TMP/real-out" "$TMP/link-out"
-  MOCA_CRED_DIR="$TMP/cred" MOCACTL=mocactl bash "$SCRIPT" --auth --out "$TMP/link-out" >"$TMP/run10.log" 2>&1
-  check "exit 2" "$?" "2"
-  check "nothing was minted into it" "$(find "$TMP/real-out" -name api.hdr | wc -l | tr -d ' ')" "0"
+  echo "== --auth refuses an --out that already exists, or is a symlink (it would hold tokens)"
+  mkdir -p "$TMP/shared"; chmod 1777 "$TMP/shared"; : >"$TMP/shared/someone-elses-file"
+  ln -s "$TMP/shared" "$TMP/link-out"
+  for o in "$TMP/shared" "$TMP/link-out"; do
+    MOCA_CRED_DIR="$TMP/cred" MOCACTL=mocactl bash "$SCRIPT" --auth --out "$o" >"$TMP/run10.log" 2>&1
+    rc=$? # before the check's own $(basename): it would reset $?
+    check "exit 2 for $(basename "$o")" "$rc" "2"
+  done
+  check "the existing directory's mode is untouched" "$(mode "$TMP/shared")" "1777"
+  check "nothing was minted into it" "$(find "$TMP/shared" -name api.hdr | wc -l | tr -d ' ')" "0"
+  echo "== --auth creates a named --out that does not exist yet, 0700"
+  rm -rf "$STATE"
+  MOCA_CRED_DIR="$TMP/cred" MOCACTL=mocactl bash "$SCRIPT" --auth --out "$TMP/new-out" >"$TMP/run11.log" 2>&1
+  check "it ran (PASS)" "$(grep -c '^PASS' "$TMP/run11.log")" "1"
+  check "it is 0700" "$(mode "$TMP/new-out")" "700"
 
   echo "== --auth without a readable signing key fails at the mint, by name"
   rm -rf "$STATE"

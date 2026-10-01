@@ -62,17 +62,20 @@ done
 # controlPlaneUrl to equal that exactly; a trailing slash would also build //v1/... URLs for curl.
 while [ "${CP%/}" != "$CP" ]; do CP="${CP%/}"; done
 while [ "${SUP%/}" != "$SUP" ]; do SUP="${SUP%/}"; done
-# With --auth, $OUT holds minted api tokens. The default is a fresh mktemp directory; a named one must
-# be a real directory this user owns (not a symlink, not one another user pre-created in /tmp), and
-# it is made private before anything is written into it.
-if [ -z "$OUT" ]; then T="${TMPDIR:-/tmp}"; OUT="$(mktemp -d "${T%/}/p4-smoke-XXXXXX")" || exit 2; fi
-mkdir -p "$OUT"
-if [ "$AUTH" = 1 ]; then
-  if [ -L "$OUT" ] || [ ! -O "$OUT" ]; then
-    echo "--out $OUT is a symlink or not owned by $(id -un): it would hold api tokens; pick another" >&2
+# With --auth, $OUT holds minted api tokens, so it is always a directory this run creates, 0700: the
+# default is a fresh mktemp one, and a named one must not exist yet. mkdir without -p refuses any
+# existing path, symlink or not -- an owner check would not do, since under sudo root owns /tmp
+# itself (#409 review). Without --auth a named --out may already exist.
+if [ -z "$OUT" ]; then
+  T="${TMPDIR:-/tmp}"
+  OUT="$(mktemp -d "${T%/}/p4-smoke-XXXXXX")" || exit 2
+elif [ "$AUTH" = 1 ]; then
+  mkdir -m 0700 -- "$OUT" || {
+    echo "--out $OUT: with --auth it must be a new directory (it will hold api tokens); pick a path that does not exist" >&2
     exit 2
-  fi
-  chmod 0700 "$OUT"
+  }
+else
+  mkdir -p "$OUT"
 fi
 fails=0
 check() { if [ "$2" = "$3" ]; then echo "  ok: $1" | tee -a "$OUT/SUMMARY"; else

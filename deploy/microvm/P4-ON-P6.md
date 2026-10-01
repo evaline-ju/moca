@@ -317,8 +317,8 @@ sudo systemctl stop p4-mock-anthropic
 ```
 
 Each run writes to a fresh private directory and names it on its last line:
-`PASS (/tmp/p4-smoke-XXXXXX)`. With `--auth`, a named `--out` must be a directory you own, not a
-symlink: it holds the api tokens.
+`PASS (/tmp/p4-smoke-XXXXXX)`. With `--auth`, a named `--out` must not exist yet: the run creates
+it `0700`, because it holds the api tokens, and refuses an existing path or a symlink.
 
 After an `--auth` run, clean up what it created on the control plane and the worker:
 
@@ -417,6 +417,17 @@ Verified on 2026-09-30:
 | A second user cannot reach the first user's session                          | subject b: `GET /v1/sessions/<a's id>` → 404. That run predates the positive controls added in review (each owner reads its own session: 200), so its 404 alone does not exclude an unknown id |
 | The failure paths still end with a named error                               | worker restart: `worker disconnected`; killed VM: `vsock-short-response: vmpool: guest closed before End: EOF`                                                                                 |
 | The authenticated check can be run again                                     | a second `--auth` run: `PASS`; the credential `PUT` replaces the stored one                                                                                                                    |
+
+**Re-run after review**, 2026-10-01, at `cf094b5`, on the same host: `p4-turn-smoke.sh --auth
+--failure-paths` passed **34/34**.
+
+- The new checks held: subject a read session A (200), subject b read session B (200), and subject b
+  got 404 on A.
+- The output directory, each subject's config directory, `auth.json` and `api.hdr` were 0700, 0700,
+  0600 and 0600.
+- 4 Execs ran in 4 distinct VMs; session A had 3 of them.
+- The cleanup block above, run as written, answered `204` to all four deletes and left none of the
+  run's sessions, credentials, subject records, workspaces or tokens behind.
 
 **Then a real login**, 2026-10-01, by the owner from a laptop over the SSH tunnel:
 
