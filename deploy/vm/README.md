@@ -308,8 +308,12 @@ The control plane refuses to boot on a fallback that cannot work, naming the set
 `journalctl -u sh-control-plane` shows which. `setup-vm.sh` itself stops on:
 
 - `SH_ALLOW_OPERATOR_FALLBACK=true` with no token file;
-- a token file that is empty, a dangling symlink, or readable by anyone but its owner (not 0600 or 0400);
+- a token file that is empty, a dangling symlink, or readable by anyone but its owner (not 0600 or
+  0400; for a symlink, its target's mode);
 - the token as a line in `control-plane.env`.
+- another drop-in that also loads `SH_OPERATOR_INFERENCE_TOKEN`, such as the
+  `systemctl edit` `override.conf` this README described before. Delete its `LoadCredential=` line and
+  re-run: the script manages the credential itself now.
 
 To turn the fallback off, set `SH_ALLOW_OPERATOR_FALLBACK=false`. To remove the key as well, delete
 the file and re-run: the drop-in goes with it.

@@ -1231,6 +1231,37 @@ rm "$OP/credentials/operator-inference-token"
 mv "$OP/credentials/token.real" "$OP/credentials/operator-inference-token"
 pass "operator fallback: a dangling symlink at the token path refuses"
 
+# A LIVE symlink is judged by its target, as LoadCredential= reads it (#411 review): a link to a 0600
+# key passes, a link to a key others can read refuses, and the advice it prints then works.
+mv "$OP/credentials/operator-inference-token" "$OP/credentials/token.real"
+ln -s "$OP/credentials/token.real" "$OP/credentials/operator-inference-token"
+op_run || fail "a symlink to a 0600 operator token was refused"
+[[ -e "$OP_DROPIN" ]] || fail "a symlink to a 0600 operator token got no drop-in"
+chmod 0644 "$OP/credentials/token.real"
+if op_err=$(op_run 2>&1); then fail "a symlink to a 0644 operator token was accepted"; fi
+grep -qF 'mode 644' <<<"$op_err" || fail "the refusal must report the TARGET's mode (644): $op_err"
+chmod 0600 "$OP/credentials/token.real"
+op_run || fail "after the advised chmod, the symlinked token was still refused"
+rm "$OP/credentials/operator-inference-token"
+mv "$OP/credentials/token.real" "$OP/credentials/operator-inference-token"
+pass "operator fallback: a live symlink is judged by its target's mode"
+
+# A hand-made drop-in loading the same credential -- what main's README told operators to write with
+# `systemctl edit` before #411 (override.conf) -- is refused, naming it: with the token it doubles
+# the line, and once the token goes it would fail the unit on the missing file.
+install -d "$OP_UNITS/sh-control-plane.service.d"
+printf '[Service]\nLoadCredential=SH_OPERATOR_INFERENCE_TOKEN:/etc/serverless-harness/credentials/operator-inference-token\n' \
+  >"$OP_UNITS/sh-control-plane.service.d/override.conf"
+for state in present absent; do
+  [[ "$state" == absent ]] && mv "$OP/credentials/operator-inference-token" "$OP/token.aside"
+  if op_err=$(op_run 2>&1); then fail "a hand-made drop-in loading the token was accepted (token $state)"; fi
+  grep -qF 'override.conf' <<<"$op_err" || fail "the refusal must name override.conf (token $state): $op_err"
+done
+mv "$OP/token.aside" "$OP/credentials/operator-inference-token"
+rm "$OP_UNITS/sh-control-plane.service.d/override.conf"
+op_run || fail "with the hand-made drop-in removed, a present token was refused"
+pass "operator fallback: a hand-made drop-in loading the same credential refuses, naming it"
+
 # An empty token file is refused, not loaded.
 : >"$OP/credentials/operator-inference-token"
 if op_err=$(op_run 2>&1); then fail "an empty operator token was accepted"; fi
@@ -1248,6 +1279,16 @@ for line in "SH_OPERATOR_INFERENCE_TOKEN=$OP_SECRET" "  SH_OPERATOR_INFERENCE_TO
   sed -i.bak '/SH_OPERATOR_INFERENCE_TOKEN=/d' "$OP/control-plane.env" && rm -f "$OP/control-plane.env.bak"
 done
 pass "operator fallback: the token as an env line refuses without echoing it"
+
+# An INDENTED fallback line counts too: systemd's EnvironmentFile= accepts it, so the control plane
+# would see the fallback on (#411 review).
+mv "$OP/credentials/operator-inference-token" "$OP/token.aside"
+printf '  SH_ALLOW_OPERATOR_FALLBACK=true\n' >>"$OP/control-plane.env"
+if op_err=$(op_run 2>&1); then fail "an indented SH_ALLOW_OPERATOR_FALLBACK=true with no token file was accepted"; fi
+grep -qF 'does not exist' <<<"$op_err" || fail "the refusal must say the token file does not exist: $op_err"
+sed -i.bak '/SH_ALLOW_OPERATOR_FALLBACK=true/d' "$OP/control-plane.env" && rm -f "$OP/control-plane.env.bak"
+mv "$OP/token.aside" "$OP/credentials/operator-inference-token"
+pass "operator fallback: an indented fallback line counts, as systemd reads it"
 
 # Token removed later with the fallback off -> the drop-in goes too (Review Focus 4).
 sed -i.bak '/^SH_ALLOW_OPERATOR_FALLBACK=/d' "$OP/control-plane.env" && rm -f "$OP/control-plane.env.bak"
