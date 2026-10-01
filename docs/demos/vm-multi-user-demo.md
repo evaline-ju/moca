@@ -49,9 +49,11 @@ against (Act 5).
 - The research turn: `deploy/vm/research-smoke.sh` (#411, `VM_RESEARCH_SMOKE=1`).
 - The P4 tier with auth on: `deploy/microvm/p4-turn-smoke.sh --auth` (#409).
 
-On this rig, `sudo` does not find podman-static under `/usr/local/bin`, so every `sudo podman` and
-`sudo ./deploy/...` command on this page ran as `sudo env PATH="/usr/local/bin:$PATH" …`
-(`deploy/vm/README.md`, "Prerequisites"). On a host whose `secure_path` has it, drop the prefix.
+**`sudo` must find podman.** The rig's `secure_path` includes `/usr/local/bin`, where podman-static
+installs, so the commands on this page run as written. If `sudo podman version` says
+`command not found` on your host, prefix every `sudo` command here with `env PATH="/usr/local/bin:$PATH"`,
+including 4b's `sudo timeout … sh -c '… podman …'`. Without it, that loop prints
+`podman: not found` for 60 s and exits 124 (`deploy/microvm/P4-ON-P6.md`, "Prerequisites").
 
 ## Act 0 — Preparation (operator, the day before)
 
@@ -81,9 +83,12 @@ Expected: `/home/sandbox`, `/usr/bin/curl`, `/usr/bin/git`. The containers pick 
 0b's `setup-vm.sh` re-run.
 
 **Lengthen the login for the demo.** An API token lasts an hour (`SH_API_TOKEN_TTL_SECONDS=3600`).
-When it lapses mid-demo, the interactive UI opens its login overlay and replays the prompt, and a
-headless `mocactl run` stops with "your login has expired — run `mocactl login`". Both recover,
-but a second device-flow login in front of a room costs a minute. Set four hours instead:
+When it lapses mid-demo, the interactive UI opens its login overlay and replays the prompt. A
+headless `mocactl run` started after the lapse stops before it reaches the server, with
+``not logged in — run `mocactl login` first`` and exit 2. One that was mid-turn when the server
+refused the token says ``your login has expired — run `mocactl login` (or restart mocactl) to log
+in again``. All of them recover, but a second device-flow login in front of a room costs a minute.
+Set four hours instead:
 
 ```bash
 sudoedit /etc/serverless-harness/control-plane.env   # SH_API_TOKEN_TTL_SECONDS=14400
@@ -110,11 +115,28 @@ Act 4. Follow `deploy/microvm/P4-ON-P6.md`:
 
    ```bash
    sudo podman rm -f $(sudo podman ps -a --format '{{.Names}}' --filter 'name=^sh-sandbox-')
-   cd /opt/serverless-harness && sudo deploy/microvm/setup-microvm.sh   # under 24 GiB: MICROVM_MAX_COMMITTED_MB=8192
+   cd /opt/serverless-harness
+   sudo deploy/microvm/setup-microvm.sh                                  # a >= 24 GiB host
+   sudo MICROVM_MAX_COMMITTED_MB=8192 deploy/microvm/setup-microvm.sh    # a smaller host (16 GiB here)
    ```
 
-3. **Rehearse it:** `p4-turn-smoke.sh --auth --failure-paths` ("Automated check"), then its
-   cleanup. The run passed 34/34, and the cleanup's four deletes answered 204.
+   Use one of the two. The shipped unit asserts at least 23G of memory and refuses to start on a
+   smaller host, so a 16 GiB host needs the budget. 8192 is the 16 GiB rig's value; on another size,
+   pick it from `P4-ON-P6.md`, "Install".
+
+3. **Rehearse it:** `p4-turn-smoke.sh --auth --failure-paths` ("Automated check"). Then do **both**
+   of its cleanups:
+   - **Point the supervisor back at the real model:** remove
+     `sh-supervisor.service.d/90-p4-smoke.conf` and `/etc/serverless-harness/p4-smoke.env`, restart
+     `sh-supervisor`, and stop `p4-mock-anthropic` ("Afterwards, point the supervisor back at the
+     real model"). Step 4's `setup-vm.sh` re-run does not undo this, and 0d does not check it, so a
+     missed step leaves the supervisor on `mock-p4`, and the research rehearsal below fails for no
+     obvious reason.
+   - **Delete the run's sessions, credentials, subject records and workspaces**, with the deletes
+     block that follows.
+
+   The run passed 34/34, and the four deletes answered 204.
+
 4. **Park it, and bring the containers back.** This `setup-vm.sh` re-run recreates Redis and so
    forgets every session (#410). That is harmless now, and is why it happens today:
 
@@ -125,7 +147,9 @@ Act 4. Follow `deploy/microvm/P4-ON-P6.md`:
    ```
 
    The `HDEL` answered `0` on the run: the worker's record was already gone, removed when it
-   disconnected. It stays as a backstop for a relay that was down at the time.
+   disconnected. It is a no-op here either way, because the `setup-vm.sh` re-run on the next line
+   recreates Redis and with it `sh:sandbox:records`. It matters only for a switch made without a
+   re-run.
 
 The relay keeps the worker's token: `setup-vm.sh` leaves `setup-microvm.sh`'s relay drop-in in
 place. So in Act 4, starting the worker is enough to attach it.
@@ -143,10 +167,6 @@ sudo rm -f /root/inference-key
 The run passed 13/13 on a raw Anthropic key. It leaves its minted subject's empty record in
 `/var/lib/moca-control-plane/` (fix list): delete it in Cleanup.
 
-**Rehearse one real login** from a laptop (1a, 1b). The smokes mint their tokens, so they never
-touch GitHub, and a device-flow misconfiguration would otherwise show up first in front of the
-room.
-
 > Trap: from here until Cleanup, **do not re-run `setup-vm.sh`.** Every re-run loses every user's
 > sessions (#410), and a re-run while the microVM worker is enabled starts the containers next to
 > it, so both tiers attach and sessions hop between them.
@@ -158,6 +178,11 @@ Restrict each participant's account to the two forwarded ports: `vm-two-user-acc
 with no authentication, so an unrestricted account could take over any session. The run used two
 accounts, `user1` and `user2`, created with `useradd -m -s /usr/sbin/nologin` and an
 `authorized_keys` each.
+
+**Then rehearse one real login** from a laptop, through one of those accounts (1a, 1b). This comes
+after the restriction, so 1a's own check passes. The smokes mint their tokens and never touch
+GitHub, so without this step a device-flow misconfiguration would show up first in front of the
+room.
 
 ### 0d. Check what is running (operator, on the day)
 
@@ -199,10 +224,22 @@ two container sandboxes, and no `moca_microvm_0`.
 
 ## Act 1 — Two users log in
 
-Do all of Act 1 as user 1, then as user 2. Each laptop needs `mocactl`
-(`packages/mocactl/README.md`), `jq`, a browser, and an inference credential of its user's own: a
-gateway token or an Anthropic API key. (The blocks run on the laptops have no `#` comments, so
-they paste cleanly into macOS's default zsh.)
+Do all of Act 1 as user 1, then as user 2. Each laptop needs:
+
+- `jq` and a browser;
+- an inference credential of its user's own: a gateway token or an Anthropic API key;
+- `mocactl`, which runs from a checkout. There's no installed `mocactl` command. Follow
+  `packages/mocactl/QUICKSTART.md`: Node 22 and pnpm 9, `pnpm install` in the checkout, and in each
+  terminal, from the checkout:
+
+  ```bash
+  alias mocactl="node $PWD/packages/mocactl/bin/mocactl.mjs"
+  ```
+
+  Every bare `mocactl` on this page assumes that alias.
+
+(The blocks run on the laptops have no `#` comments, so they paste cleanly into macOS's default
+zsh.)
 
 ### 1a. Open the tunnel
 
@@ -231,9 +268,16 @@ stdio forwarding failed
 
 A `+PONG` means 0c does not apply to this account: stop and fix it.
 
-> Trap: to play both users on one machine, give each its own `XDG_CONFIG_HOME`
-> (`export XDG_CONFIG_HOME=/tmp/user2` in user 2's terminal). `mocactl` keeps one identity per
-> config directory (#404). Open the tunnel once only.
+> Trap: to play both users on one machine, open the tunnel once only, and give user 2's terminal
+> its own config directory **and** the control-plane URL. That terminal skips 1a's block, which is
+> where the URL is exported, and a fresh `XDG_CONFIG_HOME` has no saved URL, so `mocactl login`
+> would stop with `missing control-plane URL`. In user 2's terminal, after the alias:
+>
+> ```bash
+> export XDG_CONFIG_HOME=/tmp/user2 SH_CONTROL_PLANE_URL=http://127.0.0.1:8090
+> ```
+>
+> `mocactl` keeps one identity per config directory (#404).
 
 ### 1b. Log in
 
@@ -418,6 +462,7 @@ login cache:
 AUTH="${XDG_CONFIG_HOME:-$HOME/.config}/mocactl/auth.json"
 API_HDR="$(mktemp)"; jq -r '.apiToken // empty | "Authorization: Bearer " + .' "$AUTH" >"$API_HDR"
 curl -s -H @"$API_HDR" "$SH_CONTROL_PLANE_URL/v1/sessions" | jq -r '.sessions[].sessionId'
+rm -f "$API_HDR"
 ```
 
 Expected: each user's own sessions from Act 2, and nothing of the other user's. (This `curl` is
@@ -631,15 +676,25 @@ Say these in the room. They are what stops someone over-promising.
   `remote-worker/internal/exec/runner.go` ignores `workspace_key`, #408). The fix is MI1 S5, owner
   binding.
 - **Direct credential mode.** With no injector on this VM, a user's real inference secret reaches
-  the shared sandbox worker for the length of a turn. MI1 S2's grants replace this.
+  the shared harness worker for the length of a turn. That is the `knative-server` process
+  `sh-supervisor` runs for every user, and it puts the secret in the model request's headers. The
+  sandbox never receives it: an Exec carries only the command, stdin, timeout and workspace key, and
+  the sandbox's environment allowlist is `LANG`, `LC_ALL`, `LC_CTYPE` and `TZ`. So the agent's bash
+  cannot read a user's key, but one harness process holds every user's key during their turns. MI1
+  S2's grants replace this.
 - **Open egress.** Container sandboxes reach the whole internet, including cloud instance metadata
   unless the host enforces IMDSv2 with hop limit 1 (#357). Egress control is MI1 S5's
   `moca-egress`.
 - **P4 has no internet** (#277) **and no grant binding** (MI1 S4). Its workspaces are per session,
   but any holder of the relay's exec token can target any of them.
-- **One tier per host.** A session re-selects its sandbox every turn, and presence records carry no
-  tier label, so with both tiers attached a session can hop between them and lose its files.
-  Choosing the tier per session is not built.
+- **A container session can lose its files between turns.** A session re-selects its sandbox on
+  every turn, least loaded first, with no affinity to the last one. Each `sh-sandbox-N` has its own
+  `/workspace` and no shared volume. So once two turns overlap, a session's next turn can land on
+  the other container, without its files. On an idle host, ties go to the same container, which is
+  why 2d found both directories in `sh-sandbox-1`. No container act here depends on files across
+  turns. The microVM tier's per-session workspace (4d) is what does keep them.
+- **One tier per host.** Presence records carry no tier label, so with both tiers attached a
+  session can also hop between tiers. Choosing the tier per session is not built.
 - **Plain HTTP.** The SSH tunnel is the confidentiality. There is no TLS.
 - **Ownership holds at the API only.** Redis (`127.0.0.1:6379`) and the supervisor's admin listener
   (`:8081`) have no authentication. Anyone with a shell on the VM, or unrestricted forwarding, is
@@ -656,45 +711,68 @@ Say these in the room. They are what stops someone over-promising.
 Found while writing and running this demo, on top of `vm-two-user-acceptance.md`'s list. Items 4
 to 9 come from the 2026-10-01 run.
 
-| #   | Finding                                                                                                                                                                                                                     | Status                                                                             |
-| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| 1   | **Login expiry mid-demo.** The 1-hour API token makes a long demo ask for a second device-flow login. The TUI recovers by itself (login overlay, prompt replayed); headless `mocactl run` says to log in again.             | Works as designed. 0a sets `SH_API_TOKEN_TTL_SECONDS=14400`.                       |
-| 2   | **`device_flow_disabled` and `Not Found` carried no hint.** The login error was GitHub's, verbatim.                                                                                                                         | Fixed (#405, #413): mocactl names the operator's fix.                              |
-| 3   | **The switch back to containers loses every session.** It needs a `setup-vm.sh` re-run, which recreates `sh-redis` with no volume.                                                                                          | #410. The demo switches once, to P4, and only Cleanup goes back.                   |
-| 4   | **`setup-vm.sh` never pulls the sandbox image.** A host keeps running whatever `:latest` it pulled first. The rig's predated #372 (`HOME=/workspace`).                                                                      | #414. 0a pulls by hand meanwhile.                                                  |
-| 5   | **The guest has no git identity.** On the P4 tier, the agent's first `git commit` fails (`exit=128`) until it sets one. The container tier's #372 image has a writable `HOME`, but no identity either.                      | #415: a system gitconfig in the image.                                             |
-| 6   | **Sessions show only their first prompt.** Two users running the same prompt get identical-looking lists, so 3a cannot be shown in the TUI. The rows also read `0 turns · local history` after a headless `mocactl run`.    | Open. Show a short session id; count turns from the server. #406 adds `sessions`.  |
-| 7   | **`research-smoke.sh` leaves its minted subject's empty record** in `/var/lib/moca-control-plane/`. It deletes the credential, session and files, but not the record.                                                       | Open. Delete it on exit, as `P4-ON-P6.md`'s cleanup does by hand for its subjects. |
-| 8   | **No headless view of a turn's tool calls.** 2a needs `--json` and `jq` to show the room the commands.                                                                                                                      | Open. A `mocactl run --show-tools` would replace the filter.                       |
-| 9   | **One identity per `XDG_CONFIG_HOME`**, and the device flow approves for whichever account the browser is signed into. Playing two users on one machine needs two config directories and a private browser window (1a, 1b). | #404: `mocactl --profile`.                                                         |
-| 10  | **MI1 S2's first-subject pin** will refuse user 2 under `single`.                                                                                                                                                           | #407.                                                                              |
+| #   | Finding                                                                                                                                                                                                                                   | Status                                                                             |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| 1   | **Login expiry mid-demo.** The 1-hour API token makes a long demo ask for a second device-flow login. The TUI recovers by itself (login overlay, prompt replayed); headless `mocactl run` says to log in again (0a quotes both messages). | Works as designed. 0a sets `SH_API_TOKEN_TTL_SECONDS=14400`.                       |
+| 2   | **`device_flow_disabled` and `Not Found` carried no hint.** The login error was GitHub's, verbatim.                                                                                                                                       | Fixed (#405, #413): mocactl names the operator's fix.                              |
+| 3   | **The switch back to containers loses every session.** It needs a `setup-vm.sh` re-run, which recreates `sh-redis` with no volume.                                                                                                        | #410. The demo switches once, to P4, and only Cleanup goes back.                   |
+| 4   | **`setup-vm.sh` never pulls the sandbox image.** A host keeps running whatever `:latest` it pulled first. The rig's predated #372 (`HOME=/workspace`).                                                                                    | #414. 0a pulls by hand meanwhile.                                                  |
+| 5   | **The guest has no git identity.** On the P4 tier, the agent's first `git commit` fails (`exit=128`) until it sets one. The container tier's #372 image has a writable `HOME`, but no identity either.                                    | #415: a system gitconfig in the image.                                             |
+| 6   | **Sessions show only their first prompt.** Two users running the same prompt get identical-looking lists, so 3a cannot be shown in the TUI. The rows also read `0 turns · local history` after a headless `mocactl run`.                  | #417: show a short session id; count turns from the server. #406 adds `sessions`.  |
+| 7   | **`research-smoke.sh` leaves its minted subject's empty record** in `/var/lib/moca-control-plane/`. It deletes the credential, session and files, but not the record.                                                                     | #418: delete it on exit, as `P4-ON-P6.md`'s cleanup does by hand for its subjects. |
+| 8   | **No headless view of a turn's tool calls.** 2a needs `--json` and `jq` to show the room the commands.                                                                                                                                    | #419: a `mocactl run --show-tools` would replace the filter.                       |
+| 9   | **One identity per `XDG_CONFIG_HOME`**, and the device flow approves for whichever account the browser is signed into. Playing two users on one machine needs two config directories and a private browser window (1a, 1b).               | #404: `mocactl --profile`.                                                         |
+| 10  | **MI1 S2's first-subject pin** will refuse user 2 under `single`.                                                                                                                                                                         | #407.                                                                              |
 
 ## Cleanup
 
 **On each laptop:** delete this run's sessions in **Sessions** (`ctrl+x l`, then `d`), remove
-`"${XDG_CONFIG_HOME:-$HOME/.config}/mocactl/auth.json"` to log out, `rm -f "$API_HDR"`, and close
-the tunnel with `ssh -S ~/.ssh/moca-tunnel -O exit <account>@<vm>`. Each user can delete their
-credential in **Credentials** first, and revoke the app on GitHub under **Settings → Applications
-→ Authorized OAuth Apps**.
+`"${XDG_CONFIG_HOME:-$HOME/.config}/mocactl/auth.json"` to log out, and close the tunnel with
+`ssh -S ~/.ssh/moca-tunnel -O exit <account>@<vm>`. 3a's block already removed its header file.
+Each user can delete their credential in **Credentials** first, and revoke the app on GitHub under
+**Settings → Applications → Authorized OAuth Apps**.
 
-**On the VM**, put the container tier back. Stop the worker **first**, so the re-run does not start
-the containers next to it. The re-run recreates Redis, which also drops whatever sessions are left
+**On the VM, first delete the run's microVM workspaces.** Nothing else will. Idle reclaim walks only
+the running worker's in-memory list. The worker restarts with an empty list and never sweeps a
+directory it doesn't know about, and deleting a session touches only Redis. So the users' files
+(notes, commits) would stay on the host indefinitely. Use the session ids from 4c to 4f, and
+`ls /srv/workspaces/` to find any others from the run:
+
+```bash
+sudo rm -rf /srv/workspaces/<session id>
+```
+
+On a host that stays P4-only (below), idle reclaim does run after 8 h, but only if the worker isn't
+restarted in that time. Delete them anyway.
+
+**Then put the container tier back.** Stop the worker **first**, so the re-run does not start the
+containers next to it. The re-run recreates Redis, which also drops whatever sessions are left
 (#410):
 
 ```bash
 sudo systemctl disable --now microvm-worker.service
-sudo podman exec sh-redis redis-cli HDEL sh:sandbox:records moca_microvm_0
 cd /opt/serverless-harness && sudo ./deploy/vm/setup-vm.sh
 ```
 
-Then restore what 0a changed: remove `SH_API_TOKEN_TTL_SECONDS` from `control-plane.env` and
-`sudo systemctl restart sh-control-plane`. Delete the research smoke's leftover subject record
-(fix list 7): the file in `/var/lib/moca-control-plane/` named by the first 16 hex digits of
-`sha256` of the subject the smoke printed. The research directories go with the containers, which
-the re-run recreated. The microVM workspaces under `/srv/workspaces` stay until idle reclaim (8 h);
-to remove the P4 tier entirely, follow `deploy/microvm/P4-ON-P6.md`, "Uninstall". Remove the
-participants' SSH accounts (`sudo userdel -r user1 user2`) and their `Match` block, and delete the
-OAuth app when the demo is over.
+**Restore what 0a changed:** remove `SH_API_TOKEN_TTL_SECONDS` from `control-plane.env`, then
+`sudo systemctl restart sh-control-plane`.
+
+**Delete the research smoke's leftover subject record** (fix list 7). The file store names a
+subject's record by the first 16 hex digits of the subject's `sha256`, with `.json` after it. Use
+the subject the smoke printed (`a minted user (research-smoke:research-…)`):
+
+```bash
+S='research-smoke:research-<id>'
+sudo rm -f "/var/lib/moca-control-plane/$(printf %s "$S" | sha256sum | cut -c1-16).json"
+```
+
+**Remove the participants' SSH accounts:** `sudo userdel -r user1 user2`. Then delete their
+`Match` block from `/etc/ssh/sshd_config` and apply it with
+`sudo sshd -t && { sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd; }`.
+
+The research directories went with the containers, which the re-run recreated. To remove the P4
+tier entirely, follow `deploy/microvm/P4-ON-P6.md`, "Uninstall". Delete the OAuth app when the
+demo is over.
 
 A host that was P4-only before the demo goes back to P4-only instead: skip the re-run above, and
 leave the worker enabled.
