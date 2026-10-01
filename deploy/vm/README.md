@@ -207,11 +207,23 @@ to store.
    an organization's settings). Any application name. Homepage URL and authorization callback URL
    are required fields, but the device flow never uses them: use the repository URL for both.
 2. On the created app's page, tick **Enable Device Flow** and **Update application**. It is **off by
-   default**, and forgetting it is the likeliest first-run failure: `mocactl login` then prints
-   `login failed: github device code failed: device_flow_disabled`.
+   default**, and forgetting it is the likeliest first-run failure. `mocactl login` then prints this
+   (one line), and the control plane's log carries the same fix:
+
+   ```
+   login failed: the control plane cannot log anyone in until its operator fixes it — the control plane's GitHub OAuth app has the device flow off (device_flow_disabled): tick Enable Device Flow on the app
+   ```
+
 3. Copy the **Client ID** (`Ov23li…` for a new OAuth app). Do not generate a client secret. A
-   mistyped id is a client GitHub does not know: `mocactl login` then prints
-   `login failed: github device code failed: Not Found`.
+   mistyped id is a client GitHub does not know, and the line ends instead with:
+
+   ```
+   GitHub knows no OAuth app with client id Ov23li… (20 chars) (Not Found): check SH_GITHUB_CLIENT_ID
+   ```
+
+   It shows only the start and the length of the id: the reply goes to anyone who can reach the
+   control plane, and a wrong value may be a pasted secret.
+
 4. Give it to the control plane, in either of two ways:
    - on the setup run, through `sudo env` (sudo drops the rest of the environment). The same goes
      for the harness URL, since the control plane starts only once it has both:

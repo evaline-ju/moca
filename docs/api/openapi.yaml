@@ -76,6 +76,7 @@ components:
             - credential_unavailable
             - endpoint_unresolved
             - authorization_pending
+            - identity_provider_misconfigured
             - redis_unavailable
             - internal_error
           description: snake_case error code.
@@ -212,6 +213,13 @@ paths:
                   interval: { type: integer }
                   expiresIn: { type: integer }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '502':
+          description: |
+            identity_provider_misconfigured -- GitHub refused the control plane's OAuth app: device
+            flow is off, or SH_GITHUB_CLIENT_ID names no app. An operator fix; `message` says which.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/auth/device/token:
     post:
       operationId: completeDeviceAuth

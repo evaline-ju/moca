@@ -57,6 +57,13 @@ describe('classify', () => {
     });
   });
 
+  it('classifies identity_provider_misconfigured as the operator\'s fix, not as "unavailable"', () => {
+    // A 502, so without its own branch it would fall into the >= 500 "try again shortly" (#405).
+    expect(
+      classify(new ApiError('control-plane', 502, 'identity_provider_misconfigured', 'tick it')),
+    ).toEqual({ kind: 'operator-misconfigured', message: 'tick it' });
+  });
+
   it('shows endpoint_unresolved and unknown codes with their message', () => {
     expect(classify(new ApiError('harness', 400, 'endpoint_unresolved', 'no gateway'))).toEqual({
       kind: 'endpoint-unresolved',

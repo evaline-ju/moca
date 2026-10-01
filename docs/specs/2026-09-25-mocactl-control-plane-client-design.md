@@ -593,6 +593,7 @@ One table from the API's error codes (`docs/api/openapi.yaml`, `Error.error`) to
 | `credential_required` / `credential_ambiguous`                    | control plane | handled proactively in §6.3                                              |
 | `endpoint_unresolved`                                             | either        | "credential NAME has no gateway endpoint — edit it in /credentials"      |
 | `authorization_pending` (428)                                     | control plane | expected while polling                                                   |
+| `identity_provider_misconfigured` (502)                           | control plane | "the operator must fix it", then `message` (the fix); never "retry"      |
 | `redis_unavailable` / `credential_unavailable` / `internal_error` | either        | "service unavailable — retry"; server-side, not the user's fault         |
 | `503` + `Retry-After` on `/turn`                                  | harness       | countdown and automatic retry (§5.7)                                     |
 | network / DNS failure                                             | either        | a connection banner naming which endpoint; harness down blocks only Chat |

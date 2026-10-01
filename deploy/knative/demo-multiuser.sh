@@ -149,6 +149,13 @@ cp_code() {
 login() {
   local who="$1" start code uri dc token
   start="$(cp_post /v1/auth/device '{}')"
+  # A refused start (identity_provider_misconfigured, say) has no deviceCode; without this check the
+  # loop would poll with the string "null" and report GitHub's unrelated reply to that instead.
+  jq -e '.deviceCode | type == "string"' <<<"$start" >/dev/null 2>&1 || {
+    echo "  login failed for $who: $(jq -r '[.error, .message] | map(select(.)) | join(": ")' \
+      <<<"$start" 2>/dev/null || printf '%s' "$start")" >&2
+    return 1
+  }
   dc="$(jq -r .deviceCode <<<"$start")"
   code="$(jq -r .userCode <<<"$start")"
   uri="$(jq -r .verificationUri <<<"$start")"
