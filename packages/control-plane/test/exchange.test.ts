@@ -209,9 +209,8 @@ describe('exchangeCredential', () => {
       },
     });
     const streams = deps.streams;
-    await seedCredential(deps);
+    // A subject with no inference credential at all: the case the fallback exists for (#368).
     const token = await sessionToken(deps);
-    await deps.credentials.delete('github:1234', 'my-anthropic');
     const res = await exchangeCredential(token, deps);
     expect(res).toMatchObject({
       mode: 'direct',
@@ -224,13 +223,26 @@ describe('exchangeCredential', () => {
   });
 
   it('refuses when the fallback is allowed but no operator key is configured', async () => {
+    // A session created on the fallback (no credential of its own), exchanged after the operator
+    // key is gone: it has nothing to spend. (createSession needs the key to create one at all.)
     const fb = makeDeps({
-      config: { exchangeToken: 'shared-abc', allowOperatorFallback: true }, // notsecret
+      config: {
+        exchangeToken: 'shared-abc', // notsecret
+        allowOperatorFallback: true,
+        operatorInferenceToken: 'sk-operator', // notsecret
+        defaultInferenceEndpoint: 'https://default.gateway',
+      },
     });
-    await seedCredential(fb);
     const token = await sessionToken(fb);
-    await fb.credentials.delete('github:1234', 'my-anthropic');
-    expect(await codeOf(() => exchangeCredential(token, fb))).toBe('credential_required');
+    fb.config.operatorInferenceToken = undefined;
+    let message = '';
+    try {
+      await exchangeCredential(token, fb);
+    } catch (e) {
+      message = (e as Error).message;
+      expect((e as { code: string }).code).toBe('credential_required');
+    }
+    expect(message).toContain('started on the operator fallback');
   });
 
   it('resolves the base url from the credential, else the deployment default', async () => {

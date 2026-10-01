@@ -71,6 +71,33 @@ export function checkExchangeAuth(
   if (a.length !== b.length || !timingSafeEqual(a, b)) deny();
 }
 
+/**
+ * The name the audit gives the operator's key (spec §6.4). Reserved: PUT /v1/credentials refuses it,
+ * so an operator-fallback audit line is never a subject's own credential.
+ */
+export const OPERATOR_FALLBACK_NAME = 'operator-fallback';
+
+/** The two direct-mode (header, secret, endpoint) triples known to 401 upstream (#368). */
+export type DirectModeMismatch = 'bearer-to-anthropic' | 'raw-key-elsewhere';
+
+/**
+ * Which known-bad shape a direct-mode send would be, or undefined for none. Shared by the per-turn
+ * check in exchangeCredential and the boot check (main.ts checkInferenceConfig), which sees the
+ * operator fallback's whole triple before any turn does.
+ */
+export function directModeMismatch(
+  header: InferenceAuthHeader,
+  secret: string,
+  baseUrl: string,
+): DirectModeMismatch | undefined {
+  const host = URL.parse(baseUrl)?.hostname;
+  // Bearer there always 401s: it reads API keys from x-api-key only.
+  if (header === 'authorization' && host === 'api.anthropic.com') return 'bearer-to-anthropic';
+  // A raw Anthropic key aimed anywhere else is a misdirected secret (spec §6.2) and a 401 there.
+  if (secret.startsWith('sk-ant-api') && host !== 'api.anthropic.com') return 'raw-key-elsewhere';
+  return undefined;
+}
+
 export async function exchangeCredential(
   presentedToken: string,
   deps: CpDeps,
@@ -122,12 +149,20 @@ export async function exchangeCredential(
       );
     }
     authHeader = header;
-  } else if (deps.config.allowOperatorFallback && deps.config.operatorInferenceToken) {
+  } else if (
+    // Only a session that recorded NO credential (created on the fallback, handlers.ts) falls back. A
+    // session whose own credential is gone -- deleted mid-session, say because it leaked -- stops
+    // here instead of carrying on on the operator's key (#411 review).
+    !rec.credentialName &&
+    deps.config.allowOperatorFallback &&
+    deps.config.operatorInferenceToken
+  ) {
     // The operator fallback relocates rather than disappearing (spec §6.4): resolved HERE, by the
     // trusted tier, attributable to a subject and logged -- never as an env fallback in the harness.
     secretValue = deps.config.operatorInferenceToken;
-    credentialName = 'operator-fallback';
+    credentialName = OPERATOR_FALLBACK_NAME;
     usedOperatorFallback = true;
+    authHeader = deps.config.operatorInferenceHeader ?? 'authorization';
   }
 
   if (!secretValue) {
@@ -135,7 +170,13 @@ export async function exchangeCredential(
     // points that make MU1 fail closed before P5's sentinel lands (spec §3.5).
     throw new CpError(
       'credential_required',
-      `subject has no usable inference credential '${rec.credentialName}'`,
+      rec.credentialName
+        ? `subject has no usable inference credential '${rec.credentialName}': store it again, ` +
+            'or start a new session'
+        : // A session created on the operator fallback records no credential of its own (handlers.ts
+          // createSession); with the fallback since turned off it has nothing to spend.
+          'this session was started on the operator fallback, which is now off: store an ' +
+            'inference credential and start a new session',
       rec.sessionId,
     );
   }
@@ -165,15 +206,10 @@ export async function exchangeCredential(
   // the harness, picks the upstream header (AB1's `inject_header`), so none of this applies (#368).
   if (mode === 'direct') {
     const host = URL.parse(baseUrl)?.hostname;
-    // Which of the two mismatches this is, or undefined for none.
-    let mismatch: 'bearer-to-anthropic' | 'raw-key-elsewhere' | undefined;
-    if (authHeader === 'authorization' && host === 'api.anthropic.com') {
-      // Bearer there always 401s: it reads API keys from x-api-key only.
-      mismatch = 'bearer-to-anthropic';
-    } else if (secretValue.startsWith('sk-ant-api') && host !== 'api.anthropic.com') {
-      // A raw Anthropic key aimed anywhere else is a misdirected secret (spec §6.2) and a 401 there.
-      mismatch = 'raw-key-elsewhere';
-    }
+    const mismatch = directModeMismatch(authHeader, secretValue, baseUrl);
+    // configFromEnv's boot check (main.ts checkInferenceConfig) refuses a misconfigured fallback
+    // before any turn, so this branch is reached only by a config built without it (tests, or a
+    // future caller). Kept as defence in depth.
     if (mismatch && usedOperatorFallback) {
       // The operator's token, not the caller's: the caller cannot re-store `operator-fallback`, so the
       // message names the settings and the code blames the deployment (PR #372 review). The data
@@ -183,7 +219,8 @@ export async function exchangeCredential(
         mismatch === 'bearer-to-anthropic'
           ? 'the operator fallback token (SH_OPERATOR_INFERENCE_TOKEN) is sent as Bearer, but ' +
             'SH_DEFAULT_INFERENCE_ENDPOINT is api.anthropic.com, which reads API keys from ' +
-            'x-api-key; the deployment operator must point it at a gateway'
+            'x-api-key; the deployment operator must set SH_OPERATOR_INFERENCE_HEADER=x-api-key or ' +
+            'point SH_DEFAULT_INFERENCE_ENDPOINT at a gateway'
           : 'the operator fallback token (SH_OPERATOR_INFERENCE_TOKEN) is an Anthropic API key, but ' +
             `SH_DEFAULT_INFERENCE_ENDPOINT resolves to ${host ?? 'an unparseable URL'}; the ` +
             'deployment operator must fix the pair, or you can store your own inference credential';

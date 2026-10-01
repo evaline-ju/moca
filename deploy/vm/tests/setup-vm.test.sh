@@ -1181,6 +1181,137 @@ pass "configured control plane (client id AND public harness URL): restarted on 
 SH_ENV_DIR="$TMP/etc"
 rm -rf "$SE"
 
+# --- #368: the operator fallback's token is a systemd credential, loaded by a drop-in iff it exists --
+OP="$(mu1_dir)"
+OP_UNITS="$(mktemp -d)"
+OP_DROPIN="$OP_UNITS/sh-control-plane.service.d/50-operator-inference-token.conf"
+op_run() { SH_ENV_DIR="$OP" SH_UNIT_DIR="$OP_UNITS" ensure_operator_fallback; }
+op_token() { install -d -m 0700 "$OP/credentials"; (umask 077 && printf '%s\n' "$1" >"$OP/credentials/operator-inference-token"); }
+OP_SECRET='sk-ant-api03-fabricated-operator' # notsecret
+
+# Default: no token, fallback off -> nothing installed, nothing refused.
+op_run || fail "ensure_operator_fallback refused a default install"
+[[ ! -e "$OP_DROPIN" ]] || fail "a drop-in was installed with no operator token"
+pass "operator fallback: a default install installs no drop-in"
+
+# Fallback on, token file forgotten -> refused, naming the file (Review Focus 1).
+echo 'SH_ALLOW_OPERATOR_FALLBACK=true' >>"$OP/control-plane.env"
+if op_err=$(op_run 2>&1); then fail "SH_ALLOW_OPERATOR_FALLBACK=true with no token file was accepted"; fi
+grep -qF "$OP/credentials/operator-inference-token" <<<"$op_err" || fail "the refusal must name the token file: $op_err"
+pass "operator fallback: on with no token file refuses, naming the file"
+
+# Token present -> the drop-in loads it from the hardcoded path the units use; the value is nowhere.
+op_token "$OP_SECRET"
+op_run || fail "ensure_operator_fallback refused a present token"
+grep -qxF 'LoadCredential=SH_OPERATOR_INFERENCE_TOKEN:/etc/serverless-harness/credentials/operator-inference-token' "$OP_DROPIN" ||
+  fail "the drop-in does not load the token: $(cat "$OP_DROPIN" 2>/dev/null)"
+grep -qxF '[Service]' "$OP_DROPIN" || fail "the drop-in has no [Service] section"
+grep -rqF -- "$OP_SECRET" "$OP_UNITS" "$OP"/*.env && fail "the operator token's value was copied out of its file"
+[[ "$(cat "$OP/credentials/operator-inference-token")" == "$OP_SECRET" ]] || fail "the token file was rewritten"
+before="$(cksum <"$OP_DROPIN")"
+op_run || fail "re-run failed"
+[[ "$(cksum <"$OP_DROPIN")" == "$before" ]] || fail "a re-run changed the drop-in"
+pass "operator fallback: a present token gets a LoadCredential= drop-in; the value never leaves its file"
+
+# A readable-by-others token file is refused (it is a secret, like the MU1 files).
+chmod 0644 "$OP/credentials/operator-inference-token"
+if op_err=$(op_run 2>&1); then fail "a 0644 operator token was accepted"; fi
+grep -qF '0600' <<<"$op_err" || fail "the refusal must say 0600: $op_err"
+chmod 0400 "$OP/credentials/operator-inference-token"
+op_run || fail "a 0400 operator token (read-only, root-only) was refused"
+chmod 0600 "$OP/credentials/operator-inference-token"
+pass "operator fallback: a token file readable by group or others refuses; 0400 and 0600 pass"
+
+# A dangling symlink at the token path is not "no token": refused, not silently treated as absent.
+mv "$OP/credentials/operator-inference-token" "$OP/credentials/token.real"
+ln -s "$OP/credentials/nowhere" "$OP/credentials/operator-inference-token"
+if op_err=$(op_run 2>&1); then fail "a dangling symlink at the token path was accepted"; fi
+grep -qF 'symlink' <<<"$op_err" || fail "the refusal must say it is a dangling symlink: $op_err"
+rm "$OP/credentials/operator-inference-token"
+mv "$OP/credentials/token.real" "$OP/credentials/operator-inference-token"
+pass "operator fallback: a dangling symlink at the token path refuses"
+
+# A LIVE symlink is judged by its target, as LoadCredential= reads it (#411 review): a link to a 0600
+# key passes, a link to a key others can read refuses, and the advice it prints then works.
+mv "$OP/credentials/operator-inference-token" "$OP/credentials/token.real"
+ln -s "$OP/credentials/token.real" "$OP/credentials/operator-inference-token"
+op_run || fail "a symlink to a 0600 operator token was refused"
+[[ -e "$OP_DROPIN" ]] || fail "a symlink to a 0600 operator token got no drop-in"
+chmod 0644 "$OP/credentials/token.real"
+if op_err=$(op_run 2>&1); then fail "a symlink to a 0644 operator token was accepted"; fi
+grep -qF 'mode 644' <<<"$op_err" || fail "the refusal must report the TARGET's mode (644): $op_err"
+chmod 0600 "$OP/credentials/token.real"
+op_run || fail "after the advised chmod, the symlinked token was still refused"
+rm "$OP/credentials/operator-inference-token"
+mv "$OP/credentials/token.real" "$OP/credentials/operator-inference-token"
+pass "operator fallback: a live symlink is judged by its target's mode"
+
+# A hand-made drop-in loading the same credential -- what main's README told operators to write with
+# `systemctl edit` before #411 (override.conf) -- is refused, naming it: with the token it doubles
+# the line, and once the token goes it would fail the unit on the missing file.
+install -d "$OP_UNITS/sh-control-plane.service.d"
+printf '[Service]\nLoadCredential=SH_OPERATOR_INFERENCE_TOKEN:/etc/serverless-harness/credentials/operator-inference-token\n' \
+  >"$OP_UNITS/sh-control-plane.service.d/override.conf"
+for state in present absent; do
+  [[ "$state" == absent ]] && mv "$OP/credentials/operator-inference-token" "$OP/token.aside"
+  if op_err=$(op_run 2>&1); then fail "a hand-made drop-in loading the token was accepted (token $state)"; fi
+  grep -qF 'override.conf' <<<"$op_err" || fail "the refusal must name override.conf (token $state): $op_err"
+done
+mv "$OP/token.aside" "$OP/credentials/operator-inference-token"
+# systemd strips whitespace around `=` in unit files, and LoadCredentialEncrypted= loads it too.
+for line in 'LoadCredential = SH_OPERATOR_INFERENCE_TOKEN:/etc/serverless-harness/credentials/operator-inference-token' \
+  'LoadCredentialEncrypted=SH_OPERATOR_INFERENCE_TOKEN:/etc/credstore.encrypted/op' 'LoadCredential=SH_OPERATOR_INFERENCE_TOKEN'; do
+  printf '[Service]\n%s\n' "$line" >"$OP_UNITS/sh-control-plane.service.d/override.conf"
+  if op_run >/dev/null 2>&1; then fail "a hand-made drop-in was accepted: '$line'"; fi
+done
+rm "$OP_UNITS/sh-control-plane.service.d/override.conf"
+op_run || fail "with the hand-made drop-in removed, a present token was refused"
+pass "operator fallback: a hand-made drop-in loading the same credential refuses, naming it"
+
+# An empty token file is refused, not loaded.
+: >"$OP/credentials/operator-inference-token"
+if op_err=$(op_run 2>&1); then fail "an empty operator token was accepted"; fi
+grep -qF 'empty' <<<"$op_err" || fail "the refusal must say the file is empty: $op_err"
+pass "operator fallback: an empty token file refuses"
+
+# The token as an env line is refused, as the MU1 secrets are, and the value is not echoed.
+op_token "$OP_SECRET"
+# Every spelling systemd's EnvironmentFile= accepts: leading whitespace, and whitespace around `=`
+# (parse_env_file_internal trims the key and skips blanks after `=`).
+for line in "SH_OPERATOR_INFERENCE_TOKEN=$OP_SECRET" "  SH_OPERATOR_INFERENCE_TOKEN=$OP_SECRET" \
+  "SH_OPERATOR_INFERENCE_TOKEN = $OP_SECRET" "SH_OPERATOR_INFERENCE_TOKEN =$OP_SECRET"; do
+  printf '%s\n' "$line" >>"$OP/control-plane.env"
+  if op_err=$(op_run 2>&1); then fail "SH_OPERATOR_INFERENCE_TOKEN as an env line was accepted: '$line'"; fi
+  grep -qF 'systemd credential' <<<"$op_err" || fail "the refusal must say it is a systemd credential: $op_err"
+  grep -qF -- "$OP_SECRET" <<<"$op_err" && fail "the refusal echoed the token"
+  sed -i.bak '/SH_OPERATOR_INFERENCE_TOKEN/d' "$OP/control-plane.env" && rm -f "$OP/control-plane.env.bak"
+done
+pass "operator fallback: the token as an env line refuses without echoing it"
+
+# Every spelling of the fallback line systemd's EnvironmentFile= reads as on (#411 review): indented,
+# trailing-spaced, whitespace around `=`. Each is tested ALONE: the file's earlier unindented
+# `SH_ALLOW_OPERATOR_FALLBACK=true` is removed first, or it would make every case pass by itself.
+mv "$OP/credentials/operator-inference-token" "$OP/token.aside"
+sed -i.bak '/SH_ALLOW_OPERATOR_FALLBACK/d' "$OP/control-plane.env" && rm -f "$OP/control-plane.env.bak"
+op_run || fail "fixture: with no fallback line at all, a missing token file must pass"
+for line in '  SH_ALLOW_OPERATOR_FALLBACK=true' 'SH_ALLOW_OPERATOR_FALLBACK=true  ' \
+  'SH_ALLOW_OPERATOR_FALLBACK = true' 'SH_ALLOW_OPERATOR_FALLBACK= "true"'; do
+  printf '%s\n' "$line" >>"$OP/control-plane.env"
+  if op_err=$(op_run 2>&1); then fail "'$line' with no token file was accepted"; fi
+  grep -qF 'does not exist' <<<"$op_err" || fail "'$line': the refusal must say the token file does not exist: $op_err"
+  sed -i.bak '/SH_ALLOW_OPERATOR_FALLBACK/d' "$OP/control-plane.env" && rm -f "$OP/control-plane.env.bak"
+done
+mv "$OP/token.aside" "$OP/credentials/operator-inference-token"
+pass "operator fallback: every spelling of the fallback line systemd reads as on counts, each alone"
+
+# Token removed later with the fallback off -> the drop-in goes too (Review Focus 4).
+sed -i.bak '/^SH_ALLOW_OPERATOR_FALLBACK=/d' "$OP/control-plane.env" && rm -f "$OP/control-plane.env.bak"
+rm "$OP/credentials/operator-inference-token"
+op_run || fail "removing the token with the fallback off was refused"
+[[ ! -e "$OP_DROPIN" ]] || fail "the drop-in outlived its token file: LoadCredential= would fail the unit"
+pass "operator fallback: removing the token removes the drop-in"
+rm -rf "$OP" "$OP_UNITS"
+
 # seed_control_plane_env: SH_GITHUB_CLIENT_ID and SH_PUBLIC_HARNESS_URL from the environment fill
 # control-plane.env's EMPTY slots (the template ships both empty), as deploy/compose/install.sh does for
 # the client id. A value already in the file is the operator's: kept, with a warning when the
@@ -1324,6 +1455,8 @@ for pair in "${MU1_CREDENTIALS[@]}"; do
   [[ -s "$SH_ENV_DIR/credentials/${pair#*:}" ]] || fail "main() did not generate ${pair%%:*}"
 done
 grep -qxF 'SH_REQUIRE_AUTH=true' "$SH_ENV_DIR/supervisor.env" || fail "main() left the supervisor unauthenticated"
+[[ ! -e "$SH_UNIT_DIR/sh-control-plane.service.d/50-operator-inference-token.conf" ]] ||
+  fail "main() installed an operator-token drop-in on a default install"
 mu1_line=$(declare -f main | grep -n 'ensure_mu1_secrets' | cut -d: -f1)
 wire_line=$(declare -f main | grep -n 'wire_supervisor_mu1' | cut -d: -f1)
 units_line=$(declare -f main | grep -n 'install_units' | cut -d: -f1)

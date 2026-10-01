@@ -286,13 +286,15 @@ jq -e '.services["control-plane"].ports[0].published == "18090"' "$OUT_PORTS" >/
 pass "discovery advertises http://127.0.0.1:\$SH_PORT, and SH_CP_PORT moves the control plane"
 
 # Operator-key fallback is opt-in: absent unless .env sets it (spec §6.4).
-for k in SH_ALLOW_OPERATOR_FALLBACK SH_OPERATOR_INFERENCE_TOKEN SH_DEFAULT_INFERENCE_ENDPOINT; do
+for k in SH_ALLOW_OPERATOR_FALLBACK SH_OPERATOR_INFERENCE_TOKEN SH_OPERATOR_INFERENCE_HEADER SH_DEFAULT_INFERENCE_ENDPOINT; do
   [[ "$(cp_env control-plane "$k")" == '<absent>' ]] || fail "control-plane: $k is set without .env setting it"
 done
-OUT_FB="$(render fallback "${CP_ENV[@]}" 'SH_ALLOW_OPERATOR_FALLBACK=true' 'SH_OPERATOR_INFERENCE_TOKEN=sk-op-fabricated')" || # notsecret
+OUT_FB="$(render fallback "${CP_ENV[@]}" 'SH_ALLOW_OPERATOR_FALLBACK=true' 'SH_OPERATOR_INFERENCE_TOKEN=sk-op-fabricated' 'SH_OPERATOR_INFERENCE_HEADER=x-api-key')" || # notsecret
   fail "compose config failed with the fallback on"
 [[ "$(jq -r '.services["control-plane"].environment.SH_ALLOW_OPERATOR_FALLBACK' "$OUT_FB")" == true ]] ||
   fail "SH_ALLOW_OPERATOR_FALLBACK=true in .env does not reach the control plane"
+[[ "$(jq -r '.services["control-plane"].environment.SH_OPERATOR_INFERENCE_HEADER' "$OUT_FB")" == x-api-key ]] ||
+  fail "SH_OPERATOR_INFERENCE_HEADER in .env does not reach the control plane (#368)"
 [[ "$(jq -r '.services.supervisor.environment.SH_OPERATOR_INFERENCE_TOKEN // "<absent>"' "$OUT_FB")" == '<absent>' ]] ||
   fail "the operator inference token reached the supervisor; only the control plane hands it out"
 pass "the operator-key fallback is off unless .env turns it on"

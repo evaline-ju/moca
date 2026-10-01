@@ -98,7 +98,10 @@ write_env_file() {
       printf '# OFF by default. Turned on, EVERY user without their own credential spends this key.\n'
       printf '#SH_ALLOW_OPERATOR_FALLBACK=true\n'
       printf '#SH_OPERATOR_INFERENCE_TOKEN=\n'
+      printf '# A gateway token: the gateway origin. An Anthropic API key: https://api.anthropic.com AND\n'
+      printf '# SH_OPERATOR_INFERENCE_HEADER=x-api-key. The control plane refuses to boot on a mismatch.\n'
       printf '#SH_DEFAULT_INFERENCE_ENDPOINT=https://api.anthropic.com\n'
+      printf '#SH_OPERATOR_INFERENCE_HEADER=x-api-key\n'
       printf '# Model settings (a turn needs one). Only variables that were set are listed.\n'
       for var in $MODEL_VARS; do
         eval "is_set=\${$var+x}"
