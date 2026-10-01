@@ -389,11 +389,23 @@ Verified on 2026-09-30:
 | The failure paths still end with a named error                               | worker restart: `worker disconnected`; killed VM: `vsock-short-response: vmpool: guest closed before End: EOF`                                                                               |
 | The authenticated check can be run again                                     | a second `--auth` run: `PASS`; the credential `PUT` replaces the stored one                                                                                                                  |
 
+**Then a real login**, 2026-10-01, by the owner from a laptop over the SSH tunnel:
+
+- The control plane was given a real GitHub OAuth app (device flow on) and restarted.
+- `SH_REQUIRE_AUTH=true` throughout, with no supervisor drop-in, so no mock model was involved.
+- The owner reported the manual verification complete. The rows below are what the rig's journal
+  shows for that session.
+
+| Claim                                                          | Evidence                                                                                                                       |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| A user logged in with `mocactl login` ran turns on the P4 tier | session `4e696222-…`, created through the control plane: a UUID `workspace_key`, not `anon:`                                   |
+| Two turns of one session, every Exec in its own microVM        | turn 1 (01:31): 2 Execs; turn 2 (01:32:57): 1 Exec; 3 Execs, 3 distinct `vm=` (`vm-13`, `vm-15`, `vm-17`), one `workspace_key` |
+| The session has its own workspace                              | `/srv/workspaces/4e696222-…`, 66 MiB on disk                                                                                   |
+
 **Not verified:**
 
-- **A real `mocactl login`** (GitHub device flow) followed by `mocactl run` on this tier, and a real
-  model through a stored credential. The authenticated rows above use a minted token and the mock
-  model. The login flow itself is #367's acceptance run.
+- **A second real GitHub account** on this tier. The second user above is a minted subject; two real
+  accounts are #367's acceptance run.
 - **Cloud Hypervisor, density and throughput (#256, #261), a host reboot, and any host other than
   the one above.**
 
