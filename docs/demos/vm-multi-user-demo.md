@@ -13,7 +13,7 @@ the two-user acceptance runbook ([`vm-two-user-acceptance.md`](./vm-two-user-acc
 the P4 tier on a P6 host ([`deploy/microvm/P4-ON-P6.md`](../../deploy/microvm/P4-ON-P6.md),
 #376 and #409), and the research turn ("A research turn" in
 [`deploy/vm/README.md`](../../deploy/vm/README.md), and `deploy/vm/research-smoke.sh`, from #368
-via #411, which this page needs merged first). The whole sequence on one VM, with two
+via #411). The whole sequence on one VM, with two
 real GitHub accounts, has not been run. Expected output marked _illustrative_ is the shape to
 look for, not a recorded run. Act 5 is the record to fill in, and the first run replaces this
 paragraph.
@@ -110,7 +110,7 @@ The relay keeps the worker's token: `setup-vm.sh` leaves `setup-microvm.sh`'s re
 place. So in Act 4, starting the worker is enough to attach it.
 
 **Rehearse the research turn** on the container tier ("A research turn" in `deploy/vm/README.md`),
-with a key of your own. This needs #411's smoke:
+with a key of your own. The key file holds exactly one line, the key alone:
 
 ```bash
 cd /opt/serverless-harness
@@ -212,10 +212,12 @@ Open https://github.com/login/device and enter the code ABCD-1234
 logged in as <your GitHub name>
 ```
 
-> If it prints `login failed: github device code failed: device_flow_disabled`, the OAuth app's
-> **Enable Device Flow** box is unticked. `... failed: Not Found` means `SH_GITHUB_CLIENT_ID` is
-> mistyped. Both are fixed on the VM and on GitHub; nothing the user does helps, and neither
-> message says so yet (#405).
+> If it prints `login failed: the control plane cannot log anyone in until its operator fixes it`,
+> the rest of the line names the fix (#405): `device_flow_disabled` means the OAuth app's **Enable
+> Device Flow** box is unticked, and `GitHub knows no OAuth app with client id …` means
+> `SH_GITHUB_CLIENT_ID` is mistyped. Both are fixed on the VM and on GitHub; nothing the user does
+> helps. A rehearsal `mocactl login` the day before catches both: 0b's smokes mint their tokens,
+> so they never touch GitHub.
 
 ### 1c. Store your own inference credential
 
@@ -531,7 +533,7 @@ run finds.
 | #   | Finding                                                                                                                                                                                                         | Status                                                           |
 | --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
 | 1   | **Login expiry mid-demo.** The 1-hour API token makes a long demo ask for a second device-flow login. The TUI recovers by itself (login overlay, prompt replayed); headless `mocactl run` says to log in again. | Works as designed. 0a sets `SH_API_TOKEN_TTL_SECONDS=14400`.     |
-| 2   | **`device_flow_disabled` and `Not Found` carry no hint.** The login error is GitHub's, verbatim.                                                                                                                | #405.                                                            |
+| 2   | **`device_flow_disabled` and `Not Found` carried no hint.** The login error was GitHub's, verbatim.                                                                                                             | Fixed (#405, #413): mocactl names the operator's fix.            |
 | 3   | **The switch back to containers loses every session.** It needs a `setup-vm.sh` re-run, which recreates `sh-redis` with no volume.                                                                              | #410. The demo switches once, to P4, and only Cleanup goes back. |
 | 4   | **No headless view of a turn's tool calls.** 2a needs `--json` and `jq` to show the room the commands.                                                                                                          | Open. A `mocactl run --show-tools` would replace the filter.     |
 | 5   | **One identity per `XDG_CONFIG_HOME`.** Two users rehearsing on one machine overwrite each other's login.                                                                                                       | #404: `mocactl --profile`.                                       |
