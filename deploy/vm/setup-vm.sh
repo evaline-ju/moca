@@ -580,7 +580,9 @@ operator_fallback_value() {
   local v
   v="$( (grep -E '^[[:space:]]*SH_ALLOW_OPERATOR_FALLBACK=' "$1" 2>/dev/null || true) | tail -1)"
   v="${v#*=}"
-  # A matched pair of quotes only, exactly as env_file_value strips them.
+  # Trailing whitespace goes, as systemd drops it from an unquoted value; then a matched pair of
+  # quotes only, exactly as env_file_value strips them.
+  v="${v%"${v##*[![:space:]]}"}"
   if ((${#v} >= 2)); then
     case "$v" in
     \"*\") v="${v#\"}"; v="${v%\"}" ;;
@@ -605,7 +607,9 @@ ensure_operator_fallback() {
   # Any OTHER drop-in loading this credential -- the `systemctl edit` override.conf that this README
   # told operators to write before #411 -- doubles the line while the token exists, and once it goes
   # fails the unit on the missing file. It is the operator's file, so it is named, not removed.
-  other="$(grep -lE '^[[:space:]]*LoadCredential=SH_OPERATOR_INFERENCE_TOKEN:' "$dropin_dir"/*.conf 2>/dev/null |
+  # As systemd parses a unit file: whitespace around `=`, the Encrypted form, and the colon-less one.
+  other="$(grep -lE '^[[:space:]]*LoadCredential(Encrypted)?[[:space:]]*=[[:space:]]*SH_OPERATOR_INFERENCE_TOKEN([:[:space:]]|$)' \
+    "$dropin_dir"/*.conf 2>/dev/null |
     grep -vxF "$dropin_dir/$OPERATOR_DROPIN" || true)"
   if [[ -n "$other" ]]; then
     echo "$(tr '\n' ' ' <<<"$other")also loads SH_OPERATOR_INFERENCE_TOKEN. setup-vm.sh now manages that" \

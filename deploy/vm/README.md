@@ -568,8 +568,9 @@ Run it on the VM, as root, on a host with container sandboxes. It refuses to run
 worker is in the pool, because that tier has no network (#277).
 
 ```bash
-# The user's own credential, from a root-only file (an sk-ant-api… key goes as x-api-key to
-# https://api.anthropic.com; anything else as Bearer to RESEARCH_ENDPOINT):
+# The user's own credential, from a root-only file holding exactly one line, the key alone (an
+# sk-ant-api… key goes as x-api-key to https://api.anthropic.com; anything else as Bearer to
+# RESEARCH_ENDPOINT):
 sudo install -m 0600 /dev/null /root/inference-key && sudoedit /root/inference-key
 cd /opt/serverless-harness
 sudo VM_RESEARCH_SMOKE=1 RESEARCH_CREDENTIAL_FILE=/root/inference-key ./deploy/vm/research-smoke.sh

@@ -171,7 +171,8 @@ export async function exchangeCredential(
     throw new CpError(
       'credential_required',
       rec.credentialName
-        ? `subject has no usable inference credential '${rec.credentialName}'`
+        ? `subject has no usable inference credential '${rec.credentialName}': store it again, ` +
+            'or start a new session'
         : // A session created on the operator fallback records no credential of its own (handlers.ts
           // createSession); with the fallback since turned off it has nothing to spend.
           'this session was started on the operator fallback, which is now off: store an ' +

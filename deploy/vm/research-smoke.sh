@@ -21,8 +21,8 @@
 #
 # Environment:
 #   VM_RESEARCH_SMOKE=1               Required; without it this exits 0 having done nothing.
-#   RESEARCH_CREDENTIAL_FILE          A file holding the user's inference key. The key is read from the
-#                                     file, never taken from argv or env. An Anthropic API key
+#   RESEARCH_CREDENTIAL_FILE          A file holding the user's inference key: exactly one line, the key
+#                                     alone, no surrounding whitespace. Read from the file, never argv/env. An Anthropic API key
 #                                     (sk-ant-api…) is stored as kind api-key for https://api.anthropic.com;
 #                                     anything else as kind bearer for RESEARCH_ENDPOINT.
 #   RESEARCH_ENDPOINT                 The gateway origin a bearer token is for (required for one).

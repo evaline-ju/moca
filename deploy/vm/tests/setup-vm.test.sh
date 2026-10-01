@@ -1258,6 +1258,12 @@ for state in present absent; do
   grep -qF 'override.conf' <<<"$op_err" || fail "the refusal must name override.conf (token $state): $op_err"
 done
 mv "$OP/token.aside" "$OP/credentials/operator-inference-token"
+# systemd strips whitespace around `=` in unit files, and LoadCredentialEncrypted= loads it too.
+for line in 'LoadCredential = SH_OPERATOR_INFERENCE_TOKEN:/etc/serverless-harness/credentials/operator-inference-token' \
+  'LoadCredentialEncrypted=SH_OPERATOR_INFERENCE_TOKEN:/etc/credstore.encrypted/op' 'LoadCredential=SH_OPERATOR_INFERENCE_TOKEN'; do
+  printf '[Service]\n%s\n' "$line" >"$OP_UNITS/sh-control-plane.service.d/override.conf"
+  if op_run >/dev/null 2>&1; then fail "a hand-made drop-in was accepted: '$line'"; fi
+done
 rm "$OP_UNITS/sh-control-plane.service.d/override.conf"
 op_run || fail "with the hand-made drop-in removed, a present token was refused"
 pass "operator fallback: a hand-made drop-in loading the same credential refuses, naming it"
@@ -1287,8 +1293,11 @@ printf '  SH_ALLOW_OPERATOR_FALLBACK=true\n' >>"$OP/control-plane.env"
 if op_err=$(op_run 2>&1); then fail "an indented SH_ALLOW_OPERATOR_FALLBACK=true with no token file was accepted"; fi
 grep -qF 'does not exist' <<<"$op_err" || fail "the refusal must say the token file does not exist: $op_err"
 sed -i.bak '/SH_ALLOW_OPERATOR_FALLBACK=true/d' "$OP/control-plane.env" && rm -f "$OP/control-plane.env.bak"
+printf 'SH_ALLOW_OPERATOR_FALLBACK=true  \n' >>"$OP/control-plane.env" # trailing spaces: systemd drops them
+if op_run >/dev/null 2>&1; then fail "SH_ALLOW_OPERATOR_FALLBACK=true with trailing spaces and no token file was accepted"; fi
+sed -i.bak '/SH_ALLOW_OPERATOR_FALLBACK=true/d' "$OP/control-plane.env" && rm -f "$OP/control-plane.env.bak"
 mv "$OP/token.aside" "$OP/credentials/operator-inference-token"
-pass "operator fallback: an indented fallback line counts, as systemd reads it"
+pass "operator fallback: an indented or trailing-spaced fallback line counts, as systemd reads it"
 
 # Token removed later with the fallback off -> the drop-in goes too (Review Focus 4).
 sed -i.bak '/^SH_ALLOW_OPERATOR_FALLBACK=/d' "$OP/control-plane.env" && rm -f "$OP/control-plane.env.bak"
