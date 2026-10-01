@@ -113,8 +113,8 @@ cleanup() {
   fi
   if [[ -s "$OUT/api.hdr" ]]; then
     if [[ -n "$SID" ]]; then
-      # The worker may still be reporting the turn's end, and the control plane refuses to delete a
-      # session with a turn in flight: retry a few times, then say so rather than leave it silently.
+      # deleteSession cascade-deletes even mid-turn (202), so only a transient failure -- a 5xx, a
+      # dropped connection -- lands here: retry a few times, then say so rather than leave it silently.
       for _ in 1 2 3 4 5; do
         code="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE -H @"$OUT/api.hdr" "$CP/v1/sessions/$SID" 2>/dev/null || true)"
         [[ "$code" == 2* || "$code" == 404 ]] && break
@@ -138,9 +138,12 @@ if [[ -z "$FALLBACK" ]]; then
     die "set RESEARCH_CREDENTIAL_FILE (a file holding the user's inference key), or RESEARCH_USE_OPERATOR_FALLBACK=1"
   [[ -s "$RESEARCH_CREDENTIAL_FILE" && -r "$RESEARCH_CREDENTIAL_FILE" ]] ||
     die "RESEARCH_CREDENTIAL_FILE ($RESEARCH_CREDENTIAL_FILE) is missing, empty or unreadable"
-  # One line, so the kind detected here and the secret node sends below are the same string.
+  # One line with no surrounding whitespace (a CR from a Windows editor included), so the kind
+  # detected here and the secret node sends below are the same string: node trims, grep does not.
   [[ "$(grep -c . "$RESEARCH_CREDENTIAL_FILE")" == 1 ]] ||
     die "RESEARCH_CREDENTIAL_FILE must hold exactly one line: the key, and nothing else"
+  ! grep -qE '^[[:space:]]|[[:space:]]$' "$RESEARCH_CREDENTIAL_FILE" ||
+    die "RESEARCH_CREDENTIAL_FILE's line must be the key alone, with no surrounding whitespace"
   if grep -q '^sk-ant-api' "$RESEARCH_CREDENTIAL_FILE"; then
     CRED_KIND=api-key
   else
@@ -167,9 +170,14 @@ boxes="$(sandboxes | grep -c . || true)"
 [[ "$boxes" -ge 1 ]] && ok "$boxes running sh-sandbox-* container(s)" || ko "no running sh-sandbox-* container"
 # One tier per host (deploy/microvm/P4-ON-P6.md): with a microVM worker attached the turn may land in
 # a guest with no network (#277), and this smoke would fail for a reason that is not the one it tests.
-others="$(podman exec sh-redis redis-cli HKEYS sh:sandbox:records 2>/dev/null | grep -v '^sh-sandbox-' | grep -v '^$' || true)"
-[[ -z "$others" ]] && ok "every pool record is a container sandbox" ||
-  ko "the pool holds non-container records ($(tr '\n' ' ' <<<"$others")): a microVM worker has no network (#277); go back to containers (deploy/microvm/P4-ON-P6.md)"
+# Read first, filtered second: a failed read must not look like an empty, all-container pool.
+if ! records="$(podman exec sh-redis redis-cli HKEYS sh:sandbox:records 2>"$OUT/redis.err")"; then
+  ko "could not read the pool records from sh-redis: $(head -c 300 "$OUT/redis.err")"
+else
+  others="$(grep -v '^sh-sandbox-' <<<"$records" | grep -v '^$' || true)"
+  [[ -z "$others" ]] && ok "every pool record is a container sandbox" ||
+    ko "the pool holds non-container records ($(tr '\n' ' ' <<<"$others")): a microVM worker has no network (#277); go back to containers (deploy/microvm/P4-ON-P6.md)"
+fi
 if [[ "$FAIL" -ne 0 ]]; then
   printf '\n=== Results: %s passed, %s failed (preconditions; no turn run) ===\n' "$PASS" "$FAIL"
   exit 1

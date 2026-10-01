@@ -16,18 +16,11 @@ check() { if [[ "$2" == "$3" ]]; then echo "  ok: $1"; else
   echo "  FAIL: $1 (want '$3', got '$2')"
   fails=$((fails + 1))
 fi; }
-command -v node >/dev/null || { echo "SKIP: node not installed"; exit 0; }
-[[ -x "$REPO/packages/control-plane/node_modules/.bin/tsx" ]] ||
-  { echo "SKIP: packages/control-plane has no tsx (run pnpm install)"; exit 0; }
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 export STATE="$TMP/state" MOCK_LOG="$TMP/mock.log" ARGV_LOG="$TMP/argv.log"
 mkdir -p "$TMP/bin" "$STATE" "$TMP/etc/credentials" "$TMP/tmp"
 
-# The control plane's real signing key, as setup-vm.sh writes it (the base64 value alone).
-(cd "$REPO/packages/control-plane" && node --import tsx src/genkeys.ts) |
-  sed -n 's/^SH_SESSION_TOKEN_PRIVATE_KEY=//p' >"$TMP/etc/credentials/session-token-private-key"
-[[ -s "$TMP/etc/credentials/session-token-private-key" ]] || { echo "FAIL: genkeys.ts produced no key"; exit 1; }
 echo 'SH_CONTROL_PLANE_PORT=18090' >"$TMP/etc/control-plane.env"
 RAW_KEY='sk-ant-api03-fabricated-for-the-test' # notsecret
 GW_KEY='gw-fabricated-token'                   # notsecret
@@ -112,9 +105,10 @@ NODE_DATE=2026-09-21"
   } >"$out"
   exit 0 ;;
 "DELETE /v1/sessions/sess-1")
-  # MOCK_SESSION_DELETE_BUSY=N: the first N deletes are refused as the turn still in flight.
+  # MOCK_SESSION_DELETE_FAIL=N: the first N deletes fail as a transient 503 would (the real
+  # deleteSession never refuses an in-flight session: it cascade-deletes and answers 202).
   n=$(( $(cat "$STATE/sdel" 2>/dev/null || echo 0) + 1 )); echo "$n" >"$STATE/sdel"
-  if [[ "$n" -le "${MOCK_SESSION_DELETE_BUSY:-0}" ]]; then reply 409 '{"error":"turn_in_flight"}'; fi
+  if [[ "$n" -le "${MOCK_SESSION_DELETE_FAIL:-0}" ]]; then reply 503 '{"error":"unavailable"}'; fi
   reply 204 '' ;;
 DELETE*) reply 204 '' ;;
 esac
@@ -129,7 +123,9 @@ ps) printf '%s\n' ${MOCK_BOXES-sh-sandbox-0 sh-sandbox-1} ;;
 exec)
   box="$2"; shift 2
   case "$box $*" in
-  "sh-redis redis-cli HKEYS sh:sandbox:records") printf '%s\n' ${MOCK_RECORDS-sh-sandbox-0 sh-sandbox-1} ;;
+  "sh-redis redis-cli HKEYS sh:sandbox:records")
+    [[ -n "${MOCK_REDIS_FAIL:-}" ]] && { echo "Error: no such container sh-redis" >&2; exit 125; }
+    printf '%s\n' ${MOCK_RECORDS-sh-sandbox-0 sh-sandbox-1} ;;
   "sh-redis redis-cli --raw XRANGE sh:cp:audit - +")
     printf '1-0\nsubject\nresearch-smoke:x\ndecision\nsession_created\nsessionId\nsess-1\n'
     [[ -e "$STATE/decision" ]] && printf '2-0\nts\n1\nsubject\nresearch-smoke:x\ndecision\n%s\nsessionId\nsess-1\ncredential\nresearch-smoke\n' "$(cat "$STATE/decision")"
@@ -165,10 +161,74 @@ if command -v shellcheck >/dev/null; then
   check "shellcheck clean" "$?" "0"
 fi
 
+# --- Checks that need neither node nor the workspace's tsx: they run on CI's deploy-scripts runner,
+# which installs neither. Every refusal below happens before the script mints a token, so a
+# placeholder signing key is enough.
+printf 'placeholder\n' >"$TMP/etc/credentials/session-token-private-key"
+
 echo "== gated"
 env -u VM_RESEARCH_SMOKE bash "$SCRIPT" >"$TMP/gate.log" 2>&1
 check "exits 0 without VM_RESEARCH_SMOKE" "$?" "0"
 check "says SKIP" "$(grep -c '^SKIP:' "$TMP/gate.log")" "1"
+
+echo "== the README carries the script's prompt, for the demo runbook"
+readme_prompt="$(sed -n '/^```text$/,/^```$/p' "$VM_DIR/README.md" | sed '1d;$d')"
+# The script's own research_prompt function, extracted and run with the README's directory.
+script_prompt="$(REPO_URL=https://github.com/rossoctl/moca PAGE_URL=https://nodejs.org/dist/index.json bash -c \
+  "$(sed -n '/^research_prompt() {/,/^}/p' "$SCRIPT"); research_prompt /workspace/research-demo")"
+check "README prompt == research_prompt /workspace/research-demo" "$readme_prompt" "$script_prompt"
+check "the README holds exactly one text block" "$(grep -c '^```text$' "$VM_DIR/README.md")" "1"
+
+echo "== no key at all"
+run nokey
+check "refused" "$(rc nokey)" "2"
+check "names both options" "$(said nokey RESEARCH_USE_OPERATOR_FALLBACK)" "yes"
+
+echo "== a key file with more than one line"
+printf '# my key\n%s\n' "$RAW_KEY" >"$TMP/multi.key"
+run multi RESEARCH_CREDENTIAL_FILE="$TMP/multi.key"
+check "refused" "$(rc multi)" "2"
+check "says one line" "$(said multi 'exactly one line')" "yes"
+check "before any request" "$(wc -l <"$MOCK_LOG" | tr -d ' ')" "0"
+
+echo "== a key file whose line has surrounding whitespace"
+printf '  %s\n' "$RAW_KEY" >"$TMP/ws.key"
+run ws RESEARCH_CREDENTIAL_FILE="$TMP/ws.key"
+check "refused" "$(rc ws)" "2"
+check "says why" "$(said ws 'no surrounding whitespace')" "yes"
+check "before any request" "$(wc -l <"$MOCK_LOG" | tr -d ' ')" "0"
+
+echo "== a gateway token: bearer, for RESEARCH_ENDPOINT, which it requires"
+run gw-noep RESEARCH_CREDENTIAL_FILE="$TMP/gw.key"
+check "refused without RESEARCH_ENDPOINT" "$(rc gw-noep)" "2"
+check "names RESEARCH_ENDPOINT" "$(said gw-noep RESEARCH_ENDPOINT)" "yes"
+check "before any request" "$(wc -l <"$MOCK_LOG" | tr -d ' ')" "0"
+
+echo "== the pool cannot be read: says so, rather than \"every record is a container sandbox\""
+run redisdown RESEARCH_CREDENTIAL_FILE="$TMP/raw.key" MOCK_REDIS_FAIL=1
+check "fails" "$(rc redisdown)" "1"
+check "says the pool could not be read" "$(said redisdown 'could not read the pool records')" "yes"
+check "does not claim the pool is all containers" "$(said redisdown 'every pool record is a container sandbox')" "no"
+check "ran no turn" "$(logged '^POST /v1/turn')" "no"
+
+# --- The rest drives the script through a real mint, which needs node and packages/control-plane's
+# tsx (pnpm install). CI runs it from the check job with MOCA_REQUIRE_WORKSPACE=1, where a missing
+# workspace is a FAILURE: skipped silently, every check below would stop being enforced.
+if ! command -v node >/dev/null || [[ ! -x "$REPO/packages/control-plane/node_modules/.bin/tsx" ]]; then
+  if [[ "${MOCA_REQUIRE_WORKSPACE:-}" == 1 ]]; then
+    echo "  FAIL: MOCA_REQUIRE_WORKSPACE=1, but node or packages/control-plane's tsx is missing (pnpm install)"
+    fails=$((fails + 1))
+  else
+    echo "SKIP: the mint-driven checks need node and packages/control-plane's tsx (pnpm install)"
+  fi
+  echo
+  if [[ "$fails" -eq 0 ]]; then echo "all research-smoke.sh tests that could run passed"; else echo "FAIL: $fails check(s)"; fi
+  exit "$fails"
+fi
+# The control plane's real signing key, as setup-vm.sh writes it (the base64 value alone).
+(cd "$REPO/packages/control-plane" && node --import tsx src/genkeys.ts) |
+  sed -n 's/^SH_SESSION_TOKEN_PRIVATE_KEY=//p' >"$TMP/etc/credentials/session-token-private-key"
+[[ -s "$TMP/etc/credentials/session-token-private-key" ]] || { echo "FAIL: genkeys.ts produced no key"; exit 1; }
 
 echo "== pass: a raw Anthropic key, stored as the user's own api-key credential"
 run pass RESEARCH_CREDENTIAL_FILE="$TMP/raw.key"
@@ -185,11 +245,7 @@ check "the fetched files were removed from the sandboxes" "$(logged "rm -rf $(ca
 check "a passing run leaves no work directory (tokens included)" "$(find "$TMP/tmp" -maxdepth 1 -name 'research-smoke.*' | wc -l | tr -d ' ')" "0"
 check "reports the audit decision" "$(said pass 'audit: credential_issued')" "yes"
 
-echo "== a gateway token: bearer, for RESEARCH_ENDPOINT, which it requires"
-run gw-noep RESEARCH_CREDENTIAL_FILE="$TMP/gw.key"
-check "refused without RESEARCH_ENDPOINT" "$(rc gw-noep)" "2"
-check "names RESEARCH_ENDPOINT" "$(said gw-noep RESEARCH_ENDPOINT)" "yes"
-check "before any request" "$(wc -l <"$MOCK_LOG" | tr -d ' ')" "0"
+echo "== a gateway token with RESEARCH_ENDPOINT: stored as bearer"
 run gw RESEARCH_CREDENTIAL_FILE="$TMP/gw.key" RESEARCH_ENDPOINT=https://gateway.example
 check "exit 0" "$(rc gw)" "0"
 check "stored as kind bearer" "$(node -e 'process.stdout.write(require(process.argv[1]).kind)' "$STATE/put-body.json")" "bearer"
@@ -202,24 +258,12 @@ check "stored no credential" "$(logged '^PUT ')" "no"
 check "deleted no credential" "$(logged '^DELETE /v1/credentials')" "no"
 check "audit: operator_fallback_used" "$(said fb 'audit: operator_fallback_used')" "yes"
 
-echo "== a key file with more than one line"
-printf '# my key\n%s\n' "$RAW_KEY" >"$TMP/multi.key"
-run multi RESEARCH_CREDENTIAL_FILE="$TMP/multi.key"
-check "refused" "$(rc multi)" "2"
-check "says one line" "$(said multi 'exactly one line')" "yes"
-check "before any request" "$(wc -l <"$MOCK_LOG" | tr -d ' ')" "0"
-
 echo "== the session delete is retried, and a failure to delete is reported"
-run busy1 RESEARCH_CREDENTIAL_FILE="$TMP/raw.key" MOCK_SESSION_DELETE_BUSY=1
-check "a delete refused once is retried: exit 0" "$(rc busy1)" "0"
+run busy1 RESEARCH_CREDENTIAL_FILE="$TMP/raw.key" MOCK_SESSION_DELETE_FAIL=1
+check "a delete that failed once is retried: exit 0" "$(rc busy1)" "0"
 check "two session deletes" "$(grep -c '^DELETE /v1/sessions/sess-1$' "$MOCK_LOG")" "2"
-run busy9 RESEARCH_CREDENTIAL_FILE="$TMP/raw.key" MOCK_SESSION_DELETE_BUSY=9
+run busy9 RESEARCH_CREDENTIAL_FILE="$TMP/raw.key" MOCK_SESSION_DELETE_FAIL=9
 check "a session that cannot be deleted is reported" "$(said busy9 'could not delete session sess-1')" "yes"
-
-echo "== no key at all"
-run nokey
-check "refused" "$(rc nokey)" "2"
-check "names both options" "$(said nokey RESEARCH_USE_OPERATOR_FALLBACK)" "yes"
 
 echo "== a microVM worker in the pool (Review Focus 5): refused before any turn"
 run p4 RESEARCH_CREDENTIAL_FILE="$TMP/raw.key" MOCK_RECORDS="sh-sandbox-0 moca_microvm_0"
@@ -250,13 +294,6 @@ run errframe RESEARCH_CREDENTIAL_FILE="$TMP/raw.key" MOCK_SCENARIO=error-frame
 check "an error frame: fails" "$(rc errframe)" "1"
 check "an error frame: shows its message" "$(said errframe '401 invalid x-api-key')" "yes"
 
-echo "== the README carries the script's prompt, for the demo runbook"
-readme_prompt="$(sed -n '/^```text$/,/^```$/p' "$VM_DIR/README.md" | sed '1d;$d')"
-# The script's own research_prompt function, extracted and run with the README's directory.
-script_prompt="$(REPO_URL=https://github.com/rossoctl/moca PAGE_URL=https://nodejs.org/dist/index.json bash -c \
-  "$(sed -n '/^research_prompt() {/,/^}/p' "$SCRIPT"); research_prompt /workspace/research-demo")"
-check "README prompt == research_prompt /workspace/research-demo" "$readme_prompt" "$script_prompt"
-check "the README holds exactly one text block" "$(grep -c '^```text$' "$VM_DIR/README.md")" "1"
 echo
 if [[ "$fails" -eq 0 ]]; then echo "all research-smoke.sh tests passed"; else echo "FAIL: $fails check(s)"; fi
 exit "$fails"

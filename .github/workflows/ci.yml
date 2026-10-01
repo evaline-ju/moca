@@ -64,6 +64,13 @@ jobs:
       - name: Test
         run: pnpm -r test
 
+      # The one deploy/ test that needs the built workspace: research-smoke.test.sh mints real
+      # tokens with packages/control-plane's tsx, which deploy-scripts (no node, no pnpm) does not
+      # have, so there it runs only its tsx-free checks and skips the rest. Here the skip is a
+      # FAILURE (MOCA_REQUIRE_WORKSPACE=1), so the mint-driven checks cannot stop running unseen.
+      - name: Deploy tests that need the workspace
+        run: MOCA_REQUIRE_WORKSPACE=1 bash deploy/vm/tests/research-smoke.test.sh
+
   # Runs the same `make lint` (pre-commit over all files) that contributors run locally, so
   # a config that silently executes zero hooks can no longer look identical to a green
   # build -- which is exactly how the broken `typescript` identify tag survived unnoticed.
