@@ -706,12 +706,15 @@ start_sandboxes() {
 # newline in it would add a line of its own to a root-owned file every unit reads.
 seed_control_plane_env() {
   local f="$SH_ENV_DIR/control-plane.env" key want have
+  # URL characters only (RFC 3986, minus $ ' ( ) *): no whitespace, quote, `$`, backtick or
+  # backslash -- a trailing backslash continues the line for systemd's EnvironmentFile= parser.
+  local url_re='^https?://[][A-Za-z0-9._~:/?#@!&+,;=%-]+$'
   if [[ -n "${SH_GITHUB_CLIENT_ID:-}" && ! "$SH_GITHUB_CLIENT_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
     echo "SH_GITHUB_CLIENT_ID in this script's environment is not a GitHub OAuth client id" \
       "(letters, digits, '.', '_', '-'); nothing was written to $f" >&2
     return 1
   fi
-  if [[ -n "${SH_PUBLIC_HARNESS_URL:-}" && ! "$SH_PUBLIC_HARNESS_URL" =~ ^https?://[^[:space:]\"\']+$ ]]; then
+  if [[ -n "${SH_PUBLIC_HARNESS_URL:-}" && ! "$SH_PUBLIC_HARNESS_URL" =~ $url_re ]]; then
     echo "SH_PUBLIC_HARNESS_URL in this script's environment is not an http(s):// URL" \
       "(e.g. http://127.0.0.1:8080 behind an SSH tunnel); nothing was written to $f" >&2
     return 1

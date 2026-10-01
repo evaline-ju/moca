@@ -1216,10 +1216,14 @@ rm -rf "$SC"; SC="$(mu1_dir)"; cpf="$SC/control-plane.env"
 sum_before="$(cksum <"$cpf")"
 for bad in $'Ov23li\nSH_ALLOW_OPERATOR_FALLBACK=true' 'Ov23 li' 'Ov23li"'; do
   rc=0; seed_out="$(SH_ENV_DIR="$SC" SH_GITHUB_CLIENT_ID="$bad" seed_control_plane_env 2>&1)" || rc=$?
-  ((rc != 0)) || fail "a client id with whitespace was accepted: $(cat "$cpf")"
+  ((rc != 0)) || fail "a malformed client id was accepted: $(cat "$cpf")"
   grep -q 'SH_GITHUB_CLIENT_ID' <<<"$seed_out" || fail "the refusal must name SH_GITHUB_CLIENT_ID: $seed_out"
 done
-for bad in 'ftp://x' '127.0.0.1:8080' $'http://x\nSH_ALLOW_OPERATOR_FALLBACK=true' 'http://a b'; do
+# A trailing backslash is a line continuation to systemd's EnvironmentFile= parser, and `$`/backticks
+# have no business in a URL: the check is an allowlist of URL characters, not a denylist.
+# shellcheck disable=SC1003,SC2016  # literal backslash, $ and backticks are the inputs under test
+for bad in 'ftp://x' '127.0.0.1:8080' $'http://x\nSH_ALLOW_OPERATOR_FALLBACK=true' 'http://a b' \
+  'http://x\' 'http://$HOME:8080' 'http://a`b`'; do
   rc=0; seed_out="$(SH_ENV_DIR="$SC" SH_PUBLIC_HARNESS_URL="$bad" seed_control_plane_env 2>&1)" || rc=$?
   ((rc != 0)) || fail "SH_PUBLIC_HARNESS_URL '$bad' was accepted: $(cat "$cpf")"
   grep -q 'SH_PUBLIC_HARNESS_URL' <<<"$seed_out" || fail "the refusal must name SH_PUBLIC_HARNESS_URL: $seed_out"

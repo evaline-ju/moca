@@ -38,9 +38,13 @@ supervisor started. Use a GitHub OAuth app with **Enable Device Flow** ticked
 sudo env SH_GITHUB_CLIENT_ID=Ov23li... SH_PUBLIC_HARNESS_URL=http://127.0.0.1:8080 \
   ./deploy/vm/setup-vm.sh
 curl -s 127.0.0.1:8090/readyz; echo
-grep -E '^SH_REQUIRE_AUTH=' /etc/serverless-harness/supervisor.env
-grep -hE '^MOCA_TENANCY=' /etc/serverless-harness/*.env || echo 'MOCA_TENANCY unset'
+sudo grep -E '^SH_REQUIRE_AUTH=' /etc/serverless-harness/supervisor.env
+sudo sh -c 'grep -hE "^MOCA_TENANCY=" /etc/serverless-harness/*.env; [ $? -eq 1 ] && echo "MOCA_TENANCY unset"'
 ```
+
+The env files are root-only (directory `0750`, files `0640`), so both greps run under `sudo`, and
+the glob is expanded by root's shell, not yours. "unset" is printed only when grep finds no match
+(exit 1), never when it cannot read the files (exit 2).
 
 Expected output:
 
@@ -93,14 +97,21 @@ logged in as Ada Lovelace
 ```
 
 > If it prints `login failed: github device code failed: device_flow_disabled`, the OAuth app's
-> **Enable Device Flow** box is unticked. `incorrect_client_credentials` means
-> `SH_GITHUB_CLIENT_ID` is mistyped. Both are VM-side fixes: nothing the user does helps.
+> **Enable Device Flow** box is unticked. `login failed: github device code failed: Not Found` means
+> GitHub knows no such client: `SH_GITHUB_CLIENT_ID` is mistyped. Both are VM-side fixes: nothing
+> the user does helps.
 
 ### 1b. Store an inference credential
 
-Start `mocactl` (the first run is onboarding), or open **Credentials** with `ctrl+x k`, and add
-one with consumer `inference`. The fields are in `packages/mocactl/QUICKSTART.md`, step 4. Kind
-`bearer` for a gateway token, `api-key` for a raw Anthropic key.
+Start `mocactl` and open **Credentials** with `ctrl+x k` (or run `mocactl --setup` for the
+onboarding flow; a plain `mocactl` with a control-plane URL and a login goes straight to chat).
+Add one credential with consumer `inference`:
+
+- **A gateway token** (LiteLLM and the like): kind `bearer`, with the fields in
+  `packages/mocactl/QUICKSTART.md`, step 4.
+- **An Anthropic API key** (`sk-ant-api…`): kind `api-key`, destination host `api.anthropic.com`,
+  gateway endpoint `https://api.anthropic.com` (no `/v1`), secret field `key=<your key>`. The form
+  refuses an API key stored as `bearer`, because the key is sent as `x-api-key`.
 
 > Say: each user's turns spend **their own** credential. The operator-key fallback is off.
 
@@ -146,15 +157,38 @@ command line:
 ```bash
 AUTH="${XDG_CONFIG_HOME:-$HOME/.config}/mocactl/auth.json"
 CP=http://127.0.0.1:8090 HARNESS=http://127.0.0.1:8080
-API_HDR="$(mktemp)"; jq -r '"Authorization: Bearer " + .apiToken' "$AUTH" >"$API_HDR"
+API_HDR="$(mktemp)"; jq -r '.apiToken // empty | "Authorization: Bearer " + .' "$AUTH" >"$API_HDR"
 curl -s -H @"$API_HDR" "$CP/v1/me"; echo
 ```
 
 Expected: `{"subject":"github:<numeric id>","tenant":"github:<numeric id>","roles":[]}`. The two
 users' subjects differ.
 
-Exchange session ids: user 1's is `$MINE` on user 1's laptop and `$THEIRS` on user 2's, and vice
-versa.
+Exchange session ids (from 1d) and set both. On user 1's laptop, `MINE` is user 1's id and
+`THEIRS` is user 2's, and the other way round on user 2's:
+
+```bash
+MINE='<your session id>'
+THEIRS='<their session id>'
+```
+
+> Trap: every check below names a session id. With an empty one, the URL matches no route at all,
+> and the router's own 404 (`{"error":"not_found"}`) would look like a pass. So each check refuses
+> an empty or unedited id, and prints the error **code**, not just the status.
+
+```bash
+# ids_set: refuses an empty or unedited MINE / THEIRS.
+ids_set() {
+  for id in "$MINE" "$THEIRS"; do
+    case "$id" in '' | *'<'*) echo 'set MINE and THEIRS to real session ids first' >&2; return 1 ;; esac
+  done
+}
+# probe <method> <session id> [suffix]: the response body (the error code), then the HTTP status.
+probe() {
+  case "$2" in '' | *'<'*) echo 'set MINE and THEIRS to real session ids first' >&2; return 1 ;; esac
+  curl -s -w ' %{http_code}\n' -H @"$API_HDR" -X "$1" "$CP/v1/sessions/$2${3:-}"
+}
+```
 
 ### 2a. Session lists are disjoint
 
@@ -168,14 +202,24 @@ created in Act 1. `$THEIRS` appears in neither view.
 ### 2b. Another user's session is 404, for reading and deleting
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' -H @"$API_HDR" "$CP/v1/sessions/$THEIRS"
-curl -s -o /dev/null -w '%{http_code}\n' -H @"$API_HDR" -X DELETE "$CP/v1/sessions/$THEIRS"
-curl -s -o /dev/null -w '%{http_code}\n' -H @"$API_HDR" -X POST "$CP/v1/sessions/$THEIRS/token"
-curl -s -o /dev/null -w '%{http_code}\n' -H @"$API_HDR" "$CP/v1/sessions/sess-does-not-exist"
+probe GET "$THEIRS"
+probe DELETE "$THEIRS"
+probe POST "$THEIRS" /token
+probe GET sess-does-not-exist
 ```
 
-Expected: `404` four times. Then the owner checks that the DELETE did nothing:
-`curl -s -o /dev/null -w '%{http_code}\n' -H @"$API_HDR" "$CP/v1/sessions/$MINE"` prints `200`.
+Expected: `session_not_found` and `404` four times. That code comes from the control plane's
+ownership check, not from the router:
+
+```
+{"error":"session_not_found","sessionId":"<theirs>"} 404
+{"error":"session_not_found","sessionId":"<theirs>"} 404
+{"error":"session_not_found","sessionId":"<theirs>"} 404
+{"error":"session_not_found","sessionId":"sess-does-not-exist"} 404
+```
+
+Then the other user checks that the DELETE did nothing: `probe GET "$MINE"` on **their** laptop
+prints their session's summary and `200`.
 
 > Say: the fourth line is the point. Another user's session and a session that never existed get
 > the same answer, so the API cannot be used to learn which session ids exist. A 403 would confirm
@@ -187,11 +231,15 @@ Mint a session token for **your own** session, then present it for the other use
 
 ```bash
 TURN_HDR="$(mktemp)"
-curl -s -X POST -H @"$API_HDR" "$CP/v1/sessions/$MINE/token" |
-  jq -r '"Authorization: Bearer " + .token' >"$TURN_HDR"
-curl -s -w '\n%{http_code}\n' -H @"$TURN_HDR" -H 'Content-Type: application/json' \
-  -d "$(jq -nc --arg s "$THEIRS" '{sessionId: $s, prompt: "hello"}')" "$HARNESS/v1/turn"
+ids_set &&
+  probe POST "$MINE" /token | sed 's/ [0-9]*$//' |
+  jq -r '.token // empty | "Authorization: Bearer " + .' >"$TURN_HDR" &&
+  [ -s "$TURN_HDR" ] &&
+  curl -s -w '\n%{http_code}\n' -H @"$TURN_HDR" -H 'Content-Type: application/json' \
+    -d "$(jq -nc --arg s "$THEIRS" '{sessionId: $s, prompt: "hello"}')" "$HARNESS/v1/turn"
 ```
+
+If it prints nothing, the mint failed: run `probe POST "$MINE" /token` to see why.
 
 Expected (HTTP 400, and no model call is made):
 
@@ -200,7 +248,9 @@ Expected (HTTP 400, and no model call is made):
 400
 ```
 
-The same token with `sessionId: $MINE` runs a normal turn. The harness checks exactly one rule,
+The same token with `sessionId: $MINE` runs a normal turn, within the token's lifetime (300 s,
+`SH_SESSION_TOKEN_TTL_SECONDS`). After a pause longer than that, expect `401 token_expired`
+instead; mint a fresh one. The harness checks exactly one rule,
 `token.sid == body.sessionId`, and the control plane mints a token only for a session its caller
 owns (2b's third line).
 
@@ -208,17 +258,17 @@ owns (2b's third line).
 
 Copy this into the run's report (the issue, or the PR that closes it):
 
-| Item                                      | User 1 | User 2 |
-| ----------------------------------------- | ------ | ------ |
-| Commit / release on the VM                |        |        |
-| `MOCA_TENANCY`                            | unset  | unset  |
-| 1a `mocactl login` (subject)              |        |        |
-| 1c `doctor` all seven green               |        |        |
-| 1d `run` + resume                         |        |        |
-| 2a own list excludes the other's sessions |        |        |
-| 2b GET / DELETE / token / unknown → 404   |        |        |
-| 2c cross-session turn → 400 mismatch      |        |        |
-| Anything unexpected (add to the fix list) |        |        |
+| Item                                                        | User 1 | User 2 |
+| ----------------------------------------------------------- | ------ | ------ |
+| Commit / release on the VM                                  |        |        |
+| `MOCA_TENANCY`                                              | unset  | unset  |
+| 1a `mocactl login` (subject)                                |        |        |
+| 1c `doctor` all seven green                                 |        |        |
+| 1d `run` + resume                                           |        |        |
+| 2a own list excludes the other's sessions                   |        |        |
+| 2b GET / DELETE / token / unknown → `session_not_found` 404 |        |        |
+| 2c cross-session turn → 400 mismatch                        |        |        |
+| Anything unexpected (add to the fix list)                   |        |        |
 
 ## What just happened
 
@@ -259,7 +309,7 @@ Found while preparing this run, checked against `main` @ 6836941. Add what the l
 | 1   | **`/resources` without kubectl.** On a VM, `/v1/sessions/{id}/resources` answers `sandbox.phase: "unknown"`, and `mocactl` never calls the route, so nothing breaks. The route also reports `harness.mode: "knative"` on P6: `resources.ts` guesses the mode from the pod name.    | Cosmetic. Make the mode honest when the route gains a VM consumer.                                    |
 | 2   | **Token expiry mid-demo.** Session tokens (5 min) re-mint on their own. An expired API token (1 h) makes the TUI open its login overlay and replay the prompt, and makes headless `mocactl run` say to run `mocactl login`. So a demo longer than an hour asks for a second login. | Works as designed. For a long demo, set `SH_API_TOKEN_TTL_SECONDS` in `control-plane.env` beforehand. |
 | 3   | **One identity per `XDG_CONFIG_HOME`.** Two users on one machine overwrite each other's `auth.json`.                                                                                                                                                                               | #404: `mocactl --profile`.                                                                            |
-| 4   | **`device_flow_disabled` has no hint.** The login error is GitHub's code, verbatim. It is diagnosable with this page or the QUICKSTART, but not on its own.                                                                                                                        | #405: map both codes to the fix.                                                                      |
+| 4   | **Login misconfiguration has no hint.** The login error is GitHub's, verbatim: `device_flow_disabled` (device flow off) or `Not Found` (mistyped client id). It is diagnosable with this page or the QUICKSTART, but not on its own.                                               | #405: map both to the operator's fix.                                                                 |
 | 5   | **No headless `sessions` or `credentials` command.** Act 2 lists sessions with `curl`, and credentials can be added only in the TUI.                                                                                                                                               | #406: `mocactl sessions [--json]`.                                                                    |
 | 6   | **MI1 S2 first-subject pin.** Once it lands, this run under `MOCA_TENANCY=single` refuses user 2 with `403 single_tenant_deployment`.                                                                                                                                              | #407: blocks this run once S2 merges; re-pin tenancy then.                                            |
 | 7   | **Shared `/workspace` on the container tier.** User 2's agent can see user 1's clone ("Notes and limits").                                                                                                                                                                         | #408: per-session directory (not a boundary).                                                         |

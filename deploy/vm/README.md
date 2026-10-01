@@ -107,7 +107,9 @@ Across those two runs, the script does the following, in this order:
 
 1. Writes `/etc/serverless-harness/supervisor.env`, `relay.env` and `control-plane.env` from their
    `env/*.example` templates — only the first time each; an operator-edited env file is never
-   clobbered on a re-run.
+   clobbered on a re-run. Then, if `SH_GITHUB_CLIENT_ID` or `SH_PUBLIC_HARNESS_URL` is set in the
+   script's environment, writes it into `control-plane.env` where that file's value is empty
+   (never replacing one; a disagreement is warned about), after checking both values first.
 2. **Checks `relay.env` for a non-empty `SH_RELAY_TOKEN`, and stops here if there is none.**
    Everything below runs only once that is set — which is why a fresh VM needs the second
    invocation above.
@@ -205,7 +207,9 @@ to store.
 2. On the created app's page, tick **Enable Device Flow** and **Update application**. It is **off by
    default**, and forgetting it is the likeliest first-run failure: `mocactl login` then prints
    `login failed: github device code failed: device_flow_disabled`.
-3. Copy the **Client ID** (`Ov23li…` for a new OAuth app). Do not generate a client secret.
+3. Copy the **Client ID** (`Ov23li…` for a new OAuth app). Do not generate a client secret. A
+   mistyped id is a client GitHub does not know: `mocactl login` then prints
+   `login failed: github device code failed: Not Found`.
 4. Give it to the control plane, in either of two ways:
    - on the setup run, through `sudo env` (sudo drops the rest of the environment). The same goes
      for the harness URL, since the control plane starts only once it has both:
@@ -218,8 +222,10 @@ to store.
      `setup-vm.sh` writes each value only where `control-plane.env` has none. It never replaces one
      you have already set, and warns if the environment disagrees with the file.
 
-   - or by hand: set `SH_GITHUB_CLIENT_ID=` in `/etc/serverless-harness/control-plane.env` and
-     re-run `setup-vm.sh` (or `sudo systemctl restart sh-control-plane.service`).
+   - or by hand: set both `SH_GITHUB_CLIENT_ID=` and `SH_PUBLIC_HARNESS_URL=` in
+     `/etc/serverless-harness/control-plane.env`, then re-run `setup-vm.sh`. With only the client
+     id, the script leaves the control plane stopped, and a manual `systemctl restart` boots it
+     advertising no harness, so `mocactl doctor` fails at check 5.
 
 The login asks for the `read:user` scope only. The subject is the **numeric** GitHub user id
 (`github:<id>`), never the login name, and GitHub's access token is used once, to read that id, and
@@ -228,8 +234,8 @@ then dropped. To make someone an admin (`GET /v1/sessions?owner=…`), put their
 
 **Network.** The VM must reach `https://github.com` (the device-code and token endpoints) and
 `https://api.github.com` (`/user`) outbound. Each user's browser must reach
-`https://github.com/login/device`. The laptop running `mocactl` talks only to the control plane,
-never to GitHub.
+`https://github.com/login/device`. The laptop running `mocactl` talks only to the control plane and
+the harness it advertises, never to GitHub.
 
 **Who may log in.** Anyone with a GitHub account who can reach the control plane. The OAuth app
 does not restrict users, and the control plane has no allowlist. The SSH tunnel or firewall
