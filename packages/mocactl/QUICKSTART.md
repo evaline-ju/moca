@@ -94,7 +94,7 @@ sessions use. For a LiteLLM-style gateway at `https://litellm.example.com`:
 | Consumer          | `inference`                                                                     |
 | Destination hosts | `litellm.example.com` (hostname only)                                           |
 | Gateway endpoint  | `https://litellm.example.com`: what you'd set as `ANTHROPIC_BASE_URL`, no `/v1` |
-| Secret fields     | `token=<your key>`                                                              |
+| Token             | your key, as is (the field is stored verbatim: no `token=` prefix)              |
 
 The key is stored encrypted and is never shown again, not even in the credential list. Then type
 a message. The first one creates a session and streams the reply.

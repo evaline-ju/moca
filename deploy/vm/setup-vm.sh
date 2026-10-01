@@ -709,12 +709,20 @@ seed_control_plane_env() {
   # URL characters only (RFC 3986, minus $ ' ( ) *): no whitespace, quote, `$`, backtick or
   # backslash -- a trailing backslash continues the line for systemd's EnvironmentFile= parser.
   local url_re='^https?://[][A-Za-z0-9._~:/?#@!&+,;=%-]+$'
-  if [[ -n "${SH_GITHUB_CLIENT_ID:-}" && ! "$SH_GITHUB_CLIENT_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  # The SHAPE of a client id, not just its characters: letters and digits, with at most one inner dot
+  # (Ov23li and 14 more, a legacy 20-hex id, Iv1.<16 hex>). The docs' placeholder `Ov23li...` must not
+  # pass: the seed never replaces a value, so a pasted placeholder would stick until the file is edited.
+  if [[ -n "${SH_GITHUB_CLIENT_ID:-}" && ! "$SH_GITHUB_CLIENT_ID" =~ ^[A-Za-z0-9]+(\.[A-Za-z0-9]+)?$ ]]; then
     echo "SH_GITHUB_CLIENT_ID in this script's environment is not a GitHub OAuth client id" \
-      "(letters, digits, '.', '_', '-'); nothing was written to $f" >&2
+      "(letters and digits, e.g. Ov23li and 14 more, not a placeholder); nothing was written to $f" >&2
     return 1
   fi
-  if [[ -n "${SH_PUBLIC_HARNESS_URL:-}" && ! "$SH_PUBLIC_HARNESS_URL" =~ $url_re ]]; then
+  # The characters, then the shape, the way the control plane will parse it at boot (urlEnv in
+  # packages/control-plane/src/main.ts): a value it refuses would be a crash loop under
+  # Restart=always, not a refusal here. node is in require_cmds.
+  if [[ -n "${SH_PUBLIC_HARNESS_URL:-}" ]] && ! { [[ "$SH_PUBLIC_HARNESS_URL" =~ $url_re ]] &&
+    node -e 'if (!/^https?:$/.test(new URL(process.argv[1]).protocol)) process.exit(1)' \
+      "$SH_PUBLIC_HARNESS_URL" >/dev/null 2>&1; }; then
     echo "SH_PUBLIC_HARNESS_URL in this script's environment is not an http(s):// URL" \
       "(e.g. http://127.0.0.1:8080 behind an SSH tunnel); nothing was written to $f" >&2
     return 1

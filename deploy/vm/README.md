@@ -230,7 +230,9 @@ to store.
 The login asks for the `read:user` scope only. The subject is the **numeric** GitHub user id
 (`github:<id>`), never the login name, and GitHub's access token is used once, to read that id, and
 then dropped. To make someone an admin (`GET /v1/sessions?owner=…`), put their subject in
-`SH_ADMIN_SUBJECTS` and restart the control plane. Roles are computed at login and carried in the API token, so the user must then log in again (`mocactl login`). `GET /v1/me` with the new token shows the role.
+`SH_ADMIN_SUBJECTS` and restart the control plane. Roles are computed at login and carried in
+the API token, so the user must then log in again (`mocactl login`). `GET /v1/me` with the new
+token shows the role.
 
 **Network.** The VM must reach `https://github.com` (the device-code and token endpoints) and
 `https://api.github.com` (`/user`) outbound. Each user's browser must reach
@@ -241,7 +243,9 @@ the harness it advertises, never to GitHub.
 does not restrict users, and the control plane has no allowlist. The SSH tunnel or firewall
 allowlist below is what limits who can reach it. Two users on this VM each see only their own
 sessions (404, not 403, for anyone else's), but on the container tier they share sandbox
-containers. See "What round one does not claim".
+containers. And an SSH account is more than a way to reach the control plane: unless it is
+restricted to the two forwarded ports ("Reaching it" below), its holder can reach Redis and take
+over any session. See "What round one does not claim".
 
 ### Secrets
 
@@ -293,10 +297,32 @@ for this round. A client needs two ports: the control plane (8090) and the harne
 (`SH_PUBLIC_HARNESS_URL`, the supervisor on 8080). Two topologies are supported:
 
 - **(a) An SSH tunnel, the default.** Each user runs
-  `ssh -N -L 8090:127.0.0.1:8090 -L 8080:127.0.0.1:8080 <vm>`. On the VM, set
+  `ssh -f -N -o ExitOnForwardFailure=yes -L 8090:127.0.0.1:8090 -L 8080:127.0.0.1:8080 <vm>`
+  (`-f` backgrounds it once both forwards are up; `ExitOnForwardFailure` fails instead of
+  warning when a local port is taken). On the VM, set
   `SH_PUBLIC_HARNESS_URL=http://127.0.0.1:8080`; on the laptop, run
   `mocactl --control-plane-url http://127.0.0.1:8090 …`. Because the harness URL is advertised,
   **every user must forward the same local port**.
+
+  An SSH account reaches **every** loopback service, including Redis (no password: it holds the
+  session-ownership index) and the supervisor's unauthenticated admin listener on 8081. Anyone
+  who can write that index can make another user's session their own. So give users who are not
+  operators an account that can forward the two ports and nothing else, at the end of
+  `/etc/ssh/sshd_config`:
+
+  ```
+  Match User user1,user2
+    AllowTcpForwarding local
+    PermitOpen 127.0.0.1:8090 127.0.0.1:8080
+    AllowStreamLocalForwarding no
+    AllowAgentForwarding no
+    X11Forwarding no
+    PermitTTY no
+    ForceCommand /usr/sbin/nologin
+  ```
+
+  `docs/demos/vm-two-user-acceptance.md` (0a, 0b) installs it and checks it from a laptop.
+
 - **(b) A cloud firewall allowlist.** Set `SH_CONTROL_PLANE_HOST=0.0.0.0` and
   `SH_PUBLIC_HARNESS_URL=http://<vm-address>:8080`, and allow 8090 and 8080 from the users'
   addresses only. Tokens and credentials then cross the network in clear.
@@ -546,3 +572,7 @@ Nor does it claim, for the control plane:
   and the container worker ignores `workspace_key` (`remote-worker/internal/exec/runner.go`). So
   users share `/workspace`, the Unix user and the process list. Owner binding is MI1 S5
   (`docs/specs/2026-09-28-moca-multi-user-isolation-design.md` §9).
+- **Ownership against loopback access.** Session ownership is enforced at the control plane's API.
+  Its index is in Redis on `127.0.0.1:6379`, unauthenticated, so anyone with a shell or an
+  unrestricted SSH forward on the VM can rewrite it. Restrict non-operator SSH accounts ("Reaching
+  it").

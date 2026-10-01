@@ -3,7 +3,9 @@
 > **The claim:** two people, each on their own laptop with their own GitHub account, log in to the
 > same P6 VM with `mocactl`. Each creates and resumes sessions, and neither can see or reach the
 > other's. Another user's session is not "forbidden". It **does not exist** (404), and a session
-> token for one session cannot drive a turn in another.
+> token for one session cannot drive a turn in another. The claim holds through the API. A
+> participant who can reach the VM's loopback services can write the ownership index directly, so
+> 0a restricts the participants' SSH accounts to the two forwarded ports.
 
 This is the acceptance run for VM demo B (#367), and the first manual run of the real GitHub device
 flow (#362 item 4). It is written as a demo, so it can be performed. The epic's full walkthrough
@@ -52,6 +54,10 @@ pid=$(systemctl show -p MainPID --value sh-supervisor.service)
 env=$(tr '\0' '\n' <"/proc/$pid/environ") || exit 1
 printf '%s\n' "$env" | grep -E '^SH_REQUIRE_AUTH=' || echo 'SH_REQUIRE_AUTH unset'
 printf '%s\n' "$env" | grep -E '^MOCA_TENANCY=' || echo 'MOCA_TENANCY unset'
+pid=$(systemctl show -p MainPID --value sh-control-plane.service)
+[ "${pid:-0}" -gt 0 ] || { echo 'sh-control-plane is not running' >&2; exit 1; }
+env=$(tr '\0' '\n' <"/proc/$pid/environ") || exit 1
+printf '%s\n' "$env" | grep -E '^SH_ALLOW_OPERATOR_FALLBACK=' || echo 'SH_ALLOW_OPERATOR_FALLBACK unset'
 EOF
 curl -s -w ' %{http_code}\n' -H 'Content-Type: application/json' \
   -d '{"sessionId":"sess-does-not-exist","prompt":"hello"}' 127.0.0.1:8080/v1/turn
@@ -63,16 +69,48 @@ Expected output:
 ok
 SH_REQUIRE_AUTH=true
 MOCA_TENANCY unset
+SH_ALLOW_OPERATOR_FALLBACK unset
 {"error":"token_required","message":"this deployment requires a token","sessionId":"sess-does-not-exist"} 401
 ```
 
-The script exits before printing anything if it cannot read the process, so "unset" always means
-"read, and not there". The last line is the behaviour itself: a turn with no token is refused.
+The script exits before printing anything more if it cannot read a process, so "unset" always
+means "read, and not there". The fallback is on only at `SH_ALLOW_OPERATOR_FALLBACK=true`, so
+`=false` passes too. The last line is the behaviour itself: a turn with no token is refused.
 
 > Say: `SH_REQUIRE_AUTH=true` is what makes the harness demand a session token on every turn.
-> Without it, that last turn would have been accepted. 2c's `session_mismatch` would still appear
-> (a token that is presented is always checked), so this line is the only proof that the harness
-> refuses a turn with no token at all.
+> Without it, that last turn would pass authentication and fail only because no such session
+> exists (`session_not_found`, 404). 2c's `session_mismatch` would still appear (a token that is
+> presented is always checked), so this line is the only proof that the harness refuses a turn
+> with no token at all.
+
+**Restrict the participants' SSH accounts to the tunnel.** An SSH account reaches every service
+bound to the VM's loopback, and two of them have no authentication: Redis on `127.0.0.1:6379`,
+which holds the control plane's session-ownership index, and the supervisor's admin listener on
+`127.0.0.1:8081`. A participant who forwards 6379 can rewrite a session's owner to themselves,
+after which the ownership check lets them read, delete or drive the other user's session. So
+give each participant an account that can forward the two demo ports and nothing else, appended
+to the **end** of `/etc/ssh/sshd_config` (a `Match` block runs to the end of the file), with your
+participants' user names:
+
+```bash
+sudo tee -a /etc/ssh/sshd_config >/dev/null <<'EOF'
+
+Match User user1,user2
+  AllowTcpForwarding local
+  PermitOpen 127.0.0.1:8090 127.0.0.1:8080
+  AllowStreamLocalForwarding no
+  AllowAgentForwarding no
+  X11Forwarding no
+  PermitTTY no
+  ForceCommand /usr/sbin/nologin
+EOF
+sudo sshd -t && { sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd; }
+```
+
+`ForceCommand` refuses a shell, a command and `sftp` alike. `PermitOpen` matches the destination
+as written, so `localhost:6379` or `[::1]:6379` is refused as well. 0b checks it from each
+laptop. A participant who also holds an ordinary shell account on the VM is outside this
+demo's claim, as is the operator.
 
 The VM needs outbound HTTPS to `github.com` and `api.github.com`. On a cloud host, **require IMDSv2
 with hop limit 1**: container sandboxes have open egress in this round (#357).
@@ -81,19 +119,38 @@ with hop limit 1**: container sandboxes have open egress in this round (#357).
 
 - `mocactl` installed (`packages/mocactl/README.md`), plus `curl` and `jq` for Act 2.
 - A browser that reaches `https://github.com/login/device`.
-- An SSH account on the VM and the tunnel open. **Both users forward the same local ports**,
-  because the control plane advertises one harness URL to everyone:
+- The SSH account 0a restricted, and the tunnel open. **Both users forward the same local
+  ports**, because the control plane advertises one harness URL to everyone:
 
   ```bash
-  ssh -N -L 8090:127.0.0.1:8090 -L 8080:127.0.0.1:8080 <vm>
+  ssh -f -N -M -S ~/.ssh/moca-tunnel -o ExitOnForwardFailure=yes \
+    -L 8090:127.0.0.1:8090 -L 8080:127.0.0.1:8080 <vm>
   export SH_CONTROL_PLANE_URL=http://127.0.0.1:8090
   ```
+
+  `-f` puts ssh in the background once both forwards are up, so the `export` runs.
+  `ExitOnForwardFailure` makes it fail if something on the laptop already holds 8090 or 8080,
+  instead of warning and leaving that port pointing at a local service. `-S` names the tunnel, so
+  Cleanup can close it.
+
+- Proof that the account is restricted. Each user runs both commands:
+
+  ```bash
+  ssh <vm> true
+  printf 'PING\r\n' | ssh -W 127.0.0.1:6379 <vm>
+  ```
+
+  Expected: `This account is currently not available.`, then a line ending
+  `administratively prohibited: open failed`, and `stdio forwarding failed`. No message from the first, or `+PONG` (Redis answering) from the
+  second, means 0a's `Match` block does not apply to this account: stop and fix it before Act 1.
+  A tunnel opened before 0a's reload keeps its old rights, so reopen it after.
 
 - An inference credential of your own: a gateway token or an Anthropic API key.
 
 > Trap: to rehearse both users on **one** machine, give each its own `XDG_CONFIG_HOME` (e.g.
 > `export XDG_CONFIG_HOME=/tmp/user1`). `mocactl` caches one identity per config directory, so a
-> second login in the same one replaces the first.
+> second login in the same one replaces the first. Open the tunnel once: a second one fails,
+> because the first already holds the ports.
 
 ## Act 1 — Each user logs in and runs a turn
 
@@ -126,10 +183,12 @@ Add one credential with consumer `inference`:
 - **A gateway token** (LiteLLM and the like): kind `bearer`, with the fields in
   `packages/mocactl/QUICKSTART.md`, step 4.
 - **An Anthropic API key** (`sk-ant-api…`): kind `api-key`, destination host `api.anthropic.com`,
-  gateway endpoint `https://api.anthropic.com` (no `/v1`), secret field `key=<your key>`. The form
-  refuses an API key stored as `bearer`, because the key is sent as `x-api-key`.
+  gateway endpoint `https://api.anthropic.com` (no `/v1`), and the key itself, pasted as is into
+  the **API key** field. The form stores that field verbatim, so a `key=` prefix would become part
+  of the key, and only 1d's model call would notice. The form refuses an API key stored as
+  `bearer`, because the key is sent as `x-api-key`.
 
-> Say: each user's turns spend **their own** credential. The operator-key fallback is off.
+> Say: each user's turns spend **their own** credential. The operator-key fallback is off (0a).
 
 ### 1c. Doctor
 
@@ -180,19 +239,27 @@ curl -s -H @"$API_HDR" "$CP/v1/me"; echo
 Expected: `{"subject":"github:<numeric id>","tenant":"github:<numeric id>","roles":[]}`. The two
 users' subjects differ.
 
-Two helpers. `probe <method> <session id> [suffix]` prints the response body (which carries the
-error code) and then the HTTP status. `ids_set` refuses an empty or unedited `MINE` or `THEIRS`.
-(The blocks on this page have no `#` comments, so they paste cleanly into macOS's default zsh.)
+Three helpers. `probe <method> <session id> [suffix]` prints the response body (which carries
+the error code) and then the HTTP status. `ids_set` refuses an empty or unedited `MINE` or
+`THEIRS`, and a `THEIRS` that is your own `MINE`. `not_mine` runs `probe GET "$THEIRS"` and fails
+unless the answer is a 404, so 2b's DELETE never runs against a session you own. (The blocks on
+this page have no `#` comments, so they paste cleanly into macOS's default zsh.)
 
 ```bash
 ids_set() {
   for id in "$MINE" "$THEIRS"; do
     case "$id" in '' | *'<'*) echo 'set MINE and THEIRS to real session ids first' >&2; return 1 ;; esac
   done
+  [ "$MINE" != "$THEIRS" ] || { echo 'THEIRS is your own id: use the one the other user sent' >&2; return 1; }
 }
 probe() {
   case "$2" in '' | *'<'*) echo 'set MINE and THEIRS to real session ids first' >&2; return 1 ;; esac
   curl -s -w ' %{http_code}\n' -H @"$API_HDR" -X "$1" "$CP/v1/sessions/$2${3:-}"
+}
+not_mine() {
+  out=$(probe GET "$THEIRS") || return 1
+  printf '%s\n' "$out"
+  case "$out" in *' 404') ;; *) echo 'THEIRS answers you, so it is yours: stop before the DELETE' >&2; return 1 ;; esac
 }
 ```
 
@@ -229,10 +296,10 @@ created in Act 1. `$THEIRS` appears in neither view.
 ### 2b. Another user's session is 404, for reading and deleting
 
 ```bash
-probe GET "$THEIRS"
-probe DELETE "$THEIRS"
-probe POST "$THEIRS" /token
-probe GET sess-does-not-exist
+ids_set && not_mine &&
+  probe DELETE "$THEIRS" &&
+  probe POST "$THEIRS" /token &&
+  probe GET sess-does-not-exist
 ```
 
 Expected: `session_not_found` and `404` four times. That code comes from the control plane's
@@ -290,7 +357,9 @@ Copy this into the run's report (the issue, or the PR that closes it):
 | ----------------------------------------------------------- | ------ | ------ |
 | Commit / release on the VM                                  |        |        |
 | `MOCA_TENANCY`                                              | unset  | unset  |
+| 0a `SH_ALLOW_OPERATOR_FALLBACK` not `true`                  |        |        |
 | 0a token-less turn → `token_required` 401                   |        |        |
+| 0b SSH: no shell, Redis forward administratively prohibited |        |        |
 | 1a `mocactl login` (subject)                                |        |        |
 | 1c `doctor` all seven green                                 |        |        |
 | 1d `run` + resume                                           |        |        |
@@ -327,6 +396,12 @@ Copy this into the run's report (the issue, or the PR that closes it):
 - **Plain HTTP.** The tunnel is the confidentiality. The allowlist topology sends tokens in clear.
 - **Anyone with a GitHub account who can reach the control plane can log in.** There is no user
   allowlist. The tunnel (SSH accounts) or the firewall allowlist is the gate.
+- **Ownership holds only at the API.** The ownership index lives in Redis on `127.0.0.1:6379`,
+  which has no password, ACL or TLS, and the supervisor's admin listener on `:8081` is
+  unauthenticated too. Anyone who can reach the VM's loopback can rewrite a session's owner, and
+  then the ownership check lets them in. That is why 0a restricts the tunnel accounts and 0b checks
+  it. An SSH user with a shell, or with unrestricted forwarding, is trusted with every session on
+  the VM.
 - **Tenancy as of this writing:** `MOCA_TENANCY` unset. See the top of this page for when that
   stops working.
 
@@ -346,7 +421,8 @@ Found while preparing this run, checked against `main` @ 6836941. Add what the l
 
 ## Cleanup
 
-On each laptop: `rm -f "$API_HDR" "$TURN_HDR"`. Delete this run's sessions in **Sessions**
+On each laptop: `rm -f "$API_HDR" "$TURN_HDR"`, and close the tunnel with
+`ssh -S ~/.ssh/moca-tunnel -O exit <vm>`. Delete this run's sessions in **Sessions**
 (`ctrl+x l`, then `d`), and remove `"${XDG_CONFIG_HOME:-$HOME/.config}/mocactl/auth.json"` to log
 out. On GitHub, each user can revoke the app under **Settings → Applications → Authorized OAuth
 Apps**. The operator can delete the OAuth app when the demo is over. The control plane keeps no

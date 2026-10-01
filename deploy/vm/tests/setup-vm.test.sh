@@ -1214,16 +1214,20 @@ pass "seed_control_plane_env keeps an operator's values (warning on a disagreeme
 # the caller's choosing to a root-owned env file. Refused before anything is written.
 rm -rf "$SC"; SC="$(mu1_dir)"; cpf="$SC/control-plane.env"
 sum_before="$(cksum <"$cpf")"
-for bad in $'Ov23li\nSH_ALLOW_OPERATOR_FALLBACK=true' 'Ov23 li' 'Ov23li"'; do
+# The shape, too: the docs' placeholder Ov23li... is URL-safe characters, and would stick if written.
+for bad in $'Ov23li\nSH_ALLOW_OPERATOR_FALLBACK=true' 'Ov23 li' 'Ov23li"' 'Ov23li...' 'Ov23li…' \
+  '.Ov23li' 'Iv1.' 'Ov23_li' '-Ov23li'; do
   rc=0; seed_out="$(SH_ENV_DIR="$SC" SH_GITHUB_CLIENT_ID="$bad" seed_control_plane_env 2>&1)" || rc=$?
   ((rc != 0)) || fail "a malformed client id was accepted: $(cat "$cpf")"
   grep -q 'SH_GITHUB_CLIENT_ID' <<<"$seed_out" || fail "the refusal must name SH_GITHUB_CLIENT_ID: $seed_out"
 done
 # A trailing backslash is a line continuation to systemd's EnvironmentFile= parser, and `$`/backticks
 # have no business in a URL: the check is an allowlist of URL characters, not a denylist.
+# And the shape, as the control plane's `new URL` parses it at boot: the last three are URL
+# characters, but would crash-loop the unit under Restart=always rather than be refused here.
 # shellcheck disable=SC1003,SC2016  # literal backslash, $ and backticks are the inputs under test
 for bad in 'ftp://x' '127.0.0.1:8080' $'http://x\nSH_ALLOW_OPERATOR_FALLBACK=true' 'http://a b' \
-  'http://x\' 'http://$HOME:8080' 'http://a`b`'; do
+  'http://x\' 'http://$HOME:8080' 'http://a`b`' 'http://a%' 'http://[::1' 'http://h:99999'; do
   rc=0; seed_out="$(SH_ENV_DIR="$SC" SH_PUBLIC_HARNESS_URL="$bad" seed_control_plane_env 2>&1)" || rc=$?
   ((rc != 0)) || fail "SH_PUBLIC_HARNESS_URL '$bad' was accepted: $(cat "$cpf")"
   grep -q 'SH_PUBLIC_HARNESS_URL' <<<"$seed_out" || fail "the refusal must name SH_PUBLIC_HARNESS_URL: $seed_out"
@@ -1237,6 +1241,21 @@ if ((rc == 0)) || [[ "$(cksum <"$cpf")" != "$sum_before" ]]; then
 fi
 rm -rf "$SC"
 pass "seed_control_plane_env refuses a malformed value whole, before writing anything"
+
+# ...and the shapes GitHub issues, and the URLs a deployment uses, still pass.
+for good in 'Ov23liAbCdEf01234567' '0123456789abcdef0123' 'Iv1.0123456789abcdef'; do
+  SC="$(mu1_dir)"
+  SH_ENV_DIR="$SC" SH_GITHUB_CLIENT_ID="$good" seed_control_plane_env >/dev/null 2>&1 ||
+    fail "a well-formed client id '$good' was refused"
+  rm -rf "$SC"
+done
+for good in 'http://127.0.0.1:8080' 'http://[::1]:8080' 'https://harness.example.com/' 'http://10.0.0.5:8080/moca'; do
+  SC="$(mu1_dir)"
+  SH_ENV_DIR="$SC" SH_PUBLIC_HARNESS_URL="$good" seed_control_plane_env >/dev/null 2>&1 ||
+    fail "a well-formed harness URL '$good' was refused"
+  rm -rf "$SC"
+done
+pass "seed_control_plane_env accepts GitHub's client id shapes and ordinary harness URLs"
 
 # The file's value is compared the way systemd reads it: a quoted SH_GITHUB_CLIENT_ID="X" IS X, so an
 # environment saying X is agreement, not a disagreement to warn about. And an operator who commented the
