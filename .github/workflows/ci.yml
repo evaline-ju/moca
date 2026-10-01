@@ -64,10 +64,16 @@ jobs:
       - name: Test
         run: pnpm -r test
 
-      # The one deploy/ test that needs the built workspace: research-smoke.test.sh mints real
-      # tokens with packages/control-plane's tsx, which deploy-scripts (no workspace install) does
-      # not have, so there it runs only its tsx-free checks and skips the rest. Here the skip is a
-      # FAILURE (MOCA_REQUIRE_WORKSPACE=1), so the mint-driven checks cannot stop running unseen.
+      # p4-turn-smoke --auth mints with the control plane's real signer, which needs this job's
+      # `pnpm install` (tsx). deploy-scripts has no node_modules, so it skips that block; here a
+      # skip is a failure.
+      - name: P4 turn driver, authenticated mode
+        run: P4_SMOKE_REQUIRE_AUTH=1 bash deploy/microvm/tests/p4-turn-smoke.test.sh
+
+      # research-smoke.test.sh, likewise, mints real tokens with packages/control-plane's tsx, which
+      # deploy-scripts (no workspace install) does not have, so there it runs only its tsx-free
+      # checks and skips the rest. Here the skip is a FAILURE (MOCA_REQUIRE_WORKSPACE=1), so the
+      # mint-driven checks cannot stop running unseen.
       - name: Deploy tests that need the workspace
         run: MOCA_REQUIRE_WORKSPACE=1 bash deploy/vm/tests/research-smoke.test.sh
 
