@@ -225,7 +225,9 @@ spec:
             - name: SH_PUBLIC_HARNESS_URL
               value: ''
             # Default false (spec §6.4): a deployment does not silently let one subject spend the
-            # operator's key. When true, SH_OPERATOR_INFERENCE_TOKEN must also be set.
+            # operator's key. When true, SH_OPERATOR_INFERENCE_TOKEN and SH_DEFAULT_INFERENCE_ENDPOINT
+            # must also be set (and SH_OPERATOR_INFERENCE_HEADER=x-api-key for an Anthropic API key),
+            # or the control plane refuses to boot (#368).
             - name: SH_ALLOW_OPERATOR_FALLBACK
               value: 'false'
             - name: SH_SESSION_TOKEN_PRIVATE_KEY

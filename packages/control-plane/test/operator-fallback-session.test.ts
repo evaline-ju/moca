@@ -95,6 +95,26 @@ describe('a fallback session, later (#368 review)', () => {
     expect(message).not.toContain("''");
   });
 
+  it('never moves a session whose own credential was deleted onto the operator key (#411 review)', async () => {
+    // The user who deletes a leaked key mid-session: their session must stop, not carry on on the
+    // operator's bill. Only a session that recorded NO credential falls back.
+    const d = makeDeps({ withStreams: true, config: fallbackConfig });
+    await seedCredential(d);
+    const token = ((await create(d)).body as { token: string }).token;
+    await d.credentials.delete('github:1234', 'my-anthropic');
+    let message = '';
+    try {
+      await exchangeCredential(token, d);
+    } catch (e) {
+      message = (e as Error).message;
+      expect((e as { code: string }).code).toBe('credential_required');
+    }
+    expect(message).toContain("'my-anthropic'");
+    expect(
+      (d.streams.get('sh:cp:audit') ?? []).some((r) => r.decision === 'operator_fallback_used'),
+    ).toBe(false);
+  });
+
   it("refuses to store a credential named 'operator-fallback', the name the audit gives the operator's key", async () => {
     const res = HANDLERS.putCredential!(
       ctx({

@@ -318,10 +318,13 @@ The control plane refuses to boot on a fallback that cannot work, naming the set
 To turn the fallback off, set `SH_ALLOW_OPERATOR_FALLBACK=false`. To remove the key as well, delete
 the file and re-run: the drop-in goes with it.
 
-A session's credential is fixed when the session is created. So a session started on the fallback
-keeps spending the operator's key after its user stores a credential of their own, and only a new
-session picks that credential up. Turning the fallback off ends those sessions' turns with a message
-saying to start a new one.
+A session's credential is fixed when the session is created, in both directions:
+
+- A session started on the fallback keeps spending the operator's key after its user stores a
+  credential of their own. Only a new session picks that credential up. Turning the fallback off ends
+  those sessions' turns with a message saying to start a new one.
+- A session started on the user's own credential never moves onto the operator's key. If the user
+  deletes that credential (because it leaked, say), the session's next turn is refused, naming it.
 
 ### Reaching it: the supported demo topology
 

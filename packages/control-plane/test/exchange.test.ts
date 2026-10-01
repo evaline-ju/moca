@@ -209,9 +209,8 @@ describe('exchangeCredential', () => {
       },
     });
     const streams = deps.streams;
-    await seedCredential(deps);
+    // A subject with no inference credential at all: the case the fallback exists for (#368).
     const token = await sessionToken(deps);
-    await deps.credentials.delete('github:1234', 'my-anthropic');
     const res = await exchangeCredential(token, deps);
     expect(res).toMatchObject({
       mode: 'direct',

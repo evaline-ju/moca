@@ -231,8 +231,8 @@ export const HANDLERS: Record<string, Handler> = {
     const descriptors = await deps.credentials.list(p.sub);
     // The operator fallback (spec §6.4) is for a subject with no inference credential of its own: such
     // a session records NO credential name, and the exchange resolves the operator's key per turn,
-    // attributably. An explicitly requested name never falls back -- a typo must 400, not spend the
-    // operator's key.
+    // attributably. A session that names a credential never falls back, here or at exchange: a typo
+    // must 400, and a credential deleted mid-session ends its turns (exchange.ts).
     const fallback =
       requested === undefined &&
       deps.config.allowOperatorFallback &&

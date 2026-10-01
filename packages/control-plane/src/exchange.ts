@@ -149,7 +149,14 @@ export async function exchangeCredential(
       );
     }
     authHeader = header;
-  } else if (deps.config.allowOperatorFallback && deps.config.operatorInferenceToken) {
+  } else if (
+    // Only a session that recorded NO credential (created on the fallback, handlers.ts) falls back. A
+    // session whose own credential is gone -- deleted mid-session, say because it leaked -- stops
+    // here instead of carrying on on the operator's key (#411 review).
+    !rec.credentialName &&
+    deps.config.allowOperatorFallback &&
+    deps.config.operatorInferenceToken
+  ) {
     // The operator fallback relocates rather than disappearing (spec §6.4): resolved HERE, by the
     // trusted tier, attributable to a subject and logged -- never as an env fallback in the harness.
     secretValue = deps.config.operatorInferenceToken;

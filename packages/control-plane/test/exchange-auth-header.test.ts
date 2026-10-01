@@ -109,11 +109,8 @@ describe('exchangeCredential: authHeader', () => {
         defaultInferenceEndpoint: 'https://litellm.internal',
       },
     });
-    // Mirrors exchange.test.ts's fallback case: a session needs a credential to be created, and the
-    // fallback is what applies once that credential is gone.
-    await seedCredential(fb);
+    // A subject with no inference credential at all, which the fallback lets create a session.
     const token = await sessionToken(fb);
-    await fb.credentials.delete('github:1234', 'my-anthropic');
     const res = await exchangeCredential(token, fb);
     expect(res.anthropicAuthToken).toBe('op-gw-token'); // notsecret
     expect(res).not.toHaveProperty('authHeader');
@@ -132,9 +129,7 @@ describe('exchangeCredential: authHeader', () => {
           defaultInferenceEndpoint: endpoint,
         },
       });
-      await seedCredential(fb);
       const session = await sessionToken(fb);
-      await fb.credentials.delete('github:1234', 'my-anthropic');
       // The data plane maps a 5xx to a generic "control plane returned 503" (turn-auth PASSTHROUGH
       // admits caller-attributable codes only), so the operator learns of this from the log.
       const log = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -184,9 +179,7 @@ describe('exchangeCredential: authHeader', () => {
         defaultInferenceEndpoint: 'https://api.anthropic.com',
       },
     });
-    await seedCredential(fb);
     const session = await sessionToken(fb, 'sid-op-xapi');
-    await fb.credentials.delete('github:1234', 'my-anthropic');
     const res = await exchangeCredential(session, fb);
     expect(res.authHeader).toBe('x-api-key');
     expect(res.anthropicAuthToken).toBe(RAW_KEY);
