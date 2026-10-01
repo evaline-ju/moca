@@ -188,6 +188,17 @@ Add one credential with consumer `inference`:
   of the key, and only 1d's model call would notice. The form refuses an API key stored as
   `bearer`, because the key is sent as `x-api-key`.
 
+Or, from a script, with the key on stdin (never on the command line):
+
+```bash
+read -rs KEY && printf %s "$KEY" | mocactl credentials add anthropic --kind api-key \
+  --host api.anthropic.com --endpoint https://api.anthropic.com
+mocactl credentials
+```
+
+The same checks apply: a `bearer` kind for an `sk-ant-api…` key is refused before anything is
+sent.
+
 > Say: each user's turns spend **their own** credential. The operator-key fallback is off (0a).
 
 ### 1c. Doctor
@@ -287,7 +298,7 @@ THEIRS='<their session id>'
 ### 2a. Session lists are disjoint
 
 ```bash
-curl -s -H @"$API_HDR" "$CP/v1/sessions" | jq -r '.sessions[].sessionId'
+mocactl sessions --json | jq -r '.sessions[].sessionId'
 ```
 
 Also open **Sessions** in `mocactl` (`ctrl+x l`). Expected: each user sees only the sessions they
@@ -415,7 +426,7 @@ Found while preparing this run, checked against `main` @ 6836941. Add what the l
 | 2   | **Token expiry mid-demo.** Session tokens (5 min) re-mint on their own. An expired API token (1 h) makes the TUI open its login overlay and replay the prompt, and makes headless `mocactl run` say to run `mocactl login`. So a demo longer than an hour asks for a second login. | Works as designed. For a long demo, set `SH_API_TOKEN_TTL_SECONDS` in `control-plane.env` beforehand. |
 | 3   | **One identity per `XDG_CONFIG_HOME`.** Two users on one machine overwrite each other's `auth.json`.                                                                                                                                                                               | #404: `mocactl --profile`.                                                                            |
 | 4   | **Login misconfiguration has no hint.** The login error is GitHub's, verbatim: `device_flow_disabled` (device flow off) or `Not Found` (mistyped client id). It is diagnosable with this page or the QUICKSTART, but not on its own.                                               | #405: map both to the operator's fix.                                                                 |
-| 5   | **No headless `sessions` or `credentials` command.** Act 2 lists sessions with `curl`, and credentials can be added only in the TUI.                                                                                                                                               | #406: `mocactl sessions [--json]`.                                                                    |
+| 5   | **No headless `sessions` or `credentials` command.** Act 2 lists sessions with `curl`, and credentials can be added only in the TUI.                                                                                                                                               | Fixed (#406): `mocactl sessions [--json]`, `mocactl credentials add` (2a, 1b).                        |
 | 6   | **MI1 S2 first-subject pin.** Once it lands, this run under `MOCA_TENANCY=single` refuses user 2 with `403 single_tenant_deployment`.                                                                                                                                              | #407: blocks this run once S2 merges; re-pin tenancy then.                                            |
 | 7   | **Shared `/workspace` on the container tier.** User 2's agent can see user 1's clone ("Notes and limits").                                                                                                                                                                         | #408: per-session directory (not a boundary).                                                         |
 

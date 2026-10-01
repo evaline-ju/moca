@@ -10,6 +10,11 @@ process.exitCode = await main(
   {
     signal: ac.signal,
     stdinIsTTY: process.stdin.isTTY === true,
+    readStdin: async () => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+      return Buffer.concat(chunks).toString('utf8');
+    },
     // Loaded lazily so the headless commands never load Ink or React.
     startInteractive: async (rt, opts) => (await import('./start.js')).startInteractive(rt, opts),
   },

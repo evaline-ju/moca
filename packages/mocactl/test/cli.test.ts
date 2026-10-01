@@ -92,6 +92,79 @@ describe('main', () => {
     expect(o.errs.join('\n')).toContain('mocactl run');
   });
 
+  // Each management command, spied on its headless function: [argv, function, the options it gets].
+  it.each([
+    [['sessions'], 'cmdSessions', { json: false }],
+    [['sessions', '--json'], 'cmdSessions', { json: true }],
+    [['sessions', 'delete', 's-1'], 'cmdSessionDelete', { id: 's-1', json: false }],
+    [['credentials', '--json'], 'cmdCredentials', { json: true }],
+    [['credentials', 'delete', 'gh'], 'cmdCredentialDelete', { name: 'gh', json: false }],
+    [
+      ['credentials', 'add', 'anthropic', '--kind', 'api-key', '--host', 'a.example,b.example'],
+      'cmdCredentialAdd',
+      {
+        name: 'anthropic',
+        kind: 'api-key',
+        consumer: 'inference',
+        hosts: ['a.example', 'b.example'],
+        endpoint: undefined,
+        stdinIsTTY: false,
+      },
+    ],
+    [
+      [
+        'credentials',
+        'add',
+        'gh',
+        '--consumer',
+        'sandbox-egress',
+        '--host',
+        'github.com',
+        '--host',
+        'api.github.com',
+        '--endpoint',
+        'https://x.example',
+      ],
+      'cmdCredentialAdd',
+      {
+        name: 'gh',
+        kind: 'bearer',
+        consumer: 'sandbox-egress',
+        hosts: ['github.com', 'api.github.com'],
+        endpoint: 'https://x.example',
+      },
+    ],
+  ] as Array<[string[], string, Record<string, unknown>]>)(
+    'routes %j to %s',
+    async (argv, fn, expected) => {
+      const cmd = vi.fn(async (..._args: unknown[]) => 0);
+      const headless = await import('../src/headless.js');
+      const spy = vi.spyOn(headless, fn as 'cmdSessions').mockImplementation(cmd);
+      onTestFinished(() => spy.mockRestore());
+      const readStdin = async () => 'secret';
+      expect(
+        await main(argv, {}, io(), { buildRuntime: fakeBuild, readStdin, stdinIsTTY: false }),
+      ).toBe(0);
+      expect(cmd).toHaveBeenCalledTimes(1);
+      expect(cmd.mock.calls[0][2]).toMatchObject(expected);
+    },
+  );
+
+  it.each([
+    [['sessions', 'delete'], 'usage'],
+    [['sessions', 'rename', 's-1'], 'unknown sessions command "rename"'],
+    [['sessions', 'delete', 's-1', 's-2'], 'usage'],
+    [['credentials', 'add'], 'usage'],
+    [['credentials', 'delete'], 'usage'],
+    [['credentials', 'show', 'x'], 'unknown credentials command "show"'],
+    [['run', 'hi', '--kind', 'bearer'], '--kind only applies to `mocactl credentials add`'],
+    [['sessions', '--host', 'x'], '--host only applies to `mocactl credentials add`'],
+  ])('rejects %j with exit 2', async (argv, message) => {
+    const o = io();
+    expect(await main(argv, {}, o, { buildRuntime: fakeBuild })).toBe(2);
+    expect(o.errs.join('\n')).toContain(message);
+  });
+
   it('prints the config warning', async () => {
     const o = io();
     const build = () => ({ ...fakeBuild(), configWarning: 'ignoring unreadable x' }) as Runtime;

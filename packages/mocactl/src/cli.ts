@@ -1,6 +1,17 @@
 import { parseArgs } from 'node:util';
 import { parseOptionFlags } from './core/session-options.js';
-import { cmdDoctor, cmdLogin, cmdRun, type Io } from './headless.js';
+import type { CredentialConsumer } from './api/types.js';
+import {
+  cmdCredentialAdd,
+  cmdCredentialDelete,
+  cmdCredentials,
+  cmdDoctor,
+  cmdLogin,
+  cmdRun,
+  cmdSessionDelete,
+  cmdSessions,
+  type Io,
+} from './headless.js';
 import { buildRuntime, type Runtime } from './runtime.js';
 
 export const USAGE = `usage:
@@ -8,8 +19,26 @@ export const USAGE = `usage:
   mocactl login                                  log in with the GitHub device flow
   mocactl doctor [--json]                        check the setup; one fix per failure
   mocactl run "prompt" [--session ID | --new] [--option key=value ...] [--json]
+  mocactl sessions [--json]                      list your sessions
+  mocactl sessions delete ID [--json]
+  mocactl credentials [--json]                   list your credentials (never their secrets)
+  mocactl credentials add NAME --host HOST [--host HOST ...] [--kind KIND] [--consumer CONSUMER]
+      [--endpoint URL] [--json]                  the secret is read from stdin
+  mocactl credentials delete NAME [--json]
 flags for every command: --control-plane-url URL
   (the control plane says where the harness is; --harness-url URL overrides that)`;
+
+const CREDENTIAL_FLAGS = ['kind', 'consumer', 'host', 'endpoint'] as const;
+
+function usage(io: Io): number {
+  io.err(USAGE);
+  return 2;
+}
+
+function unknown(io: Io, command: string, sub: string): number {
+  io.err(`unknown ${command} command "${sub}"\n${USAGE}`);
+  return 2;
+}
 
 export interface InteractiveOptions {
   setup: boolean;
@@ -26,8 +55,13 @@ export async function main(
     buildRuntime?: typeof buildRuntime;
     startInteractive?: StartInteractive;
     signal?: AbortSignal;
-    /** Whether stdin is a terminal; Ink needs raw mode, so the interactive UI refuses without one. */
+    /**
+     * Whether stdin is a terminal; Ink needs raw mode, so the interactive UI refuses without one,
+     * and `credentials add` wants its secret piped.
+     */
     stdinIsTTY?: boolean;
+    /** All of stdin; `credentials add` reads its secret from it. */
+    readStdin?: () => Promise<string>;
   } = {},
 ): Promise<number> {
   let parsed;
@@ -43,6 +77,10 @@ export async function main(
         new: { type: 'boolean' },
         option: { type: 'string', multiple: true },
         json: { type: 'boolean' },
+        kind: { type: 'string' },
+        consumer: { type: 'string' },
+        host: { type: 'string', multiple: true },
+        endpoint: { type: 'string' },
         setup: { type: 'boolean' },
         'no-animation': { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
@@ -65,11 +103,19 @@ export async function main(
   if (rt.configWarning) io.err(rt.configWarning);
 
   const [command, ...rest] = positionals;
+  const json = values.json === true;
+  if (!(command === 'credentials' && rest[0] === 'add')) {
+    const stray = CREDENTIAL_FLAGS.find((f) => values[f] !== undefined);
+    if (stray) {
+      io.err(`--${stray} only applies to \`mocactl credentials add\`\n${USAGE}`);
+      return 2;
+    }
+  }
   switch (command) {
     case 'login':
       return cmdLogin(rt, io, deps.signal);
     case 'doctor':
-      return cmdDoctor(rt, io, values.json === true);
+      return cmdDoctor(rt, io, json);
     case 'run': {
       const prompt = rest.join(' ').trim();
       if (!prompt) {
@@ -92,8 +138,40 @@ export async function main(
         prompt,
         session: values.session,
         options,
-        json: values.json === true,
+        json,
         signal: deps.signal,
+      });
+    }
+    case 'sessions': {
+      const [sub, id, ...extra] = rest;
+      if (sub === undefined) return cmdSessions(rt, io, { json });
+      if (sub !== 'delete') return unknown(io, 'sessions', sub);
+      if (id === undefined || extra.length > 0) return usage(io);
+      return cmdSessionDelete(rt, io, { id, json });
+    }
+    case 'credentials': {
+      const [sub, name, ...extra] = rest;
+      if (sub === undefined) return cmdCredentials(rt, io, { json });
+      if (sub !== 'add' && sub !== 'delete') return unknown(io, 'credentials', sub);
+      if (name === undefined || extra.length > 0) return usage(io);
+      if (sub === 'delete') return cmdCredentialDelete(rt, io, { name, json });
+      const { readStdin } = deps;
+      if (!readStdin) {
+        io.err('reading stdin is not wired yet');
+        return 2;
+      }
+      return cmdCredentialAdd(rt, io, {
+        name,
+        // The TUI form's defaults.
+        kind: values.kind ?? 'bearer',
+        consumer: (values.consumer ?? 'inference') as CredentialConsumer,
+        hosts: (values.host ?? [])
+          .flatMap((h) => h.split(',').map((x) => x.trim()))
+          .filter(Boolean),
+        endpoint: values.endpoint,
+        json,
+        readStdin,
+        stdinIsTTY: deps.stdinIsTTY === true,
       });
     }
     case undefined:

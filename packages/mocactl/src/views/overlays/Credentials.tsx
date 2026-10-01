@@ -1,6 +1,7 @@
 import { Box, Text } from 'ink';
 import { useEffect, useMemo, useState } from 'react';
 import type { ControlPlaneApi, CredentialDescriptor } from '../../api/types.js';
+import { toPutRequest, validateCredential } from '../../core/credential-checks.js';
 import { describeError } from '../../core/messages.js';
 import { sanitizeRemote } from '../../core/sanitize.js';
 import { useTheme } from '../../theme/context.js';
@@ -8,7 +9,7 @@ import { Confirm } from '../Confirm.js';
 import { Form } from '../Form.js';
 import { SelectList } from '../SelectList.js';
 import { Spinner } from '../Spinner.js';
-import { credentialFields, toPutRequest, validateCredential } from './credential-form.js';
+import { credentialFields } from './credential-form.js';
 
 interface Props {
   cp: ControlPlaneApi;

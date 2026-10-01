@@ -59,10 +59,48 @@ mocactl doctor [--json]                     # seven checks, one fix per failure;
 mocactl run "prompt" [--session ID | --new] [--option inferenceCredential=NAME] [--json]
 ```
 
+```bash
+mocactl sessions [--json]                   # every session you own, all pages
+mocactl sessions delete ID [--json]         # also drops its local history
+mocactl credentials [--json]                # names, kinds, hosts and endpoints; never secrets
+printf %s "$KEY" | mocactl credentials add NAME --host HOST [--host HOST ...] \
+  [--kind KIND] [--consumer CONSUMER] [--endpoint URL] [--json]
+mocactl credentials delete NAME [--json]
+```
+
 `mocactl run` continues the session `--session` names, or starts a new one (`--new`, the default).
 
-`mocactl run` exit codes: `0` the turn completed, `1` it failed, `2` a usage or setup problem (bad
-flags, not logged in, no destination for the turn), `130` cancelled (Ctrl-C).
+`mocactl credentials add` reads the secret from stdin, never from the command line, so it stays
+out of shell history and `ps`; it refuses a terminal on stdin (`read -rs KEY` first, or use
+`/credentials` in the TUI). For a kind with one secret field (`bearer`, `api-key`,
+`oauth2-token`) stdin is the secret itself, one line, its trailing newline dropped; for any other
+kind it is one `field=value` per line (`basic`: `username=…` and `password=…`). `--kind` defaults
+to `bearer` and `--consumer` to `inference`, as in the TUI form; `--host` takes a comma-separated
+list too and is required. The TUI form's checks apply, and a problem names fields, never values.
+
+Exit codes, for every command: `0` it worked, `1` it failed (the turn, or the control plane
+refused), `2` a usage or setup problem (bad flags, not logged in, no destination for the turn),
+`130` cancelled (Ctrl-C).
+
+### Output
+
+stdout carries only the result; every message goes to stderr, including "no sessions" for an
+empty list. Without `--json` a listing is an aligned table with a header row, made terminal-safe.
+Times are UTC. With `--json` stdout is one JSON document and one line; `run` and `doctor` keep
+their own shapes. These shapes are stable: fields may be added, but none is renamed or removed.
+
+| Command              | `--json` on stdout                                                                                 |
+| -------------------- | -------------------------------------------------------------------------------------------------- |
+| `sessions`           | `{"sessions":[{"sessionId","title","state","createdAt","lastTurnAt","turns"}]}`                    |
+| `sessions delete`    | `{"sessionId","status"}`, `status` being `deleted`, or `accepted` while the control plane finishes |
+| `credentials`        | `{"credentials":[{"name","kind","consumer","hosts","endpoint"}]}`                                  |
+| `credentials add`    | `{"name","status":"stored"}`                                                                       |
+| `credentials delete` | `{"name","status":"deleted"}`                                                                      |
+
+`createdAt` and `lastTurnAt` are epoch milliseconds as the control plane sends them (`lastTurnAt`
+is `null` before the first turn); `endpoint` is `null` when the deployment default applies.
+`title` is this machine's: the first prompt, or a TUI rename, and `null` for a session with no
+local history (the control plane stores no titles).
 
 ## Files
 

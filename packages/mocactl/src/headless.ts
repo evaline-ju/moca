@@ -1,10 +1,17 @@
+import type { CredentialConsumer, SessionSummary } from './api/types.js';
 import { LoginCancelledError, apiTokenValid, deviceLogin, toCachedAuth } from './core/auth.js';
+import {
+  credentialProblem,
+  credentialRequest,
+  descriptionProblem,
+  secretFromStdin,
+} from './core/credential-checks.js';
 import { formatDiagnostics, runDiagnostics } from './core/diagnostics.js';
 import { describeError } from './core/messages.js';
 import { sanitizeRemote } from './core/sanitize.js';
 import { SessionManager, type ActiveSession } from './core/session-manager.js';
 import { SESSION_OPTION_FIELDS, resolveSessionOptions } from './core/session-options.js';
-import { setAuth, type Runtime } from './runtime.js';
+import { sessionManager, setAuth, type Runtime } from './runtime.js';
 
 export interface Io {
   out(s: string): void;
@@ -65,12 +72,18 @@ export interface RunOptions {
   signal?: AbortSignal;
 }
 
-export async function cmdRun(rt: Runtime, io: Io, opts: RunOptions): Promise<number> {
-  if (missing(rt, io, ['controlPlaneUrl']) || !rt.cp || !rt.harness) return 2;
+/** False (with the reason on stderr) unless there is a control plane and a valid login for it. */
+function ready(rt: Runtime, io: Io): rt is Runtime & Required<Pick<Runtime, 'cp' | 'harness'>> {
+  if (missing(rt, io, ['controlPlaneUrl']) || !rt.cp || !rt.harness) return false;
   if (!apiTokenValid(rt.auth, rt.now())) {
     io.err('not logged in — run `mocactl login` first');
-    return 2;
+    return false;
   }
+  return true;
+}
+
+export async function cmdRun(rt: Runtime, io: Io, opts: RunOptions): Promise<number> {
+  if (!ready(rt, io)) return 2;
   const manager = new SessionManager({
     cp: rt.cp,
     harness: rt.harness,
@@ -145,4 +158,215 @@ export async function cmdRun(rt: Runtime, io: Io, opts: RunOptions): Promise<num
     return 1;
   }
   return (outcome as Outcome) === 'cancelled' ? 130 : 0;
+}
+
+// The listing and management commands below share one output convention (README "Headless"):
+// stdout carries only the result (an aligned table, or one JSON document with --json), and every
+// message, including "nothing to list", goes to stderr. Exit codes are those of `run`.
+
+/** Columns padded to their widest cell; the last column is left ragged. */
+function table(rows: string[][]): string {
+  const widths = rows[0]!.map((_, i) => Math.max(...rows.map((r) => r[i]!.length)));
+  return rows
+    .map((r) =>
+      r
+        .map((cell, i) => (i === r.length - 1 ? cell : cell.padEnd(widths[i]!)))
+        .join('  ')
+        .trimEnd(),
+    )
+    .join('\n');
+}
+
+const utc = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace('T', ' ');
+
+async function allSessions(rt: Runtime & { cp: NonNullable<Runtime['cp']> }) {
+  const sessions: SessionSummary[] = [];
+  const seen = new Set<number>();
+  let cursor: number | undefined;
+  for (;;) {
+    const page = await rt.cp.listSessions({ limit: 200, cursor });
+    sessions.push(...page.sessions);
+    if (page.nextCursor === null) return sessions;
+    // A cursor that comes back again would page forever.
+    if (seen.has(page.nextCursor)) {
+      throw new Error(`the control plane repeated the page cursor ${page.nextCursor}`);
+    }
+    seen.add(page.nextCursor);
+    cursor = page.nextCursor;
+  }
+}
+
+export async function cmdSessions(rt: Runtime, io: Io, opts: { json: boolean }): Promise<number> {
+  if (!ready(rt, io)) return 2;
+  let sessions: SessionSummary[];
+  try {
+    sessions = await allSessions(rt);
+  } catch (err) {
+    io.err(describeError(err));
+    return 1;
+  }
+  // Titles are local (renamed in the TUI, or the first prompt); the control plane keeps none.
+  const rows = sessions.map((s) => ({
+    sessionId: s.sessionId,
+    title: rt.transcripts?.load(s.sessionId)?.title ?? null,
+    state: s.state,
+    createdAt: s.createdAt,
+    lastTurnAt: s.lastTurnAt,
+    turns: s.turns,
+  }));
+  if (opts.json) {
+    io.out(JSON.stringify({ sessions: rows }) + '\n');
+    return 0;
+  }
+  if (rows.length === 0) {
+    io.err('no sessions');
+    return 0;
+  }
+  const head = ['ID', 'CREATED (UTC)', 'LAST TURN (UTC)', 'TURNS', 'TITLE'];
+  const body = rows.map((r) =>
+    [
+      r.sessionId,
+      utc(r.createdAt),
+      r.lastTurnAt === null ? '-' : utc(r.lastTurnAt),
+      String(r.turns),
+      r.title ?? '',
+    ].map(sanitizeRemote),
+  );
+  io.out(table([head, ...body]) + '\n');
+  return 0;
+}
+
+export async function cmdSessionDelete(
+  rt: Runtime,
+  io: Io,
+  opts: { id: string; json: boolean },
+): Promise<number> {
+  if (!ready(rt, io)) return 2;
+  let status: 'deleted' | 'accepted';
+  try {
+    // Through the session manager, so the local history goes too.
+    status = await sessionManager(rt).remove(opts.id);
+  } catch (err) {
+    io.err(describeError(err));
+    return 1;
+  }
+  const id = sanitizeRemote(opts.id);
+  io.err(
+    status === 'deleted'
+      ? `deleted session ${id}`
+      : `deleting session ${id}; the control plane finishes in the background`,
+  );
+  if (opts.json) io.out(JSON.stringify({ sessionId: opts.id, status }) + '\n');
+  return 0;
+}
+
+export async function cmdCredentials(
+  rt: Runtime,
+  io: Io,
+  opts: { json: boolean },
+): Promise<number> {
+  if (!ready(rt, io)) return 2;
+  let rows;
+  try {
+    rows = (await rt.cp.listCredentials()).map((c) => ({
+      name: c.name,
+      kind: c.kind,
+      consumer: c.consumer,
+      hosts: c.destination.hosts,
+      endpoint: c.endpoint ?? null,
+    }));
+  } catch (err) {
+    io.err(describeError(err));
+    return 1;
+  }
+  if (opts.json) {
+    io.out(JSON.stringify({ credentials: rows }) + '\n');
+    return 0;
+  }
+  if (rows.length === 0) {
+    io.err('no credentials');
+    return 0;
+  }
+  const head = ['NAME', 'KIND', 'CONSUMER', 'HOSTS', 'ENDPOINT'];
+  const body = rows.map((r) =>
+    [r.name, r.kind, r.consumer, r.hosts.join(','), r.endpoint ?? '-'].map(sanitizeRemote),
+  );
+  io.out(table([head, ...body]) + '\n');
+  return 0;
+}
+
+export interface CredentialAddOptions {
+  name: string;
+  kind: string;
+  consumer: CredentialConsumer;
+  hosts: string[];
+  endpoint?: string;
+  json: boolean;
+  /** The secret comes only from stdin, never argv, so it stays out of shell history and `ps`. */
+  readStdin: () => Promise<string>;
+  stdinIsTTY: boolean;
+}
+
+export async function cmdCredentialAdd(
+  rt: Runtime,
+  io: Io,
+  opts: CredentialAddOptions,
+): Promise<number> {
+  if (!ready(rt, io)) return 2;
+  const values = {
+    name: opts.name,
+    kind: opts.kind,
+    consumer: opts.consumer,
+    hosts: opts.hosts.join(','),
+    endpoint: opts.endpoint ?? '',
+  };
+  // Everything but the secret is checked before stdin is read, so a typo costs no re-piping.
+  const early = descriptionProblem(values);
+  if (early) {
+    io.err(early);
+    return 2;
+  }
+  if (opts.stdinIsTTY) {
+    io.err(
+      'pipe the secret on stdin, e.g. `printf %s "$KEY" | mocactl credentials add …` (or use /credentials in the TUI)',
+    );
+    return 2;
+  }
+  const read = secretFromStdin(opts.kind, await opts.readStdin());
+  if ('problem' in read) {
+    io.err(read.problem);
+    return 2;
+  }
+  const problem = credentialProblem(values, read.secret);
+  if (problem) {
+    io.err(problem);
+    return 2;
+  }
+  const { name, req } = credentialRequest(values, read.secret);
+  try {
+    await rt.cp.putCredential(name, req);
+  } catch (err) {
+    io.err(describeError(err));
+    return 1;
+  }
+  io.err(`stored credential ${sanitizeRemote(name)}`);
+  if (opts.json) io.out(JSON.stringify({ name, status: 'stored' }) + '\n');
+  return 0;
+}
+
+export async function cmdCredentialDelete(
+  rt: Runtime,
+  io: Io,
+  opts: { name: string; json: boolean },
+): Promise<number> {
+  if (!ready(rt, io)) return 2;
+  try {
+    await rt.cp.deleteCredential(opts.name);
+  } catch (err) {
+    io.err(describeError(err));
+    return 1;
+  }
+  io.err(`deleted credential ${sanitizeRemote(opts.name)}`);
+  if (opts.json) io.out(JSON.stringify({ name: opts.name, status: 'deleted' }) + '\n');
+  return 0;
 }
