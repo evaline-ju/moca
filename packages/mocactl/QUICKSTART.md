@@ -94,7 +94,7 @@ sessions use. For a LiteLLM-style gateway at `https://litellm.example.com`:
 | Consumer          | `inference`                                                                     |
 | Destination hosts | `litellm.example.com` (hostname only)                                           |
 | Gateway endpoint  | `https://litellm.example.com`: what you'd set as `ANTHROPIC_BASE_URL`, no `/v1` |
-| Secret fields     | `token=<your key>`                                                              |
+| Token             | your key, as is (the field is stored verbatim: no `token=` prefix)              |
 
 The key is stored encrypted and is never shown again, not even in the credential list. Then type
 a message. The first one creates a session and streams the reply.
@@ -128,13 +128,13 @@ common first-run failures:
 
 And outside doctor:
 
-| Symptom                                         | Cause and fix                                                                                                 |
-| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| login fails with `device_flow_disabled`         | tick **Enable Device Flow** on the OAuth app (step 2)                                                         |
-| login fails with `incorrect_client_credentials` | `SH_GITHUB_CLIENT_ID` is mistyped                                                                             |
-| a turn fails with `endpoint_unresolved`         | the credential has no **Gateway endpoint**: edit it with `ctrl+x k`                                           |
-| a turn fails on the model call                  | check the credential's key, host and endpoint; a private gateway needs your VPN; only port 443 is allowed out |
-| the script asks "is port … free?"               | stop whatever holds 18080/18081, or set `MOCACTL_CP_PORT` / `MOCACTL_HARNESS_PORT`                            |
+| Symptom                                                 | Cause and fix                                                                                                 |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| login fails with `device_flow_disabled`                 | tick **Enable Device Flow** on the OAuth app (step 2)                                                         |
+| login fails with `github device code failed: Not Found` | `SH_GITHUB_CLIENT_ID` is mistyped (GitHub knows no such client)                                               |
+| a turn fails with `endpoint_unresolved`                 | the credential has no **Gateway endpoint**: edit it with `ctrl+x k`                                           |
+| a turn fails on the model call                          | check the credential's key, host and endpoint; a private gateway needs your VPN; only port 443 is allowed out |
+| the script asks "is port … free?"                       | stop whatever holds 18080/18081, or set `MOCACTL_CP_PORT` / `MOCACTL_HARNESS_PORT`                            |
 
 ## 6. Clean up
 

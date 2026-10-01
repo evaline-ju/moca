@@ -28,9 +28,10 @@ the sandbox containers as podman containers alongside them. `setup-vm.sh` is the
   "Bring it up" below)
 - A system user and group named `harness` (all three units run as `User=harness`/`Group=harness`):
   e.g. `sudo useradd --system --no-create-home --shell /usr/sbin/nologin harness`
-- For logins: a GitHub OAuth app with **device flow enabled** (it is off by default). Its client id
-  goes in `control-plane.env` (`SH_GITHUB_CLIENT_ID`). Without one, the control plane is installed
-  but not started.
+- For logins: a GitHub OAuth app with **device flow enabled** (it is off by default), and outbound
+  HTTPS from the VM to `github.com` and `api.github.com`. Its client id goes in `control-plane.env`
+  (`SH_GITHUB_CLIENT_ID`), by hand or from `setup-vm.sh`'s environment (see "The GitHub OAuth app"
+  below). Without one, the control plane is installed but not started.
 - **The workspace built.** `ExecStart=node --import tsx src/main.ts` needs `tsx` (a
   devDependency) and the workspace's `link:` targets resolved, and those only exist after the
   checkout is built. Run, in order (spec §9), once per checkout:
@@ -92,6 +93,10 @@ sudoedit /etc/serverless-harness/supervisor.env      # SH_TURNS_PER_WORKER
 sudo ./deploy/vm/setup-vm.sh        # installs units, starts containers, enables the services
 ```
 
+The control-plane pair can instead be passed to either run, as
+`sudo env SH_GITHUB_CLIENT_ID=… SH_PUBLIC_HARNESS_URL=… ./deploy/vm/setup-vm.sh`. The script
+writes each one only where `control-plane.env` has none (see "The GitHub OAuth app" below).
+
 The first invocation exits non-zero with a message naming `SH_RELAY_TOKEN` and the file. That is
 the expected first-run path, not a failure to debug. The second invocation keeps the env files you
 edited (`install_env` never clobbers an existing one) and continues past the check. Only the relay
@@ -104,7 +109,9 @@ Across those two runs, the script does the following, in this order:
 
 1. Writes `/etc/serverless-harness/supervisor.env`, `relay.env` and `control-plane.env` from their
    `env/*.example` templates — only the first time each; an operator-edited env file is never
-   clobbered on a re-run.
+   clobbered on a re-run. Then, if `SH_GITHUB_CLIENT_ID` or `SH_PUBLIC_HARNESS_URL` is set in the
+   script's environment, writes it into `control-plane.env` where that file's value is empty
+   (never replacing one; a disagreement is warned about), after checking both values first.
 2. **Checks `relay.env` for a non-empty `SH_RELAY_TOKEN`, and stops here if there is none.**
    Everything below runs only once that is set — which is why a fresh VM needs the second
    invocation above.
@@ -189,6 +196,59 @@ same loopback Redis container as the supervisor's, so a reboot's lost Redis stat
 below) loses sessions, not credentials. Vault (`SH_CREDENTIAL_STORE=vault`) is the multi-host
 option and is not wired by `setup-vm.sh`: a follow-up (#362 item 1).
 
+### The GitHub OAuth app
+
+Login is GitHub's **device flow** (`mocactl login` prints a code; the user types it at
+`https://github.com/login/device`). The control plane needs one GitHub OAuth app for it, and only
+its **client id**: the device flow treats the app as a public client, so there is no client secret
+to store.
+
+1. On GitHub: **Settings → Developer settings → OAuth Apps → New OAuth App** (or the same page under
+   an organization's settings). Any application name. Homepage URL and authorization callback URL
+   are required fields, but the device flow never uses them: use the repository URL for both.
+2. On the created app's page, tick **Enable Device Flow** and **Update application**. It is **off by
+   default**, and forgetting it is the likeliest first-run failure: `mocactl login` then prints
+   `login failed: github device code failed: device_flow_disabled`.
+3. Copy the **Client ID** (`Ov23li…` for a new OAuth app). Do not generate a client secret. A
+   mistyped id is a client GitHub does not know: `mocactl login` then prints
+   `login failed: github device code failed: Not Found`.
+4. Give it to the control plane, in either of two ways:
+   - on the setup run, through `sudo env` (sudo drops the rest of the environment). The same goes
+     for the harness URL, since the control plane starts only once it has both:
+
+     ```bash
+     sudo env SH_GITHUB_CLIENT_ID=Ov23li... SH_PUBLIC_HARNESS_URL=http://127.0.0.1:8080 \
+       ./deploy/vm/setup-vm.sh
+     ```
+
+     `setup-vm.sh` writes each value only where `control-plane.env` has none. It never replaces one
+     you have already set, and warns if the environment disagrees with the file.
+
+   - or by hand: set both `SH_GITHUB_CLIENT_ID=` and `SH_PUBLIC_HARNESS_URL=` in
+     `/etc/serverless-harness/control-plane.env`, then re-run `setup-vm.sh`. With only the client
+     id, the script leaves the control plane stopped, and a manual `systemctl restart` boots it
+     advertising no harness, so `mocactl doctor` fails at check 5.
+
+The login asks for the `read:user` scope only. The subject is the **numeric** GitHub user id
+(`github:<id>`), never the login name, and GitHub's access token is used once, to read that id, and
+then dropped. To make someone an admin (`GET /v1/sessions?owner=…`), put their subject in
+`SH_ADMIN_SUBJECTS` and restart the control plane. Roles are computed at login and carried in
+the API token, so the user must then log in again (`mocactl login`). `GET /v1/me` with the new
+token shows the role.
+
+**Network.** The VM must reach `https://github.com` (the device-code and token endpoints) and
+`https://api.github.com` (`/user`) outbound. Each user's browser must reach
+`https://github.com/login/device`. The laptop running `mocactl` talks only to the control plane and
+the harness it advertises, never to GitHub.
+
+**Who may log in.** Anyone with a GitHub account who can reach the control plane. The OAuth app
+does not restrict users, and the control plane has no allowlist. The SSH tunnel or firewall
+allowlist below is what limits who can reach it. Two users on this VM each see only their own
+sessions (404, not 403, for anyone else's), but on the container tier they share sandbox
+containers. And an SSH account is more than a way to reach the control plane: unless it is
+restricted to the two forwarded ports ("Reaching it" below), its holder can reach Redis and take
+over any session. See "What round one does not claim".
+
 ### Secrets
 
 They all live in `/etc/serverless-harness/credentials/` (directory `0700`, files `0600`, owner
@@ -266,10 +326,32 @@ for this round. A client needs two ports: the control plane (8090) and the harne
 (`SH_PUBLIC_HARNESS_URL`, the supervisor on 8080). Two topologies are supported:
 
 - **(a) An SSH tunnel, the default.** Each user runs
-  `ssh -N -L 8090:127.0.0.1:8090 -L 8080:127.0.0.1:8080 <vm>`. On the VM, set
+  `ssh -f -N -o ExitOnForwardFailure=yes -L 8090:127.0.0.1:8090 -L 8080:127.0.0.1:8080 <vm>`
+  (`-f` backgrounds it once both forwards are up; `ExitOnForwardFailure` fails instead of
+  warning when a local port is taken). On the VM, set
   `SH_PUBLIC_HARNESS_URL=http://127.0.0.1:8080`; on the laptop, run
   `mocactl --control-plane-url http://127.0.0.1:8090 …`. Because the harness URL is advertised,
   **every user must forward the same local port**.
+
+  An SSH account reaches **every** loopback service, including Redis (no password: it holds the
+  session-ownership index) and the supervisor's unauthenticated admin listener on 8081. Anyone
+  who can write that index can make another user's session their own. So give users who are not
+  operators an account that can forward the two ports and nothing else, at the end of
+  `/etc/ssh/sshd_config`:
+
+  ```
+  Match User user1,user2
+    AllowTcpForwarding local
+    PermitOpen 127.0.0.1:8090 127.0.0.1:8080
+    AllowStreamLocalForwarding no
+    AllowAgentForwarding no
+    X11Forwarding no
+    PermitTTY no
+    ForceCommand /usr/sbin/nologin
+  ```
+
+  `docs/demos/vm-two-user-acceptance.md` (0a, 0b) installs it and checks it from a laptop.
+
 - **(b) A cloud firewall allowlist.** Set `SH_CONTROL_PLANE_HOST=0.0.0.0` and
   `SH_PUBLIC_HARNESS_URL=http://<vm-address>:8080`, and allow 8090 and 8080 from the users'
   addresses only. Tokens and credentials then cross the network in clear.
@@ -580,3 +662,13 @@ Nor does it claim, for the control plane:
   wired by `setup-vm.sh`.
 - **Sandbox egress control.** A sandbox container reaches the internet and the cloud's instance
   metadata ("A research turn" above). Filtering it is MI1 S5.
+- **Sandbox isolation between users.** Session _ownership_ is enforced: each user lists only their
+  own sessions, and another user's session answers 404. But on the container tier, every user's
+  turns lease the same sandbox containers (`harness/src/select-sandbox.ts` has no owner filter),
+  and the container worker ignores `workspace_key` (`remote-worker/internal/exec/runner.go`). So
+  users share `/workspace`, the Unix user and the process list. Owner binding is MI1 S5
+  (`docs/specs/2026-09-28-moca-multi-user-isolation-design.md` §9).
+- **Ownership against loopback access.** Session ownership is enforced at the control plane's API.
+  Its index is in Redis on `127.0.0.1:6379`, unauthenticated, so anyone with a shell or an
+  unrestricted SSH forward on the VM can rewrite it. Restrict non-operator SSH accounts ("Reaching
+  it").

@@ -15,6 +15,9 @@ ENV_SRC_DIR="$VM_DIR/env"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 export MOCK_LOG="$TMP/mock.log"
+# setup-vm.sh seeds control-plane.env from these; one exported in the developer's shell would configure
+# every control plane below that the tests expect to stay unconfigured.
+unset SH_GITHUB_CLIENT_ID SH_PUBLIC_HARNESS_URL
 mkdir -p "$TMP/bin"
 for cmd in podman getent pnpm nft; do
   cat >"$TMP/bin/$cmd" <<'MOCK'
@@ -1254,6 +1257,101 @@ op_run || fail "removing the token with the fallback off was refused"
 pass "operator fallback: removing the token removes the drop-in"
 rm -rf "$OP" "$OP_UNITS"
 
+# seed_control_plane_env: SH_GITHUB_CLIENT_ID and SH_PUBLIC_HARNESS_URL from the environment fill
+# control-plane.env's EMPTY slots (the template ships both empty), as deploy/compose/install.sh does for
+# the client id. A value already in the file is the operator's: kept, with a warning when the
+# environment disagrees. Run in subshells, so the exports never reach the rest of this file.
+SC="$(mu1_dir)"
+cpf="$SC/control-plane.env"
+seed_out="$(SH_ENV_DIR="$SC" SH_GITHUB_CLIENT_ID=Ov23liDemo SH_PUBLIC_HARNESS_URL=http://127.0.0.1:8080 \
+  seed_control_plane_env 2>&1)" || fail "seed_control_plane_env failed on the template: $seed_out"
+[[ "$(env_file_value SH_GITHUB_CLIENT_ID "$cpf")" == Ov23liDemo ]] ||
+  fail "an empty SH_GITHUB_CLIENT_ID was not filled from the environment: $(cat "$cpf")"
+[[ "$(env_file_value SH_PUBLIC_HARNESS_URL "$cpf")" == http://127.0.0.1:8080 ]] ||
+  fail "an empty SH_PUBLIC_HARNESS_URL was not filled from the environment: $(cat "$cpf")"
+(($(grep -cE '^SH_GITHUB_CLIENT_ID=' "$cpf") == 1)) || fail "seeding left a duplicate SH_GITHUB_CLIENT_ID= line"
+(SH_ENV_DIR="$SC" cp_configured) || fail "a seeded control-plane.env must count as configured"
+pass "seed_control_plane_env fills the template's empty client id and harness URL"
+
+sum_before="$(cksum <"$cpf")"
+seed_out="$(SH_ENV_DIR="$SC" SH_GITHUB_CLIENT_ID=Ov23liOther SH_PUBLIC_HARNESS_URL=http://10.0.0.5:8080 \
+  seed_control_plane_env 2>&1)" || fail "a differing environment must warn, not fail: $seed_out"
+[[ "$(cksum <"$cpf")" == "$sum_before" ]] || fail "seeding overwrote the operator's values: $(cat "$cpf")"
+grep -qE 'SH_GITHUB_CLIENT_ID.*Ov23liDemo.*Ov23liOther|SH_GITHUB_CLIENT_ID.*Ov23liOther.*Ov23liDemo' <<<"$seed_out" ||
+  fail "a differing SH_GITHUB_CLIENT_ID must be named in a warning, with both values: $seed_out"
+grep -q 'SH_PUBLIC_HARNESS_URL' <<<"$seed_out" || fail "a differing SH_PUBLIC_HARNESS_URL must be warned about: $seed_out"
+seed_out="$(SH_ENV_DIR="$SC" SH_GITHUB_CLIENT_ID=Ov23liDemo seed_control_plane_env 2>&1)"
+[[ -z "$seed_out" ]] || fail "an environment that agrees with the file must be silent: $seed_out"
+seed_out="$(SH_ENV_DIR="$SC" seed_control_plane_env 2>&1)" || fail "an unset environment must be a no-op: $seed_out"
+[[ -z "$seed_out" && "$(cksum <"$cpf")" == "$sum_before" ]] || fail "an unset environment changed something: $seed_out"
+pass "seed_control_plane_env keeps an operator's values (warning on a disagreement), is silent otherwise"
+
+# A value reaches set_env_line, which writes it as one env line: a newline in it would add a line of
+# the caller's choosing to a root-owned env file. Refused before anything is written.
+rm -rf "$SC"; SC="$(mu1_dir)"; cpf="$SC/control-plane.env"
+sum_before="$(cksum <"$cpf")"
+# The shape, too: the docs' placeholder Ov23li... is URL-safe characters, and would stick if written.
+for bad in $'Ov23li\nSH_ALLOW_OPERATOR_FALLBACK=true' 'Ov23 li' 'Ov23li"' 'Ov23li...' 'Ov23li…' \
+  '.Ov23li' 'Iv1.' 'Ov23_li' '-Ov23li'; do
+  rc=0; seed_out="$(SH_ENV_DIR="$SC" SH_GITHUB_CLIENT_ID="$bad" seed_control_plane_env 2>&1)" || rc=$?
+  ((rc != 0)) || fail "a malformed client id was accepted: $(cat "$cpf")"
+  grep -q 'SH_GITHUB_CLIENT_ID' <<<"$seed_out" || fail "the refusal must name SH_GITHUB_CLIENT_ID: $seed_out"
+done
+# A trailing backslash is a line continuation to systemd's EnvironmentFile= parser, and `$`/backticks
+# have no business in a URL: the check is an allowlist of URL characters, not a denylist.
+# And the shape, as the control plane's `new URL` parses it at boot: the last three are URL
+# characters, but would crash-loop the unit under Restart=always rather than be refused here.
+# shellcheck disable=SC1003,SC2016  # literal backslash, $ and backticks are the inputs under test
+for bad in 'ftp://x' '127.0.0.1:8080' $'http://x\nSH_ALLOW_OPERATOR_FALLBACK=true' 'http://a b' \
+  'http://x\' 'http://$HOME:8080' 'http://a`b`' 'http://a%' 'http://[::1' 'http://h:99999'; do
+  rc=0; seed_out="$(SH_ENV_DIR="$SC" SH_PUBLIC_HARNESS_URL="$bad" seed_control_plane_env 2>&1)" || rc=$?
+  ((rc != 0)) || fail "SH_PUBLIC_HARNESS_URL '$bad' was accepted: $(cat "$cpf")"
+  grep -q 'SH_PUBLIC_HARNESS_URL' <<<"$seed_out" || fail "the refusal must name SH_PUBLIC_HARNESS_URL: $seed_out"
+done
+[[ "$(cksum <"$cpf")" == "$sum_before" ]] || fail "a refused value changed control-plane.env: $(cat "$cpf")"
+# Both are checked before either is written: a bad URL must not leave a good client id behind.
+rc=0; SH_ENV_DIR="$SC" SH_GITHUB_CLIENT_ID=Ov23liDemo SH_PUBLIC_HARNESS_URL='nope' seed_control_plane_env \
+  >/dev/null 2>&1 || rc=$?
+if ((rc == 0)) || [[ "$(cksum <"$cpf")" != "$sum_before" ]]; then
+  fail "a bad URL next to a good client id must refuse both: $(cat "$cpf")"
+fi
+rm -rf "$SC"
+pass "seed_control_plane_env refuses a malformed value whole, before writing anything"
+
+# ...and the shapes GitHub issues, and the URLs a deployment uses, still pass.
+for good in 'Ov23liAbCdEf01234567' '0123456789abcdef0123' 'Iv1.0123456789abcdef'; do
+  SC="$(mu1_dir)"
+  SH_ENV_DIR="$SC" SH_GITHUB_CLIENT_ID="$good" seed_control_plane_env >/dev/null 2>&1 ||
+    fail "a well-formed client id '$good' was refused"
+  rm -rf "$SC"
+done
+for good in 'http://127.0.0.1:8080' 'http://[::1]:8080' 'https://harness.example.com/' 'http://10.0.0.5:8080/moca'; do
+  SC="$(mu1_dir)"
+  SH_ENV_DIR="$SC" SH_PUBLIC_HARNESS_URL="$good" seed_control_plane_env >/dev/null 2>&1 ||
+    fail "a well-formed harness URL '$good' was refused"
+  rm -rf "$SC"
+done
+pass "seed_control_plane_env accepts GitHub's client id shapes and ordinary harness URLs"
+
+# The file's value is compared the way systemd reads it: a quoted SH_GITHUB_CLIENT_ID="X" IS X, so an
+# environment saying X is agreement, not a disagreement to warn about. And an operator who commented the
+# slot out (#SH_GITHUB_CLIENT_ID=) has no value: the seed replaces that line, leaving one active line.
+SC="$(mu1_dir)"; cpf="$SC/control-plane.env"
+set_env_line "$cpf" SH_GITHUB_CLIENT_ID '"Ov23liDemo"'
+seed_out="$(SH_ENV_DIR="$SC" SH_GITHUB_CLIENT_ID=Ov23liDemo seed_control_plane_env 2>&1)"
+[[ -z "$seed_out" ]] || fail "a quoted file value equal to the environment's must be silent: $seed_out"
+grep -qxF 'SH_GITHUB_CLIENT_ID="Ov23liDemo"' "$cpf" || fail "seeding rewrote a quoted value that agreed: $(cat "$cpf")"
+rm -rf "$SC"; SC="$(mu1_dir)"; cpf="$SC/control-plane.env"
+sed -i.bak 's/^SH_GITHUB_CLIENT_ID=$/#SH_GITHUB_CLIENT_ID=/' "$cpf" && rm -f "$cpf.bak"
+grep -qxF '#SH_GITHUB_CLIENT_ID=' "$cpf" || fail "fixture: the template's slot was not commented out"
+SH_ENV_DIR="$SC" SH_GITHUB_CLIENT_ID=Ov23liDemo seed_control_plane_env >/dev/null 2>&1 ||
+  fail "seeding a commented-out slot failed"
+if [[ "$(grep -cE '^#?SH_GITHUB_CLIENT_ID=' "$cpf")" != 1 ]] || ! grep -qxF 'SH_GITHUB_CLIENT_ID=Ov23liDemo' "$cpf"; then
+  fail "a commented-out slot must become the one active line: $(grep -E 'SH_GITHUB_CLIENT_ID' "$cpf")"
+fi
+rm -rf "$SC"
+pass "seed_control_plane_env reads quoted values as systemd does, and fills a commented-out slot"
+
 # main() under errexit, as `sudo ./setup-vm.sh` runs it. `main || fail` would not do: bash ignores
 # set -e inside anything on the left of ||, so a failing step would be skipped, not reported. errexit
 # is suspended here only around a subshell that turns it back on; run_main <out> sets MAIN_RC.
@@ -1309,6 +1407,14 @@ wire_line=$(declare -f main | grep -n 'wire_supervisor_mu1' | cut -d: -f1)
 units_line=$(declare -f main | grep -n 'install_units' | cut -d: -f1)
 token_line=$(declare -f main | grep -n 'require_relay_token' | cut -d: -f1)
 listener_line=$(declare -f main | grep -n 'ensure_exec_listener' | cut -d: -f1)
+env_line=$(declare -f main | grep -nw 'install_env' | cut -d: -f1)
+seed_line=$(declare -f main | grep -n 'seed_control_plane_env' | cut -d: -f1)
+services_line=$(declare -f main | grep -n 'start_services' | cut -d: -f1)
+if [[ -z "$env_line" || -z "$seed_line" || -z "$services_line" ]] ||
+  ((env_line > seed_line || seed_line > token_line || seed_line > services_line)); then
+  fail "main() must seed control-plane.env after install_env and before require_relay_token (which" \
+    "stops a first run) and start_services"
+fi
 [[ -n "$token_line" && -n "$listener_line" && -n "$mu1_line" && -n "$wire_line" && -n "$units_line" ]] ||
   fail "main() must run require_relay_token, ensure_exec_listener, ensure_mu1_secrets," \
     "wire_supervisor_mu1 and install_units"
@@ -1388,6 +1494,32 @@ grep -qxF 'SH_REQUIRE_AUTH=true' "$SH_ENV_DIR/supervisor.env" || fail "the upgra
 grep -qE '^systemctl try-restart sh-control-plane\.service$' "$MOCK_LOG" ||
   fail "the upgrade must not start an unconfigured control plane: $(cat "$MOCK_LOG")"
 pass "main() upgrade: a VM with no control plane gains it, keeps its settings, requires auth"
+
+# A fresh VM's FIRST run, given both control-plane settings: it stops at the relay-token check (no
+# SH_RELAY_TOKEN yet), and the settings it was given must already be in control-plane.env -- the
+# operator's second run, without them, then starts a configured control plane. Run, not inferred from
+# main()'s line order.
+export SH_UNIT_DIR="$TMP/units4" SH_ENV_DIR="$TMP/etc4"
+mkdir -p "$SH_UNIT_DIR" "$SH_ENV_DIR"
+SH_GITHUB_CLIENT_ID=Ov23liFirstRun SH_PUBLIC_HARNESS_URL=http://127.0.0.1:8080 run_main "$TMP/main-first.out"
+((MAIN_RC != 0)) || fail "a first run with no SH_RELAY_TOKEN must stop: $(cat "$TMP/main-first.out")"
+grep -q 'SH_RELAY_TOKEN is not set' "$TMP/main-first.out" ||
+  fail "the first run must stop at the relay-token check: $(cat "$TMP/main-first.out")"
+[[ "$(env_file_value SH_GITHUB_CLIENT_ID "$SH_ENV_DIR/control-plane.env")" == Ov23liFirstRun &&
+  "$(env_file_value SH_PUBLIC_HARNESS_URL "$SH_ENV_DIR/control-plane.env")" == http://127.0.0.1:8080 ]] ||
+  fail "a first run that stops at the relay token lost the settings it was given: $(cat "$SH_ENV_DIR/control-plane.env")"
+cp_configured || fail "after the first run, the control plane must count as configured"
+pass "main() first run: stops at the relay token, keeps the control-plane settings it was given"
+export SH_UNIT_DIR="$TMP/units3" SH_ENV_DIR="$TMP/etc3"
+
+# The unconfigured closing message must not offer `systemctl start`: with a setting missing the unit
+# cannot boot, or boots advertising no harness. It names both settings and the sudo env route.
+unconfigured_out="$(report_done 2>&1)"
+grep -qE 'systemctl start sh-control-plane' <<<"$unconfigured_out" &&
+  fail "the unconfigured closing message must not suggest starting the control plane: $unconfigured_out"
+grep -qE 'sudo env SH_GITHUB_CLIENT_ID=.* SH_PUBLIC_HARNESS_URL=' <<<"$unconfigured_out" ||
+  fail "the unconfigured closing message must name the sudo env route: $unconfigured_out"
+pass "unconfigured closing message: both settings and the sudo env route, no bare systemctl start"
 
 # The closing message must match the behaviour we actually land on: the supervisor is enabled
 # but not started, so the message must say to set SH_TURNS_PER_WORKER and then start it --
