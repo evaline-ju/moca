@@ -1103,9 +1103,18 @@ pass "Redis's lack of a volume is documented in both the script and the README"
 # configuration disclosure to the whole subnet, and no unit test can see the difference.
 CONFIG_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/packages/supervisor/src/config.ts"
 if grep -q "readHost(env, 'SH_ADMIN_HOST', '127\.0\.0\.1')" "$CONFIG_SRC"; then
-  pass "admin listener defaults to 127.0.0.1"
+  pass "admin listener defaults to 127.0.0.1 in code"
 else
   fail "admin listener must default to 127.0.0.1 (found: $(grep -n "readHost.*SH_ADMIN_HOST" "$CONFIG_SRC"))"
+fi
+
+# The deployment must not ship SH_ADMIN_HOST set to anything other than 127.0.0.1 (or commented out).
+# An operator could uncomment it, but the default shipped must be safe.
+bad_admin_hosts=$(grep -E '^[^#]*SH_ADMIN_HOST=' "$UNIT_SUPERVISOR" "$ENV_SRC_DIR/supervisor.env.example" 2>/dev/null | grep -v '=127\.0\.0\.1$' || true)
+if [ -z "$bad_admin_hosts" ]; then
+  pass "no uncommented SH_ADMIN_HOST= with a non-loopback value in unit or env template"
+else
+  fail "SH_ADMIN_HOST must default to loopback in shipped unit and env; found: $bad_admin_hosts"
 fi
 
 # The unit file must not publish the admin port, and must not set it equal to PORT -- readConfig
