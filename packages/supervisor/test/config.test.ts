@@ -119,7 +119,9 @@ describe('readConfig', () => {
 
   it('refuses a hostname or garbage for SH_ADMIN_HOST, naming the variable', () => {
     // A hostname would make the bind depend on DNS at boot; the kubelet probes a pod IP anyway.
-    expect(() => readConfig(env({ SH_ADMIN_HOST: 'localhost' }))).toThrow(/SH_ADMIN_HOST='localhost'/);
+    expect(() => readConfig(env({ SH_ADMIN_HOST: 'localhost' }))).toThrow(
+      /SH_ADMIN_HOST='localhost'/,
+    );
     expect(() => readConfig(env({ SH_ADMIN_HOST: '0.0.0.0:8081' }))).toThrow(/SH_ADMIN_HOST/);
     expect(() => readConfig(env({ SH_ADMIN_HOST: '999.1.1.1' }))).toThrow(/SH_ADMIN_HOST/);
   });

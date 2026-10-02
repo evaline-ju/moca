@@ -62,7 +62,9 @@ function readHost(env: NodeJS.ProcessEnv, name: string, fallback: string): strin
   const raw = env[name]?.trim();
   if (!raw) return fallback;
   if (isIP(raw) === 0) {
-    throw new Error(`${name}='${raw}' must be an IPv4 or IPv6 address literal, not a hostname or host:port`);
+    throw new Error(
+      `${name}='${raw}' must be an IPv4 or IPv6 address literal, not a hostname or host:port`,
+    );
   }
   return raw;
 }
