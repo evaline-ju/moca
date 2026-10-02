@@ -8,6 +8,7 @@ resources:
   - network-policy-defaults.yaml
   - redis.yaml
   - relay.yaml
+  - supervisor.yaml
 images:
   - name: moca-harness
     newName: ghcr.io/rossoctl/moca

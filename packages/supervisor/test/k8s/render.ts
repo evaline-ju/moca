@@ -61,7 +61,10 @@ export function container(o: K8sObject, name: string) {
 }
 export const envNames = (c: { env?: { name: string }[] }): string[] =>
   (c.env ?? []).map((e) => e.name);
-export const envVar = (c: { env?: { name: string }[] }, name: string) =>
+export const envVar = (
+  c: { env?: { name: string; value?: string; valueFrom?: unknown }[] },
+  name: string,
+): { name: string; value?: string; valueFrom?: unknown } | undefined =>
   (c.env ?? []).find((e) => e.name === name);
 
 /** describe.skipIf reason, printed once so a skip is visible in CI logs rather than silent. */
