@@ -9,6 +9,7 @@ resources:
   - redis.yaml
   - relay.yaml
   - supervisor.yaml
+  - control-plane.yaml
 images:
   - name: moca-harness
     newName: ghcr.io/rossoctl/moca
