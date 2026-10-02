@@ -175,6 +175,29 @@ export async function cmdRun(rt: Runtime, io: Io, opts: RunOptions): Promise<num
 // stdout carries only the result (an aligned table, or one JSON document with --json), and every
 // message, including "nothing to list", goes to stderr. Exit codes are those of `run`.
 
+class Cancelled extends Error {}
+
+/**
+ * `work`, or a Cancelled rejection once `signal` aborts. The work itself is abandoned, not stopped
+ * (the control-plane client takes no signal), so main.ts exits rather than wait for it.
+ */
+function cancellable<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return work;
+  if (signal.aborted) return Promise.reject(new Cancelled());
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(new Cancelled());
+    signal.addEventListener('abort', abort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+  });
+}
+
+/** The exit code for a failed request: 130 if it was cancelled, else 1 with the reason. */
+function failed(io: Io, err: unknown): number {
+  if (err instanceof Cancelled) return 130;
+  io.err(describeError(err));
+  return 1;
+}
+
 /** Columns padded to their widest cell; the last column is left ragged. */
 function table(rows: string[][]): string {
   const widths = rows[0]!.map((_, i) => Math.max(...rows.map((r) => r[i]!.length)));
@@ -207,23 +230,27 @@ async function allSessions(rt: Runtime & { cp: NonNullable<Runtime['cp']> }) {
   }
 }
 
-export async function cmdSessions(rt: Runtime, io: Io, opts: { json: boolean }): Promise<number> {
+export interface ManageOptions {
+  json: boolean;
+  signal?: AbortSignal;
+}
+
+export async function cmdSessions(rt: Runtime, io: Io, opts: ManageOptions): Promise<number> {
   if (!ready(rt, io)) return 2;
   let sessions: SessionSummary[];
   try {
-    sessions = await allSessions(rt);
+    sessions = await cancellable(allSessions(rt), opts.signal);
   } catch (err) {
-    io.err(describeError(err));
-    return 1;
+    return failed(io, err);
   }
   // Titles are local (renamed in the TUI, or the first prompt); the control plane keeps none.
+  // No turn count: the control plane reports one, but nothing writes it yet, so it is always 0.
   const rows = sessions.map((s) => ({
     sessionId: s.sessionId,
     title: rt.transcripts?.load(s.sessionId)?.title ?? null,
     state: s.state,
     createdAt: s.createdAt,
     lastTurnAt: s.lastTurnAt,
-    turns: s.turns,
   }));
   if (opts.json) {
     io.out(JSON.stringify({ sessions: rows }) + '\n');
@@ -233,13 +260,13 @@ export async function cmdSessions(rt: Runtime, io: Io, opts: { json: boolean }):
     io.err('no sessions');
     return 0;
   }
-  const head = ['ID', 'CREATED (UTC)', 'LAST TURN (UTC)', 'TURNS', 'TITLE'];
+  const head = ['ID', 'STATE', 'CREATED (UTC)', 'LAST TURN (UTC)', 'TITLE'];
   const body = rows.map((r) =>
     [
       r.sessionId,
+      r.state,
       utc(r.createdAt),
       r.lastTurnAt === null ? '-' : utc(r.lastTurnAt),
-      String(r.turns),
       r.title ?? '',
     ].map(sanitizeRemote),
   );
@@ -250,16 +277,15 @@ export async function cmdSessions(rt: Runtime, io: Io, opts: { json: boolean }):
 export async function cmdSessionDelete(
   rt: Runtime,
   io: Io,
-  opts: { id: string; json: boolean },
+  opts: ManageOptions & { id: string },
 ): Promise<number> {
   if (!ready(rt, io)) return 2;
   let status: 'deleted' | 'accepted';
   try {
     // Through the session manager, so the local history goes too.
-    status = await sessionManager(rt).remove(opts.id);
+    status = await cancellable(sessionManager(rt).remove(opts.id), opts.signal);
   } catch (err) {
-    io.err(describeError(err));
-    return 1;
+    return failed(io, err);
   }
   const id = sanitizeRemote(opts.id);
   io.err(
@@ -271,15 +297,11 @@ export async function cmdSessionDelete(
   return 0;
 }
 
-export async function cmdCredentials(
-  rt: Runtime,
-  io: Io,
-  opts: { json: boolean },
-): Promise<number> {
+export async function cmdCredentials(rt: Runtime, io: Io, opts: ManageOptions): Promise<number> {
   if (!ready(rt, io)) return 2;
   let rows;
   try {
-    rows = (await rt.cp.listCredentials()).map((c) => ({
+    rows = (await cancellable(rt.cp.listCredentials(), opts.signal)).map((c) => ({
       name: c.name,
       kind: c.kind,
       consumer: c.consumer,
@@ -287,8 +309,7 @@ export async function cmdCredentials(
       endpoint: c.endpoint ?? null,
     }));
   } catch (err) {
-    io.err(describeError(err));
-    return 1;
+    return failed(io, err);
   }
   if (opts.json) {
     io.out(JSON.stringify({ credentials: rows }) + '\n');
@@ -306,13 +327,12 @@ export async function cmdCredentials(
   return 0;
 }
 
-export interface CredentialAddOptions {
+export interface CredentialAddOptions extends ManageOptions {
   name: string;
   kind: string;
   consumer: CredentialConsumer;
   hosts: string[];
   endpoint?: string;
-  json: boolean;
   /** The secret comes only from stdin, never argv, so it stays out of shell history and `ps`. */
   readStdin: () => Promise<string>;
   stdinIsTTY: boolean;
@@ -332,7 +352,11 @@ export async function cmdCredentialAdd(
     endpoint: opts.endpoint ?? '',
   };
   // Everything but the secret is checked before stdin is read, so a typo costs no re-piping.
-  const early = descriptionProblem(values);
+  // The server refuses an endpoint for any other consumer; the TUI form hides the field there.
+  const early =
+    opts.endpoint !== undefined && opts.consumer !== 'inference'
+      ? '--endpoint only applies to --consumer inference'
+      : descriptionProblem(values);
   if (early) {
     io.err(early);
     return 2;
@@ -343,7 +367,15 @@ export async function cmdCredentialAdd(
     );
     return 2;
   }
-  const read = secretFromStdin(opts.kind, await opts.readStdin());
+  // Said, so a pipe with no writer yet does not look like a hang.
+  io.err('reading the secret from stdin…');
+  let text: string;
+  try {
+    text = await cancellable(opts.readStdin(), opts.signal);
+  } catch (err) {
+    return failed(io, err);
+  }
+  const read = secretFromStdin(opts.kind, text);
   if ('problem' in read) {
     io.err(read.problem);
     return 2;
@@ -355,10 +387,9 @@ export async function cmdCredentialAdd(
   }
   const { name, req } = credentialRequest(values, read.secret);
   try {
-    await rt.cp.putCredential(name, req);
+    await cancellable(rt.cp.putCredential(name, req), opts.signal);
   } catch (err) {
-    io.err(describeError(err));
-    return 1;
+    return failed(io, err);
   }
   io.err(`stored credential ${sanitizeRemote(name)}`);
   if (opts.json) io.out(JSON.stringify({ name, status: 'stored' }) + '\n');
@@ -368,16 +399,23 @@ export async function cmdCredentialAdd(
 export async function cmdCredentialDelete(
   rt: Runtime,
   io: Io,
-  opts: { name: string; json: boolean },
+  opts: ManageOptions & { name: string },
 ): Promise<number> {
   if (!ready(rt, io)) return 2;
+  const name = sanitizeRemote(opts.name);
   try {
-    await rt.cp.deleteCredential(opts.name);
+    // The server answers 204 for a name that never existed (no existence oracle), but the owner
+    // may list their own names, so a typo in a cleanup script is reported rather than "deleted".
+    const owned = await cancellable(rt.cp.listCredentials(), opts.signal);
+    if (!owned.some((c) => c.name === opts.name)) {
+      io.err(`no credential named ${name}`);
+      return 1;
+    }
+    await cancellable(rt.cp.deleteCredential(opts.name), opts.signal);
   } catch (err) {
-    io.err(describeError(err));
-    return 1;
+    return failed(io, err);
   }
-  io.err(`deleted credential ${sanitizeRemote(opts.name)}`);
+  io.err(`deleted credential ${name}`);
   if (opts.json) io.out(JSON.stringify({ name: opts.name, status: 'deleted' }) + '\n');
   return 0;
 }

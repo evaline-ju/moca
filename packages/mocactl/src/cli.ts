@@ -104,6 +104,7 @@ export async function main(
 
   const [command, ...rest] = positionals;
   const json = values.json === true;
+  const { signal } = deps;
   if (!(command === 'credentials' && rest[0] === 'add')) {
     const stray = CREDENTIAL_FLAGS.find((f) => values[f] !== undefined);
     if (stray) {
@@ -144,17 +145,17 @@ export async function main(
     }
     case 'sessions': {
       const [sub, id, ...extra] = rest;
-      if (sub === undefined) return cmdSessions(rt, io, { json });
+      if (sub === undefined) return cmdSessions(rt, io, { json, signal });
       if (sub !== 'delete') return unknown(io, 'sessions', sub);
       if (id === undefined || extra.length > 0) return usage(io);
-      return cmdSessionDelete(rt, io, { id, json });
+      return cmdSessionDelete(rt, io, { id, json, signal });
     }
     case 'credentials': {
       const [sub, name, ...extra] = rest;
-      if (sub === undefined) return cmdCredentials(rt, io, { json });
+      if (sub === undefined) return cmdCredentials(rt, io, { json, signal });
       if (sub !== 'add' && sub !== 'delete') return unknown(io, 'credentials', sub);
       if (name === undefined || extra.length > 0) return usage(io);
-      if (sub === 'delete') return cmdCredentialDelete(rt, io, { name, json });
+      if (sub === 'delete') return cmdCredentialDelete(rt, io, { name, json, signal });
       const { readStdin } = deps;
       if (!readStdin) {
         io.err('reading stdin is not wired yet');
@@ -170,6 +171,7 @@ export async function main(
           .filter(Boolean),
         endpoint: values.endpoint,
         json,
+        signal,
         readStdin,
         stdinIsTTY: deps.stdinIsTTY === true,
       });

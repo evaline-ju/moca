@@ -1,4 +1,4 @@
-import { CONSUMERS, KNOWN_KINDS } from '../../core/credential-checks.js';
+import { CONSUMERS, KNOWN_KINDS, kindFields } from '../../core/credential-checks.js';
 import type { FormField } from '../Form.js';
 
 const LABELS: Record<string, string> = {
@@ -41,14 +41,14 @@ export function credentialFields(): FormField[] {
       key,
       label: LABELS[key] ?? key,
       masked: true,
-      visible: (v: Record<string, string>) => (KNOWN_KINDS[v.kind] ?? []).includes(key),
+      visible: (v: Record<string, string>) => (kindFields(v.kind) ?? []).includes(key),
     })),
     {
       key: 'secretPairs',
       label: 'Secret fields',
       masked: true,
       hint: 'key=value, key=value — the fields this kind requires',
-      visible: (v) => !(v.kind in KNOWN_KINDS),
+      visible: (v) => !kindFields(v.kind),
     },
   ];
 }

@@ -10,6 +10,11 @@ export const KNOWN_KINDS: Record<string, string[]> = {
   'oauth2-token': ['accessToken'],
 };
 
+/** A known kind's secret fields; own keys only, so `--kind toString` is just an unknown kind. */
+export function kindFields(kind: string): string[] | undefined {
+  return Object.hasOwn(KNOWN_KINDS, kind) ? KNOWN_KINDS[kind] : undefined;
+}
+
 export const CONSUMERS: CredentialConsumer[] = ['inference', 'sandbox-egress', 'control-plane'];
 export const CREDENTIAL_NAME = /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/;
 
@@ -20,23 +25,12 @@ const ANTHROPIC_API_HOST = 'api.anthropic.com';
 /**
  * The control plane's write-time inference checks (credential-store.ts, #368), mirrored so the form
  * and the CLI say what to change before submitting. The server stays authoritative; an unknown
- * kind is left to it. Messages name key PREFIXES only, never the value.
+ * kind is left to it. This half needs no secret; inferenceSecretProblem is the other.
  */
-function inferenceShapeProblem(
-  values: Record<string, string>,
-  secretFields: Record<string, string>,
-): string | undefined {
-  const fields = KNOWN_KINDS[values.kind];
-  if (!fields || fields.length !== 1) return undefined;
-  const secret = secretFields[fields[0]!] ?? '';
+function inferenceEndpointProblem(values: Record<string, string>): string | undefined {
+  if (kindFields(values.kind)?.length !== 1) return undefined;
   const bearer = BEARER_KINDS.has(values.kind);
   const endpoint = values.endpoint?.trim() ?? '';
-  if (secret.startsWith('sk-ant-oat')) {
-    return 'Anthropic OAuth tokens (sk-ant-oat…) are not supported: use an API key (sk-ant-api…) with kind api-key';
-  }
-  if (bearer && secret.startsWith('sk-ant-api')) {
-    return 'an Anthropic API key (sk-ant-api…) is sent as x-api-key: choose kind api-key, endpoint https://api.anthropic.com';
-  }
   if (!endpoint) return undefined;
   let url: URL;
   try {
@@ -50,6 +44,27 @@ function inferenceShapeProblem(
     return `use https://${ANTHROPIC_API_HOST} as the endpoint (no /v1)`;
   }
   return undefined;
+}
+
+/** The secret's half of the inference checks. Messages name key PREFIXES only, never the value. */
+function inferenceSecretProblem(
+  values: Record<string, string>,
+  secretFields: Record<string, string>,
+): string | undefined {
+  const fields = kindFields(values.kind);
+  if (fields?.length !== 1) return undefined;
+  const secret = secretFields[fields[0]!] ?? '';
+  if (secret.startsWith('sk-ant-oat')) {
+    return 'Anthropic OAuth tokens (sk-ant-oat…) are not supported: use an API key (sk-ant-api…) with kind api-key';
+  }
+  if (BEARER_KINDS.has(values.kind) && secret.startsWith('sk-ant-api')) {
+    return 'an Anthropic API key (sk-ant-api…) is sent as x-api-key: choose kind api-key, endpoint https://api.anthropic.com';
+  }
+  return undefined;
+}
+
+function singleSecretProblem(kind: string, keys: string[]): string {
+  return `an inference credential needs a single-secret kind; '${kind}' has ${keys.length} (${keys.join(', ')})`;
 }
 
 function parseHosts(text: string): string[] {
@@ -70,13 +85,16 @@ function parsePairs(text: string): Record<string, string> {
 
 /** The form's secret: a known kind's own fields, or the free-form `secretPairs` otherwise. */
 function formSecret(values: Record<string, string>): Record<string, string> {
-  const known = KNOWN_KINDS[values.kind];
+  const known = kindFields(values.kind);
   return known
     ? Object.fromEntries(known.map((k) => [k, values[k] ?? '']))
     : parsePairs(values.secretPairs ?? '');
 }
 
-/** The checks that need no secret: name, consumer and hosts. */
+/**
+ * The checks that need no secret: name, consumer, hosts and, for inference, a known kind's arity
+ * and the endpoint. An unknown kind's arity depends on the secret, so credentialProblem has it.
+ */
 export function descriptionProblem(values: Record<string, string>): string | undefined {
   if (!CREDENTIAL_NAME.test(values.name ?? ''))
     return 'name: lower-case letters, digits and dashes, 1-40 characters';
@@ -84,7 +102,10 @@ export function descriptionProblem(values: Record<string, string>): string | und
     return `consumer must be one of ${CONSUMERS.join(', ')}`;
   if (parseHosts(values.hosts ?? '').length === 0)
     return 'destination hosts: at least one host is required';
-  return undefined;
+  if (values.consumer !== 'inference') return undefined;
+  const fields = kindFields(values.kind);
+  if (fields && fields.length !== 1) return singleSecretProblem(values.kind, fields);
+  return inferenceEndpointProblem(values);
 }
 
 /**
@@ -98,11 +119,9 @@ export function credentialProblem(
 ): string | undefined {
   const described = descriptionProblem(values);
   if (described || values.consumer !== 'inference') return described;
-  const keys = KNOWN_KINDS[values.kind] ?? Object.keys(secret);
-  if (keys.length !== 1) {
-    return `an inference credential needs a single-secret kind; '${values.kind}' has ${keys.length} (${keys.join(', ')})`;
-  }
-  return inferenceShapeProblem(values, secret);
+  const keys = kindFields(values.kind) ?? Object.keys(secret);
+  if (keys.length !== 1) return singleSecretProblem(values.kind, keys);
+  return inferenceSecretProblem(values, secret);
 }
 
 export function credentialRequest(
@@ -136,12 +155,21 @@ export function secretFromStdin(
   kind: string,
   text: string,
 ): { secret: Record<string, string> } | { problem: string } {
-  const fields = KNOWN_KINDS[kind];
+  const fields = kindFields(kind);
   if (fields?.length === 1) {
+    const field = fields[0]!;
     const value = text.replace(/\r?\n$/, '');
-    if (!value) return { problem: 'no secret on stdin' };
-    if (/[\r\n]/.test(value)) return { problem: `the ${fields[0]} must be one line` };
-    return { secret: { [fields[0]!]: value } };
+    if (!value.trim()) return { problem: 'no secret on stdin' };
+    if (/[\r\n]/.test(value)) return { problem: `the ${field} must be one line` };
+    // \s covers a UTF-8 BOM, which would also slip past the key-prefix checks.
+    if (value.trim() !== value) {
+      return { problem: `the ${field} starts or ends with whitespace; pipe it with printf %s` };
+    }
+    // The field=value form is for kinds with several fields; here it would be stored as the secret.
+    if (value.startsWith(`${field}=`)) {
+      return { problem: `pipe the ${field} itself, without a leading "${field}="` };
+    }
+    return { secret: { [field]: value } };
   }
   const secret: Record<string, string> = {};
   for (const line of text.split(/\r?\n/)) {

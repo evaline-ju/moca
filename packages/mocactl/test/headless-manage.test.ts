@@ -43,7 +43,7 @@ describe('cmdSessions', () => {
     const listSessions = vi.fn(async (opts?: { cursor?: number }) =>
       opts?.cursor === undefined
         ? { sessions: [summary('s-1')], nextCursor: 7 }
-        : { sessions: [summary('s-2', { lastTurnAt: null, turns: 0 })], nextCursor: null },
+        : { sessions: [summary('s-2', { lastTurnAt: null, state: 'deleting' })], nextCursor: null },
     );
     const rt = testRuntime({ cp: fakeControlPlane({ listSessions }) });
     rt.transcripts!.rename('s-1', 'fix \u001b]52;c;aGk=\u0007the build');
@@ -51,9 +51,11 @@ describe('cmdSessions', () => {
     expect(await cmdSessions(rt, o, { json: false })).toBe(0);
     expect(listSessions.mock.calls.map((c) => c[0]?.cursor)).toEqual([undefined, 7]);
     const lines = o.stdout.trimEnd().split('\n');
-    expect(lines[0]).toMatch(/^ID\s+CREATED \(UTC\)\s+LAST TURN \(UTC\)\s+TURNS\s+TITLE$/);
-    expect(lines[1]).toMatch(/^s-1\s+2026-09-30 09:15\s+2026-09-30 09:20\s+2\s+fix the build$/);
-    expect(lines[2]).toMatch(/^s-2\s+2026-09-30 09:15\s+-\s+0\s*$/);
+    expect(lines[0]).toMatch(/^ID\s+STATE\s+CREATED \(UTC\)\s+LAST TURN \(UTC\)\s+TITLE$/);
+    expect(lines[1]).toMatch(
+      /^s-1\s+active\s+2026-09-30 09:15\s+2026-09-30 09:20\s+fix the build$/,
+    );
+    expect(lines[2]).toMatch(/^s-2\s+deleting\s+2026-09-30 09:15\s+-$/);
   });
 
   it('prints the documented --json shape', async () => {
@@ -76,7 +78,6 @@ describe('cmdSessions', () => {
           state: 'active',
           createdAt: Date.UTC(2026, 8, 30, 9, 15),
           lastTurnAt: Date.UTC(2026, 8, 30, 9, 20),
-          turns: 2,
         },
         {
           sessionId: 's-2',
@@ -84,7 +85,6 @@ describe('cmdSessions', () => {
           state: 'active',
           createdAt: Date.UTC(2026, 8, 30, 9, 15),
           lastTurnAt: Date.UTC(2026, 8, 30, 9, 20),
-          turns: 2,
         },
       ],
     });
@@ -150,7 +150,7 @@ describe('cmdSessionDelete', () => {
     expect(o.stderr.join('\n')).toContain('finishes in the background');
   });
 
-  it('exits 1 when the session is not there', async () => {
+  it('exits 1 when the session is not there, and drops its orphaned local history', async () => {
     const rt = testRuntime({
       cp: fakeControlPlane({
         deleteSession: async () => {
@@ -158,9 +158,24 @@ describe('cmdSessionDelete', () => {
         },
       }),
     });
+    rt.transcripts!.rename('s-x', 'old');
     const o = io();
     expect(await cmdSessionDelete(rt, o, { id: 's-x', json: false })).toBe(1);
     expect(o.stderr.join('\n')).toContain('no longer exists');
+    expect(rt.transcripts!.has('s-x')).toBe(false);
+  });
+
+  it('keeps the local history when the delete fails for another reason', async () => {
+    const rt = testRuntime({
+      cp: fakeControlPlane({
+        deleteSession: async () => {
+          throw new ApiError('control-plane', 503, 'unavailable');
+        },
+      }),
+    });
+    rt.transcripts!.rename('s-1', 'old');
+    expect(await cmdSessionDelete(rt, io(), { id: 's-1', json: false })).toBe(1);
+    expect(rt.transcripts!.has('s-1')).toBe(true);
   });
 });
 
@@ -291,16 +306,26 @@ describe('cmdCredentialAdd', () => {
   });
 
   it.each([
-    ['a terminal on stdin', { stdinIsTTY: true }, 'pipe the secret'],
     ['an empty secret', { readStdin: async () => '\n' }, 'no secret on stdin'],
+    ['a blank secret', { readStdin: async () => '   \n' }, 'no secret on stdin'],
     ['a multi-line secret', { readStdin: async () => 'one\ntwo\n' }, 'one line'],
+    ['leading whitespace', { readStdin: async () => ' sk-ant-api03-x' }, 'whitespace'],
+    ['a UTF-8 BOM', { readStdin: async () => '\uFEFFsk-ant-api03-x' }, 'whitespace'],
+    [
+      'a key= prefix',
+      { readStdin: async () => 'key=sk-ant-api03-x\n' },
+      'without a leading "key="',
+    ],
     [
       'a missing field',
-      { kind: 'basic', consumer: 'sandbox-egress', readStdin: async () => 'username=ada\n' },
+      {
+        kind: 'basic',
+        consumer: 'sandbox-egress',
+        endpoint: undefined,
+        readStdin: async () => 'username=ada\n',
+      },
       'password=',
     ],
-    ['no host', { hosts: [] }, 'at least one host'],
-    ['a bad name', { name: 'Bad_Name' }, 'name:'],
   ] as Array<[string, Partial<CredentialAddOptions>, string]>)(
     'exits 2 without storing anything for %s',
     async (_label, over, message) => {
@@ -311,6 +336,62 @@ describe('cmdCredentialAdd', () => {
       expect(o.stderr.join('\n')).toContain(message);
     },
   );
+
+  // Everything that needs no secret is refused before stdin is read.
+  it.each([
+    ['a terminal on stdin', { stdinIsTTY: true }, 'pipe the secret'],
+    ['no host', { hosts: [] }, 'at least one host'],
+    ['a bad name', { name: 'Bad_Name' }, 'name:'],
+    ['a multi-field kind for inference', { kind: 'basic' }, 'single-secret kind'],
+    ['an endpoint that is not a URL', { endpoint: 'api.anthropic.com' }, 'absolute URL'],
+    ['an endpoint with /v1', { endpoint: 'https://api.anthropic.com/v1' }, 'no /v1'],
+    [
+      '--endpoint for another consumer',
+      { consumer: 'sandbox-egress', kind: 'bearer' },
+      '--endpoint only applies to --consumer inference',
+    ],
+  ] as Array<[string, Partial<CredentialAddOptions>, string]>)(
+    'exits 2 before reading stdin for %s',
+    async (_label, over, message) => {
+      const { rt, puts } = recording();
+      const readStdin = vi.fn(async () => 'sk-ant-api03-secret');
+      const o = io();
+      expect(await cmdCredentialAdd(rt, o, adding({ readStdin, ...over }))).toBe(2);
+      expect(readStdin).not.toHaveBeenCalled();
+      expect(puts).toEqual([]);
+      expect(o.stderr.join('\n')).toContain(message);
+    },
+  );
+
+  it.each(['toString', 'constructor', 'hasOwnProperty'])(
+    'treats --kind %s as an unknown kind',
+    async (kind) => {
+      const { rt, puts } = recording();
+      const o = io();
+      const opts = adding({
+        kind,
+        consumer: 'sandbox-egress',
+        hosts: ['x.example'],
+        endpoint: undefined,
+        readStdin: async () => 'token=abc\n',
+      });
+      expect(await cmdCredentialAdd(rt, o, opts)).toBe(0);
+      expect(puts[0]!.req.secret).toEqual({ token: 'abc' });
+    },
+  );
+
+  it('says on stderr that it is reading stdin, and exits 130 on Ctrl-C while waiting', async () => {
+    const { rt, puts } = recording();
+    const ac = new AbortController();
+    const o = io();
+    const opts = adding({ signal: ac.signal, readStdin: () => new Promise<string>(() => {}) });
+    const pending = cmdCredentialAdd(rt, o, opts);
+    await vi.waitFor(() => expect(o.stderr).toContain('reading the secret from stdin…'));
+    ac.abort();
+    expect(await pending).toBe(130);
+    expect(puts).toEqual([]);
+    expect(o.stdout).toBe('');
+  });
 
   it('names the fix for a mis-shaped inference secret without echoing it', async () => {
     const { rt, puts } = recording();
@@ -344,12 +425,38 @@ describe('cmdCredentialAdd', () => {
 });
 
 describe('cmdCredentialDelete', () => {
+  const owned = async () => [credential('anthropic')];
+
   it('deletes the credential', async () => {
     const deleteCredential = vi.fn(async () => undefined);
-    const rt = testRuntime({ cp: fakeControlPlane({ deleteCredential }) });
+    const rt = testRuntime({ cp: fakeControlPlane({ listCredentials: owned, deleteCredential }) });
     const o = io();
     expect(await cmdCredentialDelete(rt, o, { name: 'anthropic', json: true })).toBe(0);
     expect(deleteCredential).toHaveBeenCalledWith('anthropic');
     expect(JSON.parse(o.stdout)).toEqual({ name: 'anthropic', status: 'deleted' });
+  });
+
+  it('exits 1 for a name the user owns no credential of, without deleting', async () => {
+    const deleteCredential = vi.fn(async () => undefined);
+    const rt = testRuntime({ cp: fakeControlPlane({ listCredentials: owned, deleteCredential }) });
+    const o = io();
+    expect(await cmdCredentialDelete(rt, o, { name: 'anthropc', json: true })).toBe(1);
+    expect(deleteCredential).not.toHaveBeenCalled();
+    expect(o.stdout).toBe('');
+    expect(o.stderr).toContain('no credential named anthropc');
+  });
+});
+
+describe('Ctrl-C', () => {
+  it('exits 130 from a listing that is still waiting on the control plane', async () => {
+    const ac = new AbortController();
+    const rt = testRuntime({
+      cp: fakeControlPlane({ listCredentials: () => new Promise(() => {}) }),
+    });
+    const o = io();
+    const pending = cmdCredentials(rt, o, { json: false, signal: ac.signal });
+    ac.abort();
+    expect(await pending).toBe(130);
+    expect(o.stdout).toBe('');
   });
 });

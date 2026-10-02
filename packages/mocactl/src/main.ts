@@ -3,7 +3,7 @@ import { main } from './cli.js';
 const ac = new AbortController();
 process.once('SIGINT', () => ac.abort());
 
-process.exitCode = await main(
+const code = await main(
   process.argv.slice(2),
   process.env,
   { out: (s) => void process.stdout.write(s), err: (s) => void process.stderr.write(s + '\n') },
@@ -19,3 +19,7 @@ process.exitCode = await main(
     startInteractive: async (rt, opts) => (await import('./start.js')).startInteractive(rt, opts),
   },
 );
+// After a Ctrl-C, a listing or a stdin read may still be pending (they are abandoned, not
+// stopped), and either would keep the process alive; exit once stdout has drained.
+if (ac.signal.aborted) process.stdout.write('', () => process.exit(code));
+else process.exitCode = code;

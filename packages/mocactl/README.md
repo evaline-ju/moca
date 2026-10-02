@@ -61,11 +61,11 @@ mocactl run "prompt" [--session ID | --new] [--option inferenceCredential=NAME] 
 
 ```bash
 mocactl sessions [--json]                   # every session you own, all pages
-mocactl sessions delete ID [--json]         # also drops its local history
+mocactl sessions delete ID [--json]         # also drops its local history, even if already gone
 mocactl credentials [--json]                # names, kinds, hosts and endpoints; never secrets
 printf %s "$KEY" | mocactl credentials add NAME --host HOST [--host HOST ...] \
   [--kind KIND] [--consumer CONSUMER] [--endpoint URL] [--json]
-mocactl credentials delete NAME [--json]
+mocactl credentials delete NAME [--json]    # exit 1 if you own no credential of that name
 ```
 
 `mocactl run` continues the session `--session` names, or starts a new one (`--new`, the default).
@@ -73,14 +73,17 @@ mocactl credentials delete NAME [--json]
 `mocactl credentials add` reads the secret from stdin, never from the command line, so it stays
 out of shell history and `ps`; it refuses a terminal on stdin (`read -rs KEY` first, or use
 `/credentials` in the TUI). For a kind with one secret field (`bearer`, `api-key`,
-`oauth2-token`) stdin is the secret itself, one line, its trailing newline dropped; for any other
-kind it is one `field=value` per line (`basic`: `username=…` and `password=…`). `--kind` defaults
-to `bearer` and `--consumer` to `inference`, as in the TUI form; `--host` takes a comma-separated
-list too and is required. The TUI form's checks apply, and a problem names fields, never values.
+`oauth2-token`) stdin is the secret itself, one line, its trailing newline dropped, with no
+`field=` prefix and no surrounding whitespace; for any other kind it is one `field=value` per line
+(`basic`, which is not for inference: `--consumer sandbox-egress`, then `username=…` and
+`password=…`). `--kind` defaults to `bearer` and `--consumer` to `inference`, as in the TUI form;
+`--host` takes a comma-separated list too and is required, and `--endpoint` is for `inference`
+only. The TUI form's checks apply, all but the secret's before stdin is read, and a problem names
+fields, never values. It says on stderr when it starts reading stdin.
 
 Exit codes, for every command: `0` it worked, `1` it failed (the turn, or the control plane
 refused), `2` a usage or setup problem (bad flags, not logged in, no destination for the turn),
-`130` cancelled (Ctrl-C).
+`130` cancelled (Ctrl-C, which also stops a listing or a stdin read that is waiting).
 
 ### Output
 
@@ -91,7 +94,7 @@ their own shapes. These shapes are stable: fields may be added, but none is rena
 
 | Command              | `--json` on stdout                                                                                 |
 | -------------------- | -------------------------------------------------------------------------------------------------- |
-| `sessions`           | `{"sessions":[{"sessionId","title","state","createdAt","lastTurnAt","turns"}]}`                    |
+| `sessions`           | `{"sessions":[{"sessionId","title","state","createdAt","lastTurnAt"}]}`                            |
 | `sessions delete`    | `{"sessionId","status"}`, `status` being `deleted`, or `accepted` while the control plane finishes |
 | `credentials`        | `{"credentials":[{"name","kind","consumer","hosts","endpoint"}]}`                                  |
 | `credentials add`    | `{"name","status":"stored"}`                                                                       |

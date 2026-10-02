@@ -245,7 +245,16 @@ export class SessionManager {
   }
 
   async remove(sessionId: string): Promise<'deleted' | 'accepted'> {
-    const result = await this.deps.cp.deleteSession(sessionId);
+    let result: 'deleted' | 'accepted';
+    try {
+      result = await this.deps.cp.deleteSession(sessionId);
+    } catch (err) {
+      // Already gone (deleted from another machine, say): its history here has no session left.
+      if (err instanceof ApiError && err.code === 'session_not_found') {
+        this.deps.transcripts?.delete(sessionId);
+      }
+      throw err;
+    }
     this.deps.transcripts?.delete(sessionId);
     return result;
   }

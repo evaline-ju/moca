@@ -2,6 +2,7 @@ import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { USAGE, main } from '../src/cli.js';
 import type { Io } from '../src/headless.js';
 import type { Runtime } from '../src/runtime.js';
+import { testRuntime } from './helpers/runtime.js';
 
 const io = (): Io & { outs: string[]; errs: string[] } => {
   const o = {
@@ -122,8 +123,6 @@ describe('main', () => {
         'github.com',
         '--host',
         'api.github.com',
-        '--endpoint',
-        'https://x.example',
       ],
       'cmdCredentialAdd',
       {
@@ -131,7 +130,7 @@ describe('main', () => {
         kind: 'bearer',
         consumer: 'sandbox-egress',
         hosts: ['github.com', 'api.github.com'],
-        endpoint: 'https://x.example',
+        endpoint: undefined,
       },
     ],
   ] as Array<[string[], string, Record<string, unknown>]>)(
@@ -164,6 +163,42 @@ describe('main', () => {
     expect(await main(argv, {}, o, { buildRuntime: fakeBuild })).toBe(2);
     expect(o.errs.join('\n')).toContain(message);
   });
+
+  // Through the real cmdCredentialAdd, with a logged-in runtime, so only its own checks refuse.
+  it.each([
+    [
+      'a terminal on stdin',
+      ['credentials', 'add', 'gh', '--host', 'github.com'],
+      true,
+      'pipe the secret',
+    ],
+    [
+      '--endpoint for another consumer',
+      [
+        'credentials',
+        'add',
+        'gh',
+        '--consumer',
+        'sandbox-egress',
+        '--host',
+        'github.com',
+        '--endpoint',
+        'https://x.example',
+      ],
+      false,
+      '--endpoint only applies to --consumer inference',
+    ],
+  ] as Array<[string, string[], boolean, string]>)(
+    'refuses credentials add with %s, before reading stdin',
+    async (_label, argv, stdinIsTTY, message) => {
+      const readStdin = vi.fn(async () => 'secret');
+      const o = io();
+      const build = () => testRuntime();
+      expect(await main(argv, {}, o, { buildRuntime: build, readStdin, stdinIsTTY })).toBe(2);
+      expect(readStdin).not.toHaveBeenCalled();
+      expect(o.errs.join('\n')).toContain(message);
+    },
+  );
 
   it('prints the config warning', async () => {
     const o = io();

@@ -191,13 +191,21 @@ Add one credential with consumer `inference`:
 Or, from a script, with the key on stdin (never on the command line):
 
 ```bash
-read -rs KEY && printf %s "$KEY" | mocactl credentials add anthropic --kind api-key \
+printf 'API key: ' >&2; read -rs KEY; echo >&2
+```
+
+Paste the key at the prompt; nothing echoes. Then the rest, in a block of its own, so a shell
+without bracketed paste (macOS's `/bin/bash` 3.2) cannot take its first line as the key:
+
+```bash
+printf %s "$KEY" | mocactl credentials add anthropic --kind api-key \
   --host api.anthropic.com --endpoint https://api.anthropic.com
+unset KEY
 mocactl credentials
 ```
 
 The same checks apply: a `bearer` kind for an `sk-ant-api…` key is refused before anything is
-sent.
+sent, and so is a key pasted with a `key=` prefix.
 
 > Say: each user's turns spend **their own** credential. The operator-key fallback is off (0a).
 
