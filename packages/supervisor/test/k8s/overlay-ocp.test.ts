@@ -19,9 +19,19 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s overlays/ocp', () => {
       '/tls/tls.key',
       '--disable-authentication',
     ]);
-    expect(tls.image).toMatch(/^ghostunnel\/ghostunnel(:[^@]+)?@sha256:[0-9a-f]{64}$/);
+    expect(tls.image).toMatch(/^docker\.io\/ghostunnel\/ghostunnel(:[^@]+)?@sha256:[0-9a-f]{64}$/);
     const vol = podSpec(dep()).volumes.find((v: { name: string }) => v.name === 'tls');
     expect(vol.secret.secretName).toBe('moca-supervisor-tls');
+  });
+
+  it('hardens the TLS sidecar with proper security context and pod-level UID', () => {
+    const tls = container(dep(), 'tls');
+    expect(tls.securityContext).toEqual({
+      allowPrivilegeEscalation: false,
+      readOnlyRootFilesystem: true,
+      capabilities: { drop: ['ALL'] },
+    });
+    expect(podSpec(dep()).securityContext.runAsUser).toBe(65532);
   });
 
   it('routes the supervisor by TLS passthrough to the sidecar, never by an L7 hop', () => {
