@@ -155,7 +155,12 @@ export async function startSupervisor(opts: {
 
   // Separate listener from the data-path `net.Server` above: an `http.Server` here would add
   // per-connection HTTP parsing to the hot path for every worker connection, not just /metrics.
-  const admin = await startAdminServer({ pool, port: config.adminPort, env: process.env });
+  const admin = await startAdminServer({
+    pool,
+    port: config.adminPort,
+    host: config.adminHost,
+    env: process.env,
+  });
   log({ event: 'admin_listening', port: admin.port });
 
   return {
