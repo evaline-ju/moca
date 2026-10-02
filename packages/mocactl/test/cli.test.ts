@@ -2,6 +2,7 @@ import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { USAGE, main } from '../src/cli.js';
 import type { Io } from '../src/headless.js';
 import type { Runtime } from '../src/runtime.js';
+import { testRuntime } from './helpers/runtime.js';
 
 const io = (): Io & { outs: string[]; errs: string[] } => {
   const o = {
@@ -91,6 +92,113 @@ describe('main', () => {
     expect(start).not.toHaveBeenCalled();
     expect(o.errs.join('\n')).toContain('mocactl run');
   });
+
+  // Each management command, spied on its headless function: [argv, function, the options it gets].
+  it.each([
+    [['sessions'], 'cmdSessions', { json: false }],
+    [['sessions', '--json'], 'cmdSessions', { json: true }],
+    [['sessions', 'delete', 's-1'], 'cmdSessionDelete', { id: 's-1', json: false }],
+    [['credentials', '--json'], 'cmdCredentials', { json: true }],
+    [['credentials', 'delete', 'gh'], 'cmdCredentialDelete', { name: 'gh', json: false }],
+    [
+      ['credentials', 'add', 'anthropic', '--kind', 'api-key', '--host', 'a.example,b.example'],
+      'cmdCredentialAdd',
+      {
+        name: 'anthropic',
+        kind: 'api-key',
+        consumer: 'inference',
+        hosts: ['a.example', 'b.example'],
+        endpoint: undefined,
+        stdinIsTTY: false,
+      },
+    ],
+    [
+      [
+        'credentials',
+        'add',
+        'gh',
+        '--consumer',
+        'sandbox-egress',
+        '--host',
+        'github.com',
+        '--host',
+        'api.github.com',
+      ],
+      'cmdCredentialAdd',
+      {
+        name: 'gh',
+        kind: 'bearer',
+        consumer: 'sandbox-egress',
+        hosts: ['github.com', 'api.github.com'],
+        endpoint: undefined,
+      },
+    ],
+  ] as Array<[string[], string, Record<string, unknown>]>)(
+    'routes %j to %s',
+    async (argv, fn, expected) => {
+      const cmd = vi.fn(async (..._args: unknown[]) => 0);
+      const headless = await import('../src/headless.js');
+      const spy = vi.spyOn(headless, fn as 'cmdSessions').mockImplementation(cmd);
+      onTestFinished(() => spy.mockRestore());
+      const readStdin = async () => 'secret';
+      expect(
+        await main(argv, {}, io(), { buildRuntime: fakeBuild, readStdin, stdinIsTTY: false }),
+      ).toBe(0);
+      expect(cmd).toHaveBeenCalledTimes(1);
+      expect(cmd.mock.calls[0][2]).toMatchObject(expected);
+    },
+  );
+
+  it.each([
+    [['sessions', 'delete'], 'usage'],
+    [['sessions', 'rename', 's-1'], 'unknown sessions command "rename"'],
+    [['sessions', 'delete', 's-1', 's-2'], 'usage'],
+    [['credentials', 'add'], 'usage'],
+    [['credentials', 'delete'], 'usage'],
+    [['credentials', 'show', 'x'], 'unknown credentials command "show"'],
+    [['run', 'hi', '--kind', 'bearer'], '--kind only applies to `mocactl credentials add`'],
+    [['sessions', '--host', 'x'], '--host only applies to `mocactl credentials add`'],
+  ])('rejects %j with exit 2', async (argv, message) => {
+    const o = io();
+    expect(await main(argv, {}, o, { buildRuntime: fakeBuild })).toBe(2);
+    expect(o.errs.join('\n')).toContain(message);
+  });
+
+  // Through the real cmdCredentialAdd, with a logged-in runtime, so only its own checks refuse.
+  it.each([
+    [
+      'a terminal on stdin',
+      ['credentials', 'add', 'gh', '--host', 'github.com'],
+      true,
+      'pipe the secret',
+    ],
+    [
+      '--endpoint for another consumer',
+      [
+        'credentials',
+        'add',
+        'gh',
+        '--consumer',
+        'sandbox-egress',
+        '--host',
+        'github.com',
+        '--endpoint',
+        'https://x.example',
+      ],
+      false,
+      '--endpoint only applies to --consumer inference',
+    ],
+  ] as Array<[string, string[], boolean, string]>)(
+    'refuses credentials add with %s, before reading stdin',
+    async (_label, argv, stdinIsTTY, message) => {
+      const readStdin = vi.fn(async () => 'secret');
+      const o = io();
+      const build = () => testRuntime();
+      expect(await main(argv, {}, o, { buildRuntime: build, readStdin, stdinIsTTY })).toBe(2);
+      expect(readStdin).not.toHaveBeenCalled();
+      expect(o.errs.join('\n')).toContain(message);
+    },
+  );
 
   it('prints the config warning', async () => {
     const o = io();

@@ -1,9 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import {
-  credentialFields,
-  toPutRequest,
-  validateCredential,
-} from '../src/views/overlays/credential-form.js';
+import { toPutRequest, validateCredential } from '../src/core/credential-checks.js';
+import { credentialFields } from '../src/views/overlays/credential-form.js';
 
 const base = {
   name: 'anthropic',
