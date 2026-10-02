@@ -1,4 +1,5 @@
 import { createClient, type RedisClientType } from 'redis';
+import { redactUrl } from './redact-url.js';
 
 export interface SandboxRecord {
   sandboxId: string;
@@ -81,7 +82,7 @@ export class RedisRecordStore implements RecordStore {
       socket: {
         reconnectStrategy: (retries: number) =>
           retries > this.maxReconnectAttempts
-            ? new Error(`redis at ${this.url} unreachable after ${retries} attempts`)
+            ? new Error(`redis at ${redactUrl(this.url)} unreachable after ${retries} attempts`)
             : Math.min(retries * 100, 1000),
       },
     }) as RedisClientType;
@@ -90,7 +91,7 @@ export class RedisRecordStore implements RecordStore {
     // command, so logging is the whole job.
     c.on('error', (err: unknown) => {
       console.error(
-        `RedisRecordStore: redis client error (commands will reject until it reconnects): ${String(err)}`,
+        `RedisRecordStore: redis client error (commands will reject until it reconnects): ${String(err).split(this.url).join(redactUrl(this.url))}`,
       );
     });
     return c;
