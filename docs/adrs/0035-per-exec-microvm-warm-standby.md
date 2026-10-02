@@ -90,7 +90,8 @@ cannot be escaped.
 - **Per-session (or per-run) resident microVM** — conventional, cheaper to build, and it re-creates
   precisely the property this slice removes: state, and any compromise, persisting across a run's tool
   calls. Per-call teardown also reclaims guest memory immediately, which is what makes the density
-  arithmetic work. Retained as the fallback if E10 shows the warm hot path ≥ 15ms on metal.
+  arithmetic work. Retained as the fallback if E10 shows the warm hot path ≥ 15ms on metal. The scope of
+  this rejection is clarified in the 2026-10-02 revision below.
 - **Per-session VM snapshot-suspended between turns** — attractive for density, but a snapshot captures
   guest FS metadata cache, so restoring it repeatedly against a workspace later `Exec`s have mutated is
   unsound. Would force a mount per resume anyway.
@@ -177,6 +178,41 @@ cannot be escaped.
 - Follow-up owed: path confinement and `SANDBOX_TOKEN` delivery on the container path (real, and a
   `remote-worker` change this slice deliberately does not couple to); gVisor/Kata arms; multi-host;
   cost/resource-seconds accounting.
+
+## Revisions
+
+### 2026-10-02 — The resident-microVM rejection scoped this slice, not the sandbox tier
+
+The first alternative above rejects a per-session (or per-run) resident microVM. That rejection set the
+scope of this slice: its goal was to measure how many per-request VMs one host can carry, so every
+command had to get a fresh VM. It is **not** a requirement that every sandbox be per-request, and
+nothing in this ADR's evidence rules resident VMs out.
+
+**Decided:** resident microVMs are open to revisit, as a **separate mode** with its own threat model and
+its own gates, not as a weakening of this one. The guarantees above (no VM reuse, per-call memory
+reclaim, nothing persisting across a run's tool calls) remain the definition of per-`Exec` mode and are
+unchanged.
+
+What a resident mode would have to address, found while assessing one for the exploratory SBX1
+sandbox-service design (kept outside this repository):
+
+- **Gates.** `TestGateNoVMReuse` and `TestGateLeakFreeTeardown` are per-`Exec` gates by definition.
+  `TestGateSnapshotHoldsNoSecrets` and `TestGateClock` assume per-call teardown and per-request clock
+  correction (`remote-worker/internal/vmpool/gates_kvm_test.go`). A resident mode needs its own:
+  process isolation inside a sandbox, secret lifetime, clock drift, and teardown on terminate.
+- **Memory.** Admission charges every VM `PerVMBytes` (guest RAM plus overhead) whatever it uses, and
+  there is no balloon or reclaim; swap stays off. Restored VMs share the golden memfile copy-on-write,
+  but a long-lived guest's dirtied pages are never returned. Resident density must be measured, not
+  inferred from this slice's numbers.
+- **The guest agent** is one-shot: one shared parked `bash`, stdin read in full before the command, no
+  PTY or signals, and it refuses all work after one timeout (`remote-worker/internal/guestagent/agent.go`).
+  A resident mode needs a process protocol, not an extension of this one.
+- **Snapshot-suspend.** The second alternative's objection is restoring a snapshot against a workspace
+  that _other_ `Exec`s mutated. With one resident guest as the workspace's only writer that hazard does
+  not arise, unless something touches the workspace while the guest is suspended. Re-check before
+  relying on it.
+- **Related:** [#274](https://github.com/rossoctl/moca/issues/274) (VM lifetime across `Exec`s) is the
+  same question in a smaller form and should be decided with it.
 
 ---
 
