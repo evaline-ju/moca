@@ -51,8 +51,10 @@ against (Act 5).
 
 **`sudo` must find podman.** The rig's `secure_path` includes `/usr/local/bin`, where podman-static
 installs, so the commands on this page run as written. If `sudo podman version` says
-`command not found` on your host, prefix every `sudo` command here with `env PATH="/usr/local/bin:$PATH"`,
-including 4b's `sudo timeout … sh -c '… podman …'`. Without it, that loop prints
+`command not found` on your host, put `env PATH="/usr/local/bin:$PATH"` **after** `sudo` in every
+`sudo` command here, as in `sudo env PATH="/usr/local/bin:$PATH" podman …`. Before `sudo` it does
+nothing, because sudo looks commands up in its `secure_path`, not the caller's `PATH`. That includes
+4b's `sudo timeout … sh -c '… podman …'`. Without it, that loop prints
 `podman: not found` for 60 s and exits 124 (`deploy/microvm/P4-ON-P6.md`, "Prerequisites").
 
 ## Act 0 — Preparation (operator, the day before)
@@ -121,8 +123,11 @@ Act 4. Follow `deploy/microvm/P4-ON-P6.md`:
    ```
 
    Use one of the two. The shipped unit asserts at least 23G of memory and refuses to start on a
-   smaller host, so a 16 GiB host needs the budget. 8192 is the 16 GiB rig's value; on another size,
-   pick it from `P4-ON-P6.md`, "Install".
+   smaller host, so a 16 GiB host needs the budget. 8192 is the 16 GiB rig's value. On another
+   size, the script's two bounds decide it:
+   - the budget must be above the unit's 4096 MiB reserve, or the script refuses it;
+   - the drop-in it writes asserts 90% of the budget as physical memory, so the host needs at least
+     that much.
 
 3. **Rehearse it:** `p4-turn-smoke.sh --auth --failure-paths` ("Automated check"). Then do **both**
    of its cleanups:
@@ -182,7 +187,9 @@ accounts, `user1` and `user2`, created with `useradd -m -s /usr/sbin/nologin` an
 **Then rehearse one real login** from a laptop, through one of those accounts (1a, 1b). This comes
 after the restriction, so 1a's own check passes. The smokes mint their tokens and never touch
 GitHub, so without this step a device-flow misconfiguration would show up first in front of the
-room.
+room. Close the rehearsal tunnel afterwards, with `ssh -S ~/.ssh/moca-tunnel -O exit <account>@<vm>`.
+Left open overnight, it still holds local ports 8090 and 8080 on the day, and 1a's tunnel exits on
+the bind failure (`ExitOnForwardFailure=yes`).
 
 ### 0d. Check what is running (operator, on the day)
 
@@ -302,7 +309,7 @@ logged in as <your GitHub name>
 > the rest of the line names the fix (#405): `device_flow_disabled` means the OAuth app's **Enable
 > Device Flow** box is unticked, and `GitHub knows no OAuth app with client id …` means
 > `SH_GITHUB_CLIENT_ID` is mistyped. Both are fixed on the VM and on GitHub; nothing the user does
-> helps. 0b's rehearsal login catches both.
+> helps. 0c's rehearsal login catches both.
 
 ### 1c. Store your own inference credential
 
@@ -735,10 +742,12 @@ Each user can delete their credential in **Credentials** first, and revoke the a
 **On the VM, first delete the run's microVM workspaces.** Nothing else will. Idle reclaim walks only
 the running worker's in-memory list. The worker restarts with an empty list and never sweeps a
 directory it doesn't know about, and deleting a session touches only Redis. So the users' files
-(notes, commits) would stay on the host indefinitely. Use the session ids from 4c to 4f, and
-`ls /srv/workspaces/` to find any others from the run:
+(notes, commits) would stay on the host indefinitely. Use the session ids from 4c to 4f. To find
+any others from the run, list the directory newest first: on a host that ran P4 before the demo,
+it also holds earlier workspaces, which this sorts apart from the run's before anything is deleted:
 
 ```bash
+sudo ls -lt /srv/workspaces/
 sudo rm -rf /srv/workspaces/<session id>
 ```
 
@@ -766,9 +775,16 @@ S='research-smoke:research-<id>'
 sudo rm -f "/var/lib/moca-control-plane/$(printf %s "$S" | sha256sum | cut -c1-16).json"
 ```
 
-**Remove the participants' SSH accounts:** `sudo userdel -r user1 user2`. Then delete their
-`Match` block from `/etc/ssh/sshd_config` and apply it with
-`sudo sshd -t && { sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd; }`.
+**Remove the participants' SSH accounts**, one `userdel` per account (it takes a single login):
+
+```bash
+sudo userdel -r user1
+sudo userdel -r user2
+```
+
+`userdel` refuses an account that still has a process, such as an open tunnel, so do this after the
+laptops' `-O exit` above. Then delete their `Match` block from `/etc/ssh/sshd_config` and apply it
+with `sudo sshd -t && { sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd; }`.
 
 The research directories went with the containers, which the re-run recreated. To remove the P4
 tier entirely, follow `deploy/microvm/P4-ON-P6.md`, "Uninstall". Delete the OAuth app when the
