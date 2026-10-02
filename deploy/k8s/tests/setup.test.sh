@@ -202,3 +202,60 @@ reset_state
 (export MOCK_KIND_CLUSTERS='' SH_GITHUB_CLIENT_ID=Iv1.test; expect_ok --target kind --skip-build)
 grep -q '^kind create cluster --name moca$' "$MOCK_LOG" || fail 'a missing kind cluster was not created'
 pass '--skip-build skips images; a missing cluster is created'
+
+echo "== Task 13: secrets"
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.test; expect_ok --target kind --skip-build)
+relay="$(sv moca moca-relay SH_RELAY_TOKEN)"
+exec_t="$(sv moca moca-relay MOCA_RELAY_EXEC_TOKEN)"
+[[ "$relay" =~ ^[0-9a-f]{64}$ && "$exec_t" =~ ^[0-9a-f]{64}$ && "$relay" != "$exec_t" ]] || fail 'relay tokens are not two distinct 32-byte hex values'
+sbx_secrets=("$MOCK_STATE"/moca-sandbox__Secret__*.json) # an unmatched glob stays literal: -e catches it
+[[ ${#sbx_secrets[@]} == 1 && -e "${sbx_secrets[0]}" ]] || fail 'moca-sandbox must hold exactly one Secret'
+[[ "$(jq -c '.data | keys' "$MOCK_STATE/moca-sandbox__Secret__moca-relay-attach.json")" == '["SH_RELAY_TOKEN"]' ]] || fail 'the attach Secret must carry SH_RELAY_TOKEN only'
+[[ "$(sv moca-sandbox moca-relay-attach SH_RELAY_TOKEN)" == "$relay" ]] || fail 'the attach token differs from the relay token'
+pw="$(sv moca moca-redis REDIS_PASSWORD)"
+[[ "$(sv moca moca-redis REDIS_URL)" == "redis://:$pw@redis.moca.svc:6379" ]] || fail 'REDIS_URL does not carry the password'
+sv moca moca-redis redis.conf | grep -qx "requirepass $pw" || fail 'redis.conf does not require the password'
+[[ "$(sv moca moca-mu1 SH_EXCHANGE_TOKEN)" =~ ^[0-9a-f]{64}$ ]] || fail 'no exchange token'
+[[ "$(sv moca moca-mu1 SH_SESSION_TOKEN_PUBLIC_KEYS)" =~ ^[0-9a-f]{16}: ]] || fail 'no public keyset'
+[[ -n "$(sv moca moca-mu1 SH_SESSION_TOKEN_PRIVATE_KEY)" && -n "$(sv moca moca-mu1 SH_CREDENTIAL_KEK)" ]] || fail 'missing MU1 key'
+pass 'a first run creates the four Secrets with the spec §4.2 keys'
+assert_no_secret_in_argv
+pass 'no generated secret value reached any process argv'
+grep 'run moca-genkeys' "$MOCK_LOG" | grep -q '"runAsUser":65532' || fail 'the kind genkeys pod has no explicit UID'
+if grep -E '^kubectl .* apply .*-f -$' "$MOCK_LOG" | grep -v -- '--server-side' | grep -q .; then fail 'a stdin apply without --server-side (it would copy values into an annotation)'; fi
+pass 'genkeys runs as 65532 on kind; every stdin apply is server-side'
+
+snapshot() { for f in "$MOCK_STATE"/*__Secret__*.json; do jq -cS .data "$f"; done; }
+before="$(snapshot)"
+: >"$MOCK_LOG"
+(export SH_GITHUB_CLIENT_ID=Iv1.test; expect_ok --target kind --skip-build)
+[[ "$(snapshot)" == "$before" ]] || fail 'a re-run changed a secret'
+! grep -q 'run moca-genkeys' "$MOCK_LOG" || fail 'a re-run regenerated keys it already had'
+pass 'a re-run rotates nothing'
+
+mu1="$MOCK_STATE/moca__Secret__moca-mu1.json"
+priv="$(sv moca moca-mu1 SH_SESSION_TOKEN_PRIVATE_KEY)"
+xchg="$(sv moca moca-mu1 SH_EXCHANGE_TOKEN)"
+jq 'del(.data.SH_CREDENTIAL_KEK)' "$mu1" >"$mu1.tmp" && mv "$mu1.tmp" "$mu1"
+(export SH_GITHUB_CLIENT_ID=Iv1.test; expect_ok --target kind --skip-build)
+[[ -n "$(sv moca moca-mu1 SH_CREDENTIAL_KEK)" ]] || fail 'a missing KEK was not filled'
+[[ "$(sv moca moca-mu1 SH_SESSION_TOKEN_PRIVATE_KEY)" == "$priv" && "$(sv moca moca-mu1 SH_EXCHANGE_TOKEN)" == "$xchg" ]] || fail 'filling one key changed another'
+pass 'a missing key is patched in alone'
+
+jq 'del(.data.SH_SESSION_TOKEN_PUBLIC_KEYS)' "$mu1" >"$mu1.tmp" && mv "$mu1.tmp" "$mu1"
+(export SH_GITHUB_CLIENT_ID=Iv1.test; expect_fail --target kind --skip-build)
+expect_out 'half a signing keypair'
+pass 'half a keypair is refused, naming the fix'
+
+reset_state
+(export MOCK_GENKEYS_BAD=1 SH_GITHUB_CLIENT_ID=Iv1.test; expect_fail --target kind --skip-build)
+expect_out 'produced no usable SH_CREDENTIAL_KEK'
+[[ ! -f "$MOCK_STATE/moca__Secret__moca-mu1.json" ]] || fail 'a garbled generator left a partial moca-mu1'
+pass 'a garbled key generator writes nothing'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.test; expect_ok --target ocp)
+! grep 'run moca-genkeys' "$MOCK_LOG" | grep -q runAsUser || fail 'the OCP genkeys pod pins a UID (the SCC assigns one)'
+assert_no_secret_in_argv
+pass 'on OCP the genkeys pod takes its UID from the SCC, and no secret reaches argv'

@@ -18,9 +18,7 @@ REPO_ROOT="$(cd "$K8S_DIR/../.." && pwd)"
 KIND_CLUSTER=moca
 KIND_CONTEXT=kind-moca
 MIN_KIND_VERSION=0.24.0
-# shellcheck disable=SC2034 # interface global; its first readers arrive in Tasks 13-14 (remove then)
 NS=moca
-# shellcheck disable=SC2034 # interface global; its first readers arrive in Tasks 13-14 (remove then)
 SBX_NS=moca-sandbox
 LOCAL_HARNESS=dev.local/moca:local
 LOCAL_SANDBOX=dev.local/moca-remote-worker:local
@@ -137,11 +135,129 @@ harness_ref() { if is_kind; then echo "$LOCAL_HARNESS"; else echo "${IMAGE:-ghcr
 # Namespaces alone first, so Secrets can land before any workload that mounts them.
 ensure_namespaces() { kc apply -f "$K8S_DIR/base/namespaces.yaml" >/dev/null; }
 
+# --- Secrets (spec §4.2) -----------------------------------------------------------------------
+# Generated once and never rotated: an existing value is always kept; only a missing key is filled.
+
+# secret_value NAME NS KEY: the decoded value on stdout, or nothing. A missing Secret is the normal
+# first-run case, so it must not fail the pipeline (pipefail) and with it the caller's assignment.
+secret_value() {
+  { kc get secret "$1" -n "$2" -o json 2>/dev/null || true; } | jq -r --arg k "$3" '.data[$k] // empty' | base64 --decode
+}
+
+rand_hex() { openssl rand -hex 32; }
+
+# apply_secret NAME NS KEY...: the values are $S_0, $S_1, ... in this call's environment (callers
+# export them in a subshell). jq reads them from its environment, so no value reaches argv.
+# Server-side apply writes no last-applied-configuration annotation, which would copy every value.
+apply_secret() {
+  local name="$1" ns="$2"
+  shift 2
+  jq -n --arg name "$name" --arg ns "$ns" \
+    '{apiVersion: "v1", kind: "Secret", type: "Opaque", metadata: {name: $name, namespace: $ns},
+      stringData: ([$ARGS.positional | to_entries[] | {key: .value, value: env["S_\(.key)"]}] | from_entries)}' \
+    --args "$@" | kc apply --server-side --force-conflicts --field-manager=moca-setup -f - >/dev/null
+}
+
+ensure_relay_secrets() {
+  local relay exec_token
+  relay="$(secret_value moca-relay "$NS" SH_RELAY_TOKEN)"
+  exec_token="$(secret_value moca-relay "$NS" MOCA_RELAY_EXEC_TOKEN)"
+  [[ -n "$relay" ]] || { log 'generating SH_RELAY_TOKEN'; relay="$(rand_hex)"; }
+  [[ -n "$exec_token" ]] || { log 'generating MOCA_RELAY_EXEC_TOKEN'; exec_token="$(rand_hex)"; }
+  # The relay refuses to boot on equal tokens (MI1 §5 R5); say why here, before it crash-loops.
+  [[ "$relay" != "$exec_token" ]] ||
+    die 'moca-relay holds the same value for SH_RELAY_TOKEN and MOCA_RELAY_EXEC_TOKEN: delete the Secret and re-run'
+  (
+    export S_0="$relay" S_1="$exec_token"
+    apply_secret moca-relay "$NS" SH_RELAY_TOKEN MOCA_RELAY_EXEC_TOKEN
+  )
+  # The sandbox namespace's ONLY Secret: the attach token, and nothing else.
+  (
+    export S_0="$relay"
+    apply_secret moca-relay-attach "$SBX_NS" SH_RELAY_TOKEN
+  )
+}
+
+ensure_redis_secret() {
+  local pw
+  pw="$(secret_value moca-redis "$NS" REDIS_PASSWORD)"
+  [[ -n "$pw" ]] || { log 'generating the Redis password'; pw="$(rand_hex)"; }
+  # URL and config are re-derived from the password on every run, so the three can never disagree.
+  (
+    export S_0="$pw" S_1="redis://:$pw@redis.$NS.svc:6379"
+    S_2="$(printf 'requirepass %s\nappendonly yes\ndir /data\n' "$pw")"
+    export S_2
+    apply_secret moca-redis "$NS" REDIS_PASSWORD REDIS_URL redis.conf
+  )
+}
+
+# The control plane's key generator, run once in the harness image as a pod (no local Docker or
+# Node needed). Pod Security in moca is restricted; on Kind the image (no USER) needs an explicit
+# UID, while OpenShift's SCC assigns one.
+genkeys() {
+  local ref sc
+  ref="$(harness_ref)"
+  if is_kind; then
+    sc='{"runAsNonRoot":true,"runAsUser":65532,"seccompProfile":{"type":"RuntimeDefault"}}'
+  else
+    sc='{"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}'
+  fi
+  kc run moca-genkeys -n "$NS" --rm -i --quiet --restart=Never --image="$ref" \
+    --overrides="$(jq -nc --arg ref "$ref" --argjson sc "$sc" '{spec: {automountServiceAccountToken: false,
+      securityContext: $sc, containers: [{name: "moca-genkeys", image: $ref, imagePullPolicy: "IfNotPresent",
+      workingDir: "/app/packages/control-plane", command: ["node", "--import", "tsx", "src/genkeys.ts"],
+      securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: ["ALL"]}}}]}}')"
+}
+
+GENKEYS_OUT=''
+# generated_value KEY REGEX: KEY's value from GENKEYS_OUT if all of it matches REGEX (the regexes are
+# deploy/compose/install.sh's); dies otherwise.
+generated_value() {
+  local v
+  v="$(printf '%s\n' "$GENKEYS_OUT" | sed -n "s/^$1=//p" | tail -1)"
+  printf '%s\n' "$v" | grep -Eq "^$2\$" || die "the key generator produced no usable $1 (image: $(harness_ref))"
+  printf '%s' "$v"
+}
+
+ensure_mu1_secret() {
+  local priv pub kek xchg
+  priv="$(secret_value moca-mu1 "$NS" SH_SESSION_TOKEN_PRIVATE_KEY)"
+  pub="$(secret_value moca-mu1 "$NS" SH_SESSION_TOKEN_PUBLIC_KEYS)"
+  kek="$(secret_value moca-mu1 "$NS" SH_CREDENTIAL_KEK)"
+  xchg="$(secret_value moca-mu1 "$NS" SH_EXCHANGE_TOKEN)"
+  if { [[ -n "$priv" ]] && [[ -z "$pub" ]]; } || { [[ -z "$priv" ]] && [[ -n "$pub" ]]; }; then
+    die 'moca-mu1 holds half a signing keypair (SH_SESSION_TOKEN_PRIVATE_KEY without SH_SESSION_TOKEN_PUBLIC_KEYS, or the reverse): delete both keys and re-run to generate a matching pair'
+  fi
+  [[ -z "$priv" || -z "$kek" || -z "$xchg" ]] || return 0
+  log 'generating the missing MU1 secrets (in the harness image)'
+  GENKEYS_OUT="$(genkeys)" || die "could not run the key generator in $(harness_ref)"
+  # Every value is extracted and checked BEFORE anything is written, so a garbled generator can
+  # never leave half a set (deploy/compose/install.sh's rule).
+  if [[ -z "$priv" ]]; then
+    priv="$(generated_value SH_SESSION_TOKEN_PRIVATE_KEY '[A-Za-z0-9+/]+=*')"
+    pub="$(generated_value SH_SESSION_TOKEN_PUBLIC_KEYS '[0-9a-f]{16}:[A-Za-z0-9+/]+=*')"
+  fi
+  [[ -n "$kek" ]] || kek="$(generated_value SH_CREDENTIAL_KEK '[A-Za-z0-9+/]{43}=')"
+  [[ -n "$xchg" ]] || xchg="$(generated_value SH_EXCHANGE_TOKEN '[0-9a-f]{64}')"
+  GENKEYS_OUT=''
+  (
+    export S_0="$priv" S_1="$pub" S_2="$kek" S_3="$xchg"
+    apply_secret moca-mu1 "$NS" SH_SESSION_TOKEN_PRIVATE_KEY SH_SESSION_TOKEN_PUBLIC_KEYS SH_CREDENTIAL_KEK SH_EXCHANGE_TOKEN
+  )
+}
+
+ensure_secrets() {
+  ensure_relay_secrets
+  ensure_redis_secret
+  ensure_mu1_secret
+}
+
 main() {
   parse_args "$@"
   preflight
   ensure_images
   ensure_namespaces
+  ensure_secrets
 }
 
 [[ "${SH_SOURCE_ONLY:-}" == 1 ]] || main "$@"
