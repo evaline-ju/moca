@@ -32,12 +32,22 @@ cp "$SRC_K8S/../microvm/mock-anthropic.mjs" "$REPO/deploy/microvm/"
 : >"$REPO/remote-worker/Dockerfile"
 SETUP="$REPO/deploy/k8s/setup.sh"
 
-for cmd in awk base64 basename cat chmod cp cut dirname grep head jq mkdir mktemp mv openssl rm sed sleep sort tail tr wc; do
+for cmd in awk base64 basename cat chmod cp cut dirname grep head jq mkdir mktemp mv openssl rm sed sha256sum shasum sleep sort tail tr wc; do
   real="$(command -v "$cmd" 2>/dev/null)" || continue
   [[ "$real" == /* ]] || continue
   printf '#!/bin/sh\nprintf "%%s %%s\\n" %s "$*" >>"$MOCK_LOG"\nexec %s "$@"\n' "$cmd" "$real" >"$TMP/bin/$cmd"
   chmod +x "$TMP/bin/$cmd"
 done
+# macOS mktemp -d ignores TMPDIR, so the key-cleanup test redirects it here instead: with
+# MOCK_MKTEMP_DIR set, a bare `mktemp -d` lands in that directory, where the test can look.
+real_mktemp="$(command -v mktemp)"
+cat >"$TMP/bin/mktemp" <<SHIM
+#!/bin/sh
+printf "%s %s\\n" mktemp "\$*" >>"\$MOCK_LOG"
+if [ -n "\${MOCK_MKTEMP_DIR-}" ] && [ "\$*" = "-d" ]; then exec $real_mktemp -d "\$MOCK_MKTEMP_DIR/tmp.XXXXXX"; fi
+exec $real_mktemp "\$@"
+SHIM
+chmod +x "$TMP/bin/mktemp"
 
 cat >"$TMP/bin/kubectl" <<'MOCK'
 #!/usr/bin/env bash
@@ -63,9 +73,7 @@ case "${1-} ${2-}" in
   kind=Secret
   [[ "$2" == configmap ]] && kind=ConfigMap
   # MOCK_GET_FAIL=1 fails every Secret GET; MOCK_GET_FAIL=NAME fails only Secret NAME's.
-  # MOCK_GET_CM_FAIL=1 fails every ConfigMap GET.
-  if [[ "$kind" == Secret && -n "${MOCK_GET_FAIL-}" && ("$MOCK_GET_FAIL" == 1 || "$MOCK_GET_FAIL" == "$3") ]] ||
-    [[ "$kind" == ConfigMap && -n "${MOCK_GET_CM_FAIL-}" ]]; then
+  if [[ "$kind" == Secret && -n "${MOCK_GET_FAIL-}" && ("$MOCK_GET_FAIL" == 1 || "$MOCK_GET_FAIL" == "$3") ]]; then
     echo 'Error from server (InternalError): etcd timeout' >&2
     exit 1
   fi
@@ -81,10 +89,13 @@ case "${1-} ${2-}" in
   obj="$(jq 'if .stringData then .data = ((.data // {}) + (.stringData | map_values(@base64))) | del(.stringData) else . end' <<<"$obj")"
   printf '%s\n' "$obj" >"$(store "$(jq -r .metadata.namespace <<<"$obj")" "$(jq -r .kind <<<"$obj")" "$(jq -r .metadata.name <<<"$obj")")" ;;
 "apply -f") : ;; # a file path (namespaces.yaml); stdin applies all go through --server-side
-"apply -k") cp "$3/kustomization.yaml" "$MOCK_STATE/applied-kustomization.yaml" ;;
+"apply -k")
+  if [[ -n "${MOCK_APPLY_K_FAIL-}" ]]; then echo 'error: the server was unable to return a response in the time allotted' >&2; exit 1; fi
+  cp "$3/kustomization.yaml" "$MOCK_STATE/applied-kustomization.yaml" ;;
 "create configmap")
   jq -n --arg n "$3" --arg ns "$ns" '{apiVersion: "v1", kind: "ConfigMap", metadata: {name: $n, namespace: $ns}, data: {"mock-anthropic.mjs": "x"}}' ;;
 "create secret")
+  if [[ -n "${MOCK_TLS_CREATE_FAIL-}" ]]; then echo 'error: failed to load key pair' >&2; exit 1; fi
   jq -n --arg n "$4" --arg ns "$ns" '{apiVersion: "v1", kind: "Secret", type: "kubernetes.io/tls", metadata: {name: $n, namespace: $ns}, data: {"tls.crt": "Y3J0", "tls.key": "a2V5"}}' ;;
 "run moca-genkeys")
   hex() { od -An -tx1 -N"$1" /dev/urandom | tr -d ' \n'; }
@@ -308,17 +319,41 @@ grep -q '^  - ../../overlays/kind$' "$MOCK_STATE/applied-kustomization.yaml" || 
 expect_out 'port-forward svc/moca-supervisor 8080:8080'
 pass 'kind: generated overlay applied; control plane held at 0 without a client id; access printed'
 
+hash_of() { gen | grep -oE 'moca.dev/settings-hash: "[0-9a-f]{64}"' | grep -oE '[0-9a-f]{64}'; }
 reset_state
 (export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
 [[ "$(replicas_of moca-control-plane)" == 1 ]] || fail 'a client id must render the control plane at 1 replica'
-! grep -q 'rollout restart' "$MOCK_LOG" || fail 'a first run restarted the control plane'
-: >"$MOCK_LOG"
+h1="$(hash_of)"
+[[ -n "$h1" ]] || fail 'the generated overlay carries no settings hash on the control plane pod template'
 (export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
-! grep -q 'rollout restart' "$MOCK_LOG" || fail 'an unchanged re-run restarted the control plane'
+[[ "$(hash_of)" == "$h1" ]] || fail 'an unchanged re-run changed the settings hash (it would roll the control plane for nothing)'
 (export SH_GITHUB_CLIENT_ID=Iv1.b; expect_ok --target kind --skip-build)
-grep -q 'rollout restart deployment/moca-control-plane -n moca' "$MOCK_LOG" || fail 'a changed client id did not restart the control plane'
+h2="$(hash_of)"
+[[ -n "$h2" && "$h2" != "$h1" ]] || fail 'a changed client id did not change the settings hash'
 [[ "$(setting SH_GITHUB_CLIENT_ID)" == Iv1.b ]] || fail 'the new client id was not written'
-pass 'a settings change restarts the control plane; no change does not (Review Focus 2)'
+pass 'the settings hash is stable for unchanged settings and changes with them (Review Focus 2)'
+
+# The retry case: a run that wrote client id B and then failed before the roll. Nothing is
+# remembered between runs, so the next run renders B's hash and the apply still rolls the pods.
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
+[[ "$(hash_of)" == "$h1" ]] || fail 'the settings hash depends on more than the settings'
+(export SH_GITHUB_CLIENT_ID=Iv1.b MOCK_APPLY_K_FAIL=1; expect_fail --target kind --skip-build)
+[[ "$(setting SH_GITHUB_CLIENT_ID)" == Iv1.b ]] || fail 'the failed run did not get as far as writing the new settings'
+[[ "$(hash_of)" == "$h1" ]] || fail 'the failed apply still recorded an applied kustomization'
+(export SH_GITHUB_CLIENT_ID=Iv1.b; expect_ok --target kind --skip-build)
+[[ "$(hash_of)" == "$h2" ]] || fail 'after a failed run, the re-run did not roll the control plane onto the new settings'
+! grep -q 'rollout restart' "$MOCK_LOG" || fail 'the control plane is rolled by the hash; nothing may rollout restart it'
+pass 'a settings change survives a failed run: the re-run applies the new hash'
+
+if [[ -x "$TMP/bin/sha256sum" && -x "$TMP/bin/shasum" ]]; then
+  mv "$TMP/bin/sha256sum" "$TMP/bin/sha256sum.off"
+  (export SH_GITHUB_CLIENT_ID=Iv1.b; expect_ok --target kind --skip-build)
+  mv "$TMP/bin/sha256sum.off" "$TMP/bin/sha256sum"
+  [[ "$(hash_of)" == "$h2" ]] || fail 'shasum and sha256sum disagree on the settings hash'
+  grep -q '^shasum -a 256' "$MOCK_LOG" || fail 'without sha256sum, shasum was not used'
+  pass 'without sha256sum the hash comes from shasum -a 256, and is the same'
+fi
 
 reset_state
 (export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=3 MOCK_RECORDS=3; expect_ok --target kind --skip-build)
@@ -371,11 +406,12 @@ reset_state
 pass 'a cluster with no default StorageClass gets a warning before Redis waits on its PVC (spec §10)'
 
 # An API error is never "missing" (same class as Task 13): an unreadable TLS Secret must not be
-# replaced by a self-signed one, and an unreadable moca-settings must not skip a needed restart.
+# replaced by a self-signed one.
 reset_state
 (export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp)
 [[ -f "$MOCK_STATE/moca__Secret__moca-supervisor-tls.json" ]] || fail 'the first OCP run wrote no TLS Secret'
 : >"$MOCK_LOG"
+# MOCK_GET_FAIL=1 only proves the earlier abort in ensure_secrets; the MOCK_GET_FAIL=moca-supervisor-tls case below is the real ensure_tls test.
 (export SH_GITHUB_CLIENT_ID=Iv1.a MOCK_GET_FAIL=1; expect_fail --target ocp)
 ! grep -q 'create secret tls' "$MOCK_LOG" || fail 'a failed GET replaced the TLS Secret'
 : >"$MOCK_LOG"
@@ -384,11 +420,15 @@ expect_out 'etcd timeout'
 ! grep -q 'create secret tls' "$MOCK_LOG" || fail 'a failed GET of moca-supervisor-tls alone replaced it with a self-signed one'
 pass 'ocp: a failed GET of the TLS Secret aborts the run and keeps the operator certificate'
 
+# A failed openssl or apply must not leave the self-signed private key behind.
 reset_state
-(export SH_GITHUB_CLIENT_ID=Iv1.a MOCK_GET_CM_FAIL=1; expect_fail --target kind --skip-build)
-expect_out 'etcd timeout'
-! grep -q 'apply -k' "$MOCK_LOG" || fail 'applied although moca-settings could not be read'
-pass 'a failed GET of moca-settings aborts the run instead of skipping a needed restart'
+mkdir -p "$TMP/tmpdir"
+(export SH_GITHUB_CLIENT_ID=Iv1.a MOCK_MKTEMP_DIR="$TMP/tmpdir" MOCK_TLS_CREATE_FAIL=1; expect_fail --target ocp)
+[[ -z "$(ls -A "$TMP/tmpdir")" ]] || fail "a failed TLS apply left the self-signed key behind: $(ls -A "$TMP/tmpdir")"
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a MOCK_MKTEMP_DIR="$TMP/tmpdir"; expect_ok --target ocp)
+[[ -z "$(ls -A "$TMP/tmpdir")" ]] || fail 'a successful run left the self-signed key behind'
+pass 'ocp: the self-signed private key is removed whether the TLS install succeeds or fails'
 
 reset_state
 (export SH_GITHUB_CLIENT_ID=Iv1.a MOCK_GET_SC_FAIL=1; expect_ok --target kind --skip-build)
