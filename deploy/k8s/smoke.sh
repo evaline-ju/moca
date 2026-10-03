@@ -134,6 +134,12 @@ turn() {
     -d "$(jq -nc --arg s "$2" --arg p "$3" '{sessionId: $s, prompt: $p}')" "$HARNESS/v1/turn" >"$OUT/$1.sse" || true
   [[ "$(sed -n 's/^data: //p' "$OUT/$1.sse" | jq -r 'select(.type == "done") | .sessionId' 2>/dev/null | head -1)" == "$2" ]]
 }
+# has_session SID: the session's log stream exists in Redis. Not `kc exec ... | grep -q`: grep -q exits
+# at its first match, kubectl then dies of SIGPIPE writing the rest of the scan, and pipefail turned
+# a present key into a failed claim whenever it was not listed last.
+has_session() {
+  [[ -n "$1" && "$(kc -n "$NS" exec redis-0 -- sh -c "redis-cli EXISTS 'session:$1'" 2>/dev/null)" == 1 ]]
+}
 ask() { printf 'Use the bash tool to run exactly this command, then reply with its output: %s  [%s]' "$2" "$1"; }
 
 claim 3 "an authenticated /v1/turn runs a command in a sandbox and streams over SSE"
@@ -148,10 +154,10 @@ FIRST_SID="$SID"
 
 claim 4 "the session persists in Redis and takes a second turn"
 if [[ -n "$FIRST_SID" ]] && turn again "$FIRST_SID" "$(ask K8S-SMOKE-AGAIN 'echo second-turn')" && grep -q second-turn <(tool_out "$OUT/again.sse") &&
-  kc -n "$NS" exec redis-0 -- sh -c "redis-cli --scan --pattern 'session:$FIRST_SID*'" 2>/dev/null | grep -qx "session:$FIRST_SID"; then
+  has_session "$FIRST_SID"; then
   ok
 else
-  ko "second turn or session:$FIRST_SID* key missing"
+  ko "second turn or session:$FIRST_SID key missing"
 fi
 
 claim 7 "a sandbox reaches the relay's attach port and nothing else in the cluster"
@@ -210,7 +216,7 @@ claim 10 "sessions survive a Redis restart (AOF on the PVC)"
 kc -n "$NS" delete pod redis-0 >/dev/null
 kc -n "$NS" rollout status statefulset/redis --timeout=180s >/dev/null
 wait_for 90 kc -n "$NS" exec redis-0 -- sh -c 'redis-cli ping | grep -q PONG' || { ko "redis-0 not ready after restart"; }
-if [[ -n "$FIRST_SID" ]] && kc -n "$NS" exec redis-0 -- sh -c "redis-cli --scan --pattern 'session:$FIRST_SID*'" 2>/dev/null | grep -qx "session:$FIRST_SID"; then ok; else ko "session:$FIRST_SID* gone after the restart"; fi
+if has_session "$FIRST_SID"; then ok; else ko "session:$FIRST_SID gone after the restart"; fi
 
 claim 11 "no container restarted (no OOM kill, no crash) apart from the pods deleted above"
 restarts="$(kc get pods -n "$NS" -o json | jq '[.items[].status | (.containerStatuses[]?, .initContainerStatuses[]?) | .restartCount] | add // 0')"
