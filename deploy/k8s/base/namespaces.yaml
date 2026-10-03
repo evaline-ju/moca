@@ -1,6 +1,6 @@
-# Three namespaces so the sandbox boundary is a namespace boundary (spec §2.1). moca-sandbox holds
-# exactly one Secret, the attach token: the exec token, the Redis password and the MU1 keys never
-# exist there.
+# Three namespaces so the sandbox boundary is a namespace boundary (spec §2.1). The only Secret any
+# MOCA object references in moca-sandbox is the attach token (OpenShift adds its own per-ServiceAccount
+# pull Secrets): the exec token, the Redis password and the MU1 keys never exist there.
 apiVersion: v1
 kind: Namespace
 metadata:

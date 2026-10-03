@@ -273,9 +273,10 @@ DNS is `kube-system` port 53; the OCP overlay adds `openshift-dns` port 5353.
 
 The sandbox rule lets research turns reach the internet while blocking every cluster-internal
 address: Pod and Service CIDRs sit inside the private ranges on Kind and OCP. It also blocks cloud
-instance metadata, which the VM path leaves open (#357). The sandbox namespace holds one Secret, the
-attach token: the exec token, the Redis password and the MU1 keys never exist there. The manifest
-tests check that nothing in it references any other Secret.
+instance metadata, which the VM path leaves open (#357). The only Secret any MOCA object references
+in the sandbox namespace is the attach token (OpenShift adds its own per-ServiceAccount pull Secrets
+there): the exec token, the Redis password and the MU1 keys never exist there. The manifest tests
+check that nothing in it references any other Secret.
 
 **What the smoke's claim 7 proves.** From inside `moca-sandbox-0`, TCP connects to
 `redis.moca.svc:6379`, `sandbox-relay-exec.moca.svc:9444` and `169.254.169.254:80` are blocked, and

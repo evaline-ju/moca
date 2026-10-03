@@ -227,7 +227,7 @@ ensure_relay_secrets() {
     export S_0="$relay" S_1="$exec_token"
     apply_secret moca-relay "$NS" SH_RELAY_TOKEN MOCA_RELAY_EXEC_TOKEN
   )
-  # The sandbox namespace's ONLY Secret: the attach token, and nothing else.
+  # The only Secret any MOCA object references in the sandbox namespace: the attach token, nothing else.
   (
     export S_0="$relay"
     apply_secret moca-relay-attach "$SBX_NS" SH_RELAY_TOKEN
