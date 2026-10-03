@@ -1,6 +1,6 @@
 # P6 on Kubernetes, slice 1: the P6 process model on a cluster, container tier — Design
 
-Version: 1.0 — October 2, 2026
+Version: 1.1 — October 2026 (v1.1: corrections from the implementation plan)
 Status: Proposed
 Milestone: **P6.1** (registered in [the milestone registry](README.md)); slice 1 of epic rossoctl/moca#426,
 issue rossoctl/moca#423.
@@ -30,6 +30,33 @@ Decision record: ADR-0037 (written in this slice; see §11).
 | Credential store                      | `K8sSecretStore` (the control plane's default), in its own namespace.                                                                                                                                                                                                                                                                                                                 |
 | Redis                                 | AUTH (through the URL) and a PVC.                                                                                                                                                                                                                                                                                                                                                     |
 | Sandbox egress                        | Open internet **except** private, CGNAT and link-local ranges.                                                                                                                                                                                                                                                                                                                        |
+
+### 0.1 v1.1 implementation notes
+
+What the implementation added to this design, each with its reason. The sections below are
+corrected to match.
+
+- **The control plane reconnects to Redis forever, and its `/readyz` fails fast** while the client
+  is not ready. `setup.sh` applies everything at once, so the control plane often starts before
+  Redis, and it used to sit unready for good (Kind spike).
+- **The relay retries presence writes** with backoff until they land or the sandbox detaches, and
+  the runtime reporter's Redis client has an `error` listener. A late Redis lost presence for good,
+  and a Redis restart crashed workers mid-turn (Kind end-to-end run).
+- **`setup.sh` reads Secrets with `--ignore-not-found`**, so only "absent" counts as missing and a
+  transient API error aborts. Treating any read failure as absent would rotate a Secret, the KEK
+  included (§4.2 "never rotated").
+- **The control plane rolls on a `moca.dev/settings-hash` pod-template annotation**, rendered by the
+  generated overlay, not on an explicit restart. A run that wrote new settings and then failed
+  would otherwise lose the restart.
+- **The key generator waits for the attach before it writes.** `kubectl run -i` attaches late on a
+  busy node, and an attach does not replay earlier output (Kind end-to-end run).
+- **The `kind-ci` mock model is a native sidecar** (an init container with `restartPolicy: Always`)
+  that exits on SIGTERM. As a plain container it held every deleted pod for the full 120 s grace,
+  or, exiting with the supervisor, vanished under the turn claim 9 drains.
+- **ghostunnel comes from `docker.io/ghostunnel/ghostunnel`**, pinned by digest. Docker Hub is the
+  project's official channel; it does not publish to GHCR.
+- **Claim 7 probes `kubernetes.default.svc:443` and enforces it on OCP only.** Single-node kindnet
+  does not filter pod-to-own-node traffic, so on Kind the result is printed as a note.
 
 ## 1. Scope
 
@@ -196,7 +223,8 @@ All brain-side pods share these settings:
 - Readiness and liveness: `exec: [sh, -c, 'redis-cli ping']`, with `REDISCLI_AUTH` set from the
   Secret's `REDIS_PASSWORD` key in the container's env. `redis-cli` reads that variable, so no
   `-a <password>` appears in argv.
-- UID 999 (the image's `redis` user), `fsGroup: 999`.
+- UID 999 (the image's `redis` user), with `runAsGroup` and `fsGroup` 1000 (the image's `redis`
+  group).
 - **Every client gets `REDIS_URL=redis://:<password>@redis.moca.svc:6379`** from the same Secret.
   node-redis parses credentials from the URL, and no client builds them separately (§6.2 covers the
   one place a URL is logged).
@@ -225,9 +253,10 @@ Adapted from `deploy/knative/control-plane.yaml`:
 ### 4.1 `deploy/k8s/setup.sh`
 
 ```
-deploy/k8s/setup.sh --target kind|ocp [--image IMG] [--sandbox-image IMG] [--build|--skip-build]
+deploy/k8s/setup.sh --target kind|kind-ci|ocp [--image IMG] [--sandbox-image IMG] [--build|--skip-build]
                     [--tls-cert FILE --tls-key FILE]        # ocp only
-env: SH_GITHUB_CLIENT_ID, SH_ADMIN_SUBJECTS, SH_ALLOW_OPERATOR_FALLBACK, SH_SANDBOX_COUNT
+env: SH_GITHUB_CLIENT_ID, SH_ADMIN_SUBJECTS, SH_ALLOW_OPERATOR_FALLBACK, SH_SANDBOX_COUNT,
+     SH_WAIT_SECONDS
      SH_SOURCE_ONLY=1   # define functions and stop (tests)
 ```
 
@@ -248,7 +277,7 @@ Steps, in order. Every step is idempotent.
    the workloads).
 4. **Secrets, generated once** (§4.2).
 5. **`kubectl apply -k deploy/k8s/overlays/<target>`.** On OCP, setup first substitutes the Route
-   host (from `dns.config/cluster`'s base domain, as `setup-ocp.sh` derives it) into
+   host (from `ingresses.config/cluster`'s apps domain, `.spec.domain`) into
    `SH_PUBLIC_HARNESS_URL`, and grants `nonroot-v2` to each ServiceAccount (`moca-supervisor`,
    `sandbox-relay`, `redis`, `moca-control-plane`, and `moca-sandbox` in its namespace). That is the
    `setup-ocp.sh:460-475` precedent, for the same reason: restricted-v2 does not reliably accept an
@@ -343,10 +372,11 @@ Both changes leave the VM and Compose paths behaving exactly as before.
 ### 6.2 Redact Redis credentials from errors (`harness/src/pool-records.ts:84`)
 
 The URL now carries a password, and `redis at ${this.url} unreachable…` would log it. Add
-`redactUrl(url)` (to `harness/src`, exported for reuse). For a parseable URL with credentials it
-returns the URL with `user:password@` replaced by `***@`; it returns any other input unchanged.
-Apply it there, and at every other site a Redis URL reaches a log line or error message. The plan's
-first task greps for them; the survey found only this one.
+`redactUrl(url)`, exported for reuse. It lives in `@moca/session-backend`, the lowest layer that
+logs Redis URLs, and `harness/src/redact-url.ts` re-exports it (v1.1). For a parseable URL with
+credentials it returns the URL with `user:password@` replaced by `***@`; it returns any other input
+unchanged. Apply it there, and at every other site a Redis URL reaches a log line or error message.
+The plan's first task greps for them; the survey found only this one.
 
 ## 7. Overlays
 
@@ -365,17 +395,16 @@ first task greps for them; the survey found only this one.
   The mock needs new scripted prompts for this smoke (§9.4). It is not a general mock: anything
   unscripted gets a 400.
 
-  The plan decides between two options here:
-  - add the scripts to `deploy/microvm/mock-anthropic.mjs` under new keys;
-  - move the file to a shared location, for example `deploy/lib/mock-anthropic.mjs`, and keep a
-    reference from `deploy/microvm`.
-
-  Either way the P4 smoke keeps passing unchanged.
+  **Decided (v1.1):** the scripts are added in place, to `deploy/microvm/mock-anthropic.mjs`, under
+  new keys. `setup.sh --target kind-ci` loads the file into ConfigMap `moca-mock-model`
+  (`kubectl create configmap --from-file … --dry-run=client | kubectl apply -f -`), so no
+  kustomization reads a file outside its root. The P4 smoke keeps passing unchanged.
 
 ### 7.2 `overlays/ocp`
 
 - `images:` to GHCR.
-- **A ghostunnel sidecar** in the supervisor pod (image pinned by digest):
+- **A ghostunnel sidecar** in the supervisor pod (`docker.io/ghostunnel/ghostunnel`, pinned by
+  digest):
   - command: `server --listen 0.0.0.0:8443 --target 127.0.0.1:8080 --cert /tls/tls.crt --key /tls/tls.key --disable-authentication`
   - `moca-supervisor-tls` mounted at `/tls`; UID 65532; `readOnlyRootFilesystem`;
   - resources about `10m`/`32Mi`.
@@ -417,7 +446,7 @@ first task greps for them; the survey found only this one.
 ### 9.1 Unit (vitest)
 
 - `packages/supervisor/test/config.test.ts`: `SH_ADMIN_HOST` default, IPv4, IPv6, and refusal of a
-  hostname, an empty string and garbage.
+  hostname and garbage; a blank value means the default, as for every other supervisor knob.
 - `packages/supervisor/test/admin.test.ts`:
   - the bind honours `adminHost`;
   - `/healthz` is 200;
@@ -430,8 +459,9 @@ first task greps for them; the survey found only this one.
 
 ### 9.2 Manifest tests (vitest, over `kubectl kustomize` output of each overlay)
 
-They live in a new `deploy/k8s/test/manifests.test.ts`, run by the root vitest config. They skip
-with a visible reason when `kubectl` is absent (GitHub's Ubuntu runners have it).
+They live in `packages/supervisor/test/k8s/`, the package that owns P6. There is no root vitest
+config: `make test` is `pnpm -r test` over the workspace packages. They skip with a visible reason
+when `kubectl` is absent (GitHub's Ubuntu runners have it).
 
 They assert:
 
@@ -489,21 +519,25 @@ The claims:
 6. An unauthenticated `/turn` is refused.
 7. **Isolation, from inside a sandbox pod:** TCP connects to `redis.moca.svc:6379`,
    `sandbox-relay-exec.moca.svc:9444` and `169.254.169.254:80` each fail. A connect to
-   `sandbox-relay-attach.moca.svc:9443` succeeds.
+   `sandbox-relay-attach.moca.svc:9443` succeeds. On OCP, a connect to `kubernetes.default.svc:443`
+   fails too; on Kind its result is only a note (§0.1).
 8. **A research turn:** `curl -sI https://example.com` and `git ls-remote https://github.com/rossoctl/moca`
    from the sandbox both succeed (scripted through the mock in CI).
-9. **Drain:** a turn in flight across `kubectl rollout restart deploy/moca-supervisor` completes,
-   and its SSE stream ends with the turn's normal terminal event.
+9. **Drain:** a turn in flight across the deletion of its supervisor pod (a rollout with
+   `maxUnavailable: 0` may not signal the old pod before the turn ends) completes, and its SSE
+   stream ends with the turn's normal terminal event.
 10. **Persistence:** after `kubectl delete pod redis-0`, the session from claim 4 is still readable.
+11. **No restarts:** no container in `moca` or `moca-sandbox` has a restart count above 0 (no OOM
+    kill, no crash), apart from the pods the smoke deleted. §10's OOM row relies on it.
 
 ### 9.5 CI
 
-A new job, `k8s-kind-e2e`, in `.github/workflows/ci.yml`: `setup.sh --target kind --build` with the
-`kind-ci` overlay, then `K8S_LIVE_SMOKE=1 deploy/k8s/smoke.sh`, uploading the pod logs on failure.
-It runs on pull requests touching `deploy/k8s/**`, `packages/supervisor/**`,
-`packages/sandbox-relay/**`, `packages/control-plane/**`, `packages/knative-server/**`, `harness/**`
-or `remote-worker/**`, and on pushes to `main`. **It is not a required check** until it has passed
-ten consecutive `main` runs; the README records that rule.
+A new job, `k8s-kind-e2e`, in its own workflow, `.github/workflows/k8s-e2e.yml` (path filters are
+per workflow): `setup.sh --target kind-ci --build`, then `K8S_LIVE_SMOKE=1 deploy/k8s/smoke.sh`
+under `pipefail`, uploading the pod logs on failure. It runs on pull requests touching
+`deploy/k8s/**`, the mock model, `packages/**`, `harness/**`, `remote-worker/**`, `pi-fork`, the
+Dockerfile or the lockfile, and on pushes to `main`. **It is not a required check** until it has
+passed ten consecutive `main` runs; the README records that rule.
 
 ### 9.6 Demo parity on OCP (manual, recorded)
 
@@ -541,12 +575,12 @@ deploy/k8s/
 ├── setup.sh
 ├── smoke.sh
 ├── tests/setup.test.sh
-├── test/manifests.test.ts
 └── README.md                # what runs, L4-only rule, replicas vs W, non-claims, Demo on OpenShift
 packages/supervisor/src/{admin,config}.ts (+ tests)       # §6.1
+packages/supervisor/test/k8s/                             # manifest tests (§9.2)
 harness/src/redact-url.ts, harness/src/pool-records.ts (+ tests)   # §6.2
 deploy/vm/env/supervisor.env.example                      # one commented line
-.github/workflows/ci.yml                                  # k8s-kind-e2e
+.github/workflows/k8s-e2e.yml                             # k8s-kind-e2e
 Makefile                                                  # test-deploy includes deploy/k8s/tests
 docs/adrs/0037-p6-on-kubernetes-substrate.md
 docs/specs/README.md                                      # P6.1 row
