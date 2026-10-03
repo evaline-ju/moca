@@ -74,7 +74,7 @@ class FakeRedis {
       this.sockets.add(sock);
       sock.on('close', () => this.sockets.delete(sock));
       sock.on('error', () => {});
-      let pending = Buffer.alloc(0);
+      let pending: Buffer = Buffer.alloc(0);
       sock.on('data', (chunk) => {
         const { cmds, rest } = parse(Buffer.concat([pending, chunk]));
         pending = rest;
