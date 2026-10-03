@@ -62,11 +62,15 @@ HARNESS=http://127.0.0.1:18080
 ADMIN=http://127.0.0.1:18081
 CP=http://127.0.0.1:18090
 tool_out() { sed -n 's/^data: //p' "$1" | jq -r 'select(.type == "tool_result" and (.isError | not)) | .preview' 2>/dev/null; }
+# `kc ... &` would background a subshell running kc, so $! -- and the kill -- would hit the
+# subshell and orphan kubectl, which then kept the ports bound across forward() and after exit.
+# exec makes the background job kubectl itself.
+kc_exec() { if [[ "$TARGET" == kind* ]]; then exec kubectl --context kind-moca "$@"; else exec kubectl "$@"; fi; }
 forward() {
-  [[ -z "$PIDS" ]] || kill $PIDS 2>/dev/null || true
-  kc -n "$NS" port-forward svc/moca-supervisor 18080:8080 18081:8081 >"$OUT/pf-sup.log" 2>&1 &
+  [[ -z "$PIDS" ]] || { kill $PIDS 2>/dev/null || true; wait $PIDS 2>/dev/null || true; }
+  kc_exec -n "$NS" port-forward svc/moca-supervisor 18080:8080 18081:8081 >"$OUT/pf-sup.log" 2>&1 &
   PIDS="$!"
-  kc -n "$NS" port-forward svc/moca-control-plane 18090:8080 >"$OUT/pf-cp.log" 2>&1 &
+  kc_exec -n "$NS" port-forward svc/moca-control-plane 18090:8080 >"$OUT/pf-cp.log" 2>&1 &
   PIDS="$PIDS $!"
   wait_for 30 curl -sf -o /dev/null "$ADMIN/healthz" || { echo "port-forward to the supervisor never came up:"; cat "$OUT/pf-sup.log"; exit 1; }
   wait_for 30 curl -sf -o /dev/null "$CP/healthz" || { echo "port-forward to the control plane never came up:"; cat "$OUT/pf-cp.log"; exit 1; }
@@ -188,7 +192,9 @@ claim 9 "a turn in flight when its supervisor pod is deleted runs to completion 
 # Ready, which can outlast the turn and prove nothing. Deletion sends SIGTERM (after preStop) mid-turn.
 SID=''
 if new_session; then
-  pod="$(kc -n "$NS" get pods -l app=moca-supervisor -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  # Not one still terminating from an earlier run: deleting it again would prove nothing.
+  pod="$(kc -n "$NS" get pods -l app=moca-supervisor -o json 2>/dev/null |
+    jq -r '[.items[] | select(.metadata.deletionTimestamp == null)][0].metadata.name // empty' 2>/dev/null || true)"
   [[ -n "$pod" ]] || { ko "could not find moca-supervisor pod"; pod="unknown"; }
   (turn drain "$SID" "$(ask K8S-SMOKE-DRAIN 'sleep 8; echo drained')" && echo "done" >"$OUT/drain.ok") &
   tpid=$!
@@ -207,7 +213,7 @@ wait_for 90 kc -n "$NS" exec redis-0 -- sh -c 'redis-cli ping | grep -q PONG' ||
 if [[ -n "$FIRST_SID" ]] && kc -n "$NS" exec redis-0 -- sh -c "redis-cli --scan --pattern 'session:$FIRST_SID*'" 2>/dev/null | grep -qx "session:$FIRST_SID"; then ok; else ko "session:$FIRST_SID* gone after the restart"; fi
 
 claim 11 "no container restarted (no OOM kill, no crash) apart from the pods deleted above"
-restarts="$(kc get pods -n "$NS" -o json | jq '[.items[].status.containerStatuses[]?.restartCount] | add // 0')"
+restarts="$(kc get pods -n "$NS" -o json | jq '[.items[].status | (.containerStatuses[]?, .initContainerStatuses[]?) | .restartCount] | add // 0')"
 restarts_sbx="$(kc get pods -n "$SBX" -o json | jq '[.items[].status.containerStatuses[]?.restartCount] | add // 0')"
 if [[ "$restarts" == 0 && "$restarts_sbx" == 0 ]]; then ok; else ko "restartCount moca=$restarts moca-sandbox=$restarts_sbx (kubectl describe pod for OOMKilled)"; fi
 
