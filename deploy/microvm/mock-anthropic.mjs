@@ -29,7 +29,7 @@ const SCRIPTS = {
   'K8S-SMOKE-AGAIN': { steps: ['echo second-turn'], done: 'done-k8s-again' },
   'K8S-SMOKE-RESEARCH': {
     steps: [
-      'curl -sI https://example.com | head -1; git ls-remote https://github.com/rossoctl/moca HEAD | cut -c1-12',
+      'curl -sI https://example.com | head -1; echo "git-head=$(git ls-remote https://github.com/rossoctl/moca HEAD | cut -c1-12)"',
     ],
     done: 'done-k8s-research',
   },

@@ -35,7 +35,12 @@ chmod 700 "$OUT"
 PIDS=''
 cleanup() {
   [[ -z "$PIDS" ]] || kill $PIDS 2>/dev/null || true
-  rm -rf "$OUT"
+  rm -f "$OUT"/*.hdr
+  if [[ "$FAIL" -gt 0 ]]; then
+    echo "logs kept in $OUT"
+  else
+    rm -rf "$OUT"
+  fi
 }
 trap cleanup EXIT
 PASS=0
@@ -56,6 +61,7 @@ SMOKE_MODEL_KIND="${SMOKE_MODEL_KIND:-bearer}"
 HARNESS=http://127.0.0.1:18080
 ADMIN=http://127.0.0.1:18081
 CP=http://127.0.0.1:18090
+tool_out() { sed -n 's/^data: //p' "$1" | jq -r 'select(.type == "tool_result" and (.isError | not)) | .preview' 2>/dev/null; }
 forward() {
   [[ -z "$PIDS" ]] || kill $PIDS 2>/dev/null || true
   kc -n "$NS" port-forward svc/moca-supervisor 18080:8080 18081:8081 >"$OUT/pf-sup.log" 2>&1 &
@@ -72,14 +78,16 @@ body="$(curl -s "$ADMIN/readyz" || true)"
 if jq -e '.ready == true and .workers > 0 and .healthy == .workers' >/dev/null 2>&1 <<<"$body"; then ok "$body"; else ko "readyz: $body"; fi
 
 claim 2 "every sandbox replica is attached through the relay"
-replicas="$(kc -n "$SBX" get statefulset moca-sandbox -o jsonpath='{.spec.replicas}')"
+replicas="$(kc -n "$SBX" get statefulset moca-sandbox -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+[[ -n "$replicas" ]] || { ko "could not read moca-sandbox statefulset replicas"; replicas=0; }
 keys="$(kc -n "$NS" exec redis-0 -- sh -c 'redis-cli HKEYS sh:sandbox:records' 2>/dev/null || true)"
 missing=''
 for i in $(seq 0 $((replicas - 1))); do grep -qx "moca-sandbox-$i" <<<"$keys" || missing="$missing moca-sandbox-$i"; done
 if [[ -z "$missing" ]]; then ok "$replicas attached"; else ko "not in sh:sandbox:records:$missing (have: $(tr '\n' ' ' <<<"$keys"))"; fi
 
 claim 5 "the control plane is ready and advertises the configured harness URL"
-want="$(kc -n "$NS" get configmap moca-settings -o jsonpath='{.data.SH_PUBLIC_HARNESS_URL}')"
+want="$(kc -n "$NS" get configmap moca-settings -o jsonpath='{.data.SH_PUBLIC_HARNESS_URL}' 2>/dev/null || true)"
+[[ -n "$want" ]] || { ko "could not read moca-settings configmap"; want="(unset)"; }
 got="$(curl -s "$CP/v1/discovery" | jq -r '.harnessUrl // empty' 2>/dev/null || true)"
 if curl -sf -o /dev/null "$CP/readyz" && [[ "$got" == "$want" ]]; then ok "harnessUrl=$got"; else ko "readyz or discovery: want '$want', got '$got'"; fi
 
@@ -89,14 +97,13 @@ if [[ "$code" == 4* ]] && grep -q token_required "$OUT/unauth.json"; then ok "$c
 
 # The api token a device-flow login would return, minted INSIDE the control-plane pod with its own
 # signing key (the key never leaves the pod). Tokens travel in header files, never argv.
-(
-  umask 077
-  printf 'Authorization: Bearer %s\n' "$(kc -n "$NS" exec deploy/moca-control-plane -c control-plane -- \
-    node --import tsx --input-type=module -e \
-    "import { readFileSync } from 'node:fs'; import { makeSigner } from './src/token.ts';
-     const s = makeSigner(readFileSync('/run/credentials/SH_SESSION_TOKEN_PRIVATE_KEY', 'utf8'));
-     process.stdout.write(s.mint({ sub: 'smoke:1', tenant: 'smoke:1', roles: [], scope: ['api'], ttlSeconds: 900 }));")" >"$OUT/api.hdr"
-)
+api="$(kc -n "$NS" exec deploy/moca-control-plane -c control-plane -- \
+  node --import tsx --input-type=module -e \
+  "import { readFileSync } from 'node:fs'; import { makeSigner } from './src/token.ts';
+   const s = makeSigner(readFileSync('/run/credentials/SH_SESSION_TOKEN_PRIVATE_KEY', 'utf8'));
+   process.stdout.write(s.mint({ sub: 'smoke:1', tenant: 'smoke:1', roles: [], scope: ['api'], ttlSeconds: 900 }));" || true)"
+[[ -n "$api" ]] || { ko "could not mint an api token in the control-plane pod"; printf '\nPASS=%s FAIL=%s\n' "$PASS" "$FAIL"; exit 1; }
+(umask 077; printf 'Authorization: Bearer %s\n' "$api" >"$OUT/api.hdr")
 field=token
 [[ "$SMOKE_MODEL_KIND" == bearer ]] || field=key
 host="$(sed -E 's#^[a-z]+://([^/:]+).*#\1#' <<<"$SMOKE_MODEL_URL")"
@@ -109,11 +116,13 @@ rm -f "$OUT/cred.json"
 
 # new_session -> sets SID; the session token goes into $OUT/<sid>.hdr
 new_session() {
-  local s
+  local s tok
   s="$(curl -s -X POST -H @"$OUT/api.hdr" -H 'Content-Type: application/json' -d '{}' "$CP/v1/sessions" || true)"
   SID="$(jq -r '.sessionId // empty' <<<"$s" 2>/dev/null || true)"
   [[ -n "$SID" ]] || { ko "POST /v1/sessions returned no session: ${s:0:300}"; return 1; }
-  (umask 077; printf 'Authorization: Bearer %s\n' "$(jq -r '.token' <<<"$s")" >"$OUT/$SID.hdr")
+  tok="$(jq -r '.token // empty' <<<"$s" 2>/dev/null || true)"
+  [[ -n "$tok" ]] || { ko "POST /v1/sessions returned no token for session $SID"; return 1; }
+  (umask 077; printf 'Authorization: Bearer %s\n' "$tok" >"$OUT/$SID.hdr")
 }
 # turn TAG SID PROMPT -> $OUT/TAG.sse; true when the stream ended with this session's done frame
 turn() {
@@ -126,7 +135,7 @@ ask() { printf 'Use the bash tool to run exactly this command, then reply with i
 claim 3 "an authenticated /v1/turn runs a command in a sandbox and streams over SSE"
 SID=''
 if new_session && turn write "$SID" "$(ask K8S-SMOKE-WRITE 'uname -s; echo k8s-proof | tee proof.txt; pwd')" &&
-  grep -q 'k8s-proof' "$OUT/write.sse" && grep -q 'Linux' "$OUT/write.sse"; then
+  grep -q 'k8s-proof' <(tool_out "$OUT/write.sse") && grep -q 'Linux' <(tool_out "$OUT/write.sse"); then
   ok "session $SID"
 else
   ko "write turn: $(head -c 600 "$OUT/write.sse" 2>/dev/null)"
@@ -134,8 +143,8 @@ fi
 FIRST_SID="$SID"
 
 claim 4 "the session persists in Redis and takes a second turn"
-if [[ -n "$FIRST_SID" ]] && turn again "$FIRST_SID" "$(ask K8S-SMOKE-AGAIN 'echo second-turn')" && grep -q second-turn "$OUT/again.sse" &&
-  [[ -n "$(kc -n "$NS" exec redis-0 -- sh -c "redis-cli --scan --pattern 'session:$FIRST_SID*'" 2>/dev/null)" ]]; then
+if [[ -n "$FIRST_SID" ]] && turn again "$FIRST_SID" "$(ask K8S-SMOKE-AGAIN 'echo second-turn')" && grep -q second-turn <(tool_out "$OUT/again.sse") &&
+  kc -n "$NS" exec redis-0 -- sh -c "redis-cli --scan --pattern 'session:$FIRST_SID*'" 2>/dev/null | grep -qx "session:$FIRST_SID"; then
   ok
 else
   ko "second turn or session:$FIRST_SID* key missing"
@@ -159,12 +168,16 @@ else
 fi
 r="$(probe sandbox-relay-attach.moca.svc 9443)"
 [[ "$r" == OPEN ]] || { iso_ok=0; ko "sandbox-relay-attach:9443 is $r (want OPEN)"; }
-[[ "$iso_ok" == 0 ]] || ok 'redis, relay exec, kube API and metadata BLOCKED; relay attach OPEN'
+if [[ "$iso_ok" == 0 ]]; then :; elif [[ "$TARGET" == ocp ]]; then
+  ok 'redis, relay exec, kube API and metadata BLOCKED; relay attach OPEN'
+else
+  ok 'redis, relay exec, metadata BLOCKED; relay attach OPEN'
+fi
 
 claim 8 "a research turn reaches the internet from the sandbox (curl and git)"
 SID=''
-if new_session && turn research "$SID" "$(ask K8S-SMOKE-RESEARCH 'curl -sI https://example.com | head -1; git ls-remote https://github.com/rossoctl/moca HEAD | cut -c1-12')" &&
-  grep -qE 'HTTP/[0-9.]+ [23][0-9][0-9]' "$OUT/research.sse" && grep -qE '[0-9a-f]{12}' "$OUT/research.sse"; then
+if new_session && turn research "$SID" "$(ask K8S-SMOKE-RESEARCH 'curl -sI https://example.com | head -1; echo "git-head=$(git ls-remote https://github.com/rossoctl/moca HEAD | cut -c1-12)"')" &&
+  grep -qE 'HTTP/[0-9.]+ [23][0-9][0-9]' <(tool_out "$OUT/research.sse") && grep -qE 'git-head=[0-9a-f]{12}' <(tool_out "$OUT/research.sse"); then
   ok
 else
   ko "research turn: $(head -c 600 "$OUT/research.sse" 2>/dev/null)"
@@ -175,21 +188,23 @@ claim 9 "a turn in flight when its supervisor pod is deleted runs to completion 
 # Ready, which can outlast the turn and prove nothing. Deletion sends SIGTERM (after preStop) mid-turn.
 SID=''
 if new_session; then
-  pod="$(kc -n "$NS" get pods -l app=moca-supervisor -o jsonpath='{.items[0].metadata.name}')"
+  pod="$(kc -n "$NS" get pods -l app=moca-supervisor -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  [[ -n "$pod" ]] || { ko "could not find moca-supervisor pod"; pod="unknown"; }
   (turn drain "$SID" "$(ask K8S-SMOKE-DRAIN 'sleep 8; echo drained')" && echo "done" >"$OUT/drain.ok") &
   tpid=$!
   sleep 2
-  kc -n "$NS" delete pod "$pod" --wait=false >/dev/null
+  kc -n "$NS" delete pod "$pod" --wait=false >/dev/null || true
   wait "$tpid" || true
-  if [[ -f "$OUT/drain.ok" ]] && grep -q drained "$OUT/drain.sse"; then ok "pod $pod drained its turn"; else ko "drain: $(head -c 600 "$OUT/drain.sse" 2>/dev/null)"; fi
-  kc -n "$NS" rollout status deployment/moca-supervisor --timeout=300s >/dev/null
+  if [[ -f "$OUT/drain.ok" ]] && grep -q drained <(tool_out "$OUT/drain.sse"); then ok "pod $pod drained its turn"; else ko "drain: $(head -c 600 "$OUT/drain.sse" 2>/dev/null)"; fi
+  kc -n "$NS" rollout status deployment/moca-supervisor --timeout=300s >/dev/null || true
   forward
 fi
 
 claim 10 "sessions survive a Redis restart (AOF on the PVC)"
 kc -n "$NS" delete pod redis-0 >/dev/null
 kc -n "$NS" rollout status statefulset/redis --timeout=180s >/dev/null
-if [[ -n "$FIRST_SID" && -n "$(kc -n "$NS" exec redis-0 -- sh -c "redis-cli --scan --pattern 'session:$FIRST_SID*'" 2>/dev/null)" ]]; then ok; else ko "session:$FIRST_SID* gone after the restart"; fi
+wait_for 90 kc -n "$NS" exec redis-0 -- sh -c 'redis-cli ping | grep -q PONG' || { ko "redis-0 not ready after restart"; }
+if [[ -n "$FIRST_SID" ]] && kc -n "$NS" exec redis-0 -- sh -c "redis-cli --scan --pattern 'session:$FIRST_SID*'" 2>/dev/null | grep -qx "session:$FIRST_SID"; then ok; else ko "session:$FIRST_SID* gone after the restart"; fi
 
 claim 11 "no container restarted (no OOM kill, no crash) apart from the pods deleted above"
 restarts="$(kc get pods -n "$NS" -o json | jq '[.items[].status.containerStatuses[]?.restartCount] | add // 0')"
