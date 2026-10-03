@@ -188,3 +188,6 @@ const server = createServer((req, res) => {
 server.listen(port, '127.0.0.1', () => {
   console.log(`mock-anthropic listening on 127.0.0.1:${server.address().port}`);
 });
+// As a container's PID 1 (deploy/k8s kind-ci) Node gets no default SIGTERM action, so without this
+// the mock ignores the stop signal and holds its pod for the whole termination grace period.
+process.on('SIGTERM', () => process.exit(0));

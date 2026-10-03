@@ -15,7 +15,16 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s overlays/kind and kind-ci', () => {
   it('kind-ci adds a loopback mock model beside the supervisor, from a ConfigMap setup.sh creates', () => {
     const objs = render('overlays/kind-ci');
     const dep = find(objs, 'Deployment', 'moca-supervisor', 'moca');
-    const mock = container(dep, 'mock-model');
+    // A native sidecar, so the kubelet stops it only after the supervisor has drained and exited.
+    expect(podSpec(dep).containers.map((c: { name: string }) => c.name)).toEqual(['supervisor']);
+    const mock = (podSpec(dep).initContainers ?? []).find(
+      (c: { name: string }) => c.name === 'mock-model',
+    );
+    expect(mock.restartPolicy).toBe('Always');
+    expect(mock.securityContext).toMatchObject({
+      allowPrivilegeEscalation: false,
+      readOnlyRootFilesystem: true,
+    });
     expect(mock.command).toEqual(['node', '/mock/mock-anthropic.mjs', '--port', '18099']);
     // kind's image transformer ran before this patch existed; kind-ci must rewrite it itself.
     expect(mock.image).toBe('dev.local/moca:local');
