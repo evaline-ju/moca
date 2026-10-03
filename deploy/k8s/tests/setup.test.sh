@@ -62,7 +62,10 @@ case "${1-} ${2-}" in
 "get secret" | "get configmap")
   kind=Secret
   [[ "$2" == configmap ]] && kind=ConfigMap
-  if [[ "$kind" == Secret && -n "${MOCK_GET_FAIL-}" ]]; then
+  # MOCK_GET_FAIL=1 fails every Secret GET; MOCK_GET_FAIL=NAME fails only Secret NAME's.
+  # MOCK_GET_CM_FAIL=1 fails every ConfigMap GET.
+  if [[ "$kind" == Secret && -n "${MOCK_GET_FAIL-}" && ("$MOCK_GET_FAIL" == 1 || "$MOCK_GET_FAIL" == "$3") ]] ||
+    [[ "$kind" == ConfigMap && -n "${MOCK_GET_CM_FAIL-}" ]]; then
     echo 'Error from server (InternalError): etcd timeout' >&2
     exit 1
   fi
@@ -72,7 +75,7 @@ case "${1-} ${2-}" in
     echo "Error from server (NotFound): $2 \"$3\" not found" >&2
     exit 1
   fi
-  cat "$f" ;;
+  if [[ " $* " == *" -o name "* ]]; then echo "$2/$3"; else cat "$f"; fi ;;
 "apply --server-side")
   obj="$(cat)"
   obj="$(jq 'if .stringData then .data = ((.data // {}) + (.stringData | map_values(@base64))) | del(.stringData) else . end' <<<"$obj")"
@@ -100,6 +103,7 @@ case "${1-} ${2-}" in
 "rollout status" | "rollout restart") : ;;
 "exec redis-0") echo "${MOCK_RECORDS:-2}" ;;
 "get storageclass")
+  if [[ -n "${MOCK_GET_SC_FAIL-}" ]]; then echo 'Error from server (Forbidden): storageclasses is forbidden' >&2; exit 1; fi
   if [[ -n "${MOCK_NO_DEFAULT_SC-}" ]]; then echo '{"items":[{"metadata":{"name":"slow"}}]}'
   else echo '{"items":[{"metadata":{"name":"standard","annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}]}'; fi ;;
 *) echo "mock kubectl: unhandled: $*" >&2; exit 2 ;;
@@ -285,3 +289,111 @@ reset_state
 ! grep 'run moca-genkeys' "$MOCK_LOG" | grep -q runAsUser || fail 'the OCP genkeys pod pins a UID (the SCC assigns one)'
 assert_no_secret_in_argv
 pass 'on OCP the genkeys pod takes its UID from the SCC, and no secret reaches argv'
+
+echo "== Task 14: settings, overlay, apply, wait"
+gen() { cat "$MOCK_STATE/applied-kustomization.yaml"; }
+replicas_of() { gen | grep -A2 "name: $1 }" | grep -oE 'value: [0-9]+' | grep -oE '[0-9]+'; }
+setting() { jq -r --arg k "$1" '.data[$k]' "$MOCK_STATE/moca__ConfigMap__moca-settings.json"; }
+
+reset_state
+expect_ok --target kind --skip-build
+[[ "$(replicas_of moca-control-plane)" == 0 ]] || fail 'no client id must render the control plane at 0 replicas'
+expect_out 'no SH_GITHUB_CLIENT_ID'
+grep -q "^kubectl --context kind-moca apply -k $REPO/deploy/k8s/.generated/kind\$" "$MOCK_LOG" || fail 'not applied from the generated overlay'
+grep -q '^  - ../../overlays/kind$' "$MOCK_STATE/applied-kustomization.yaml" || fail 'the generated overlay does not build on overlays/kind'
+[[ "$(setting SH_PUBLIC_HARNESS_URL)" == http://127.0.0.1:8080 ]] || fail 'kind advertises the wrong harness URL'
+# The control plane's configMapKeyRefs are not optional: a missing key stops the pod opaquely.
+[[ "$(jq -c '.data | keys' "$MOCK_STATE/moca__ConfigMap__moca-settings.json")" == '["SH_ADMIN_SUBJECTS","SH_ALLOW_OPERATOR_FALLBACK","SH_GITHUB_CLIENT_ID","SH_PUBLIC_HARNESS_URL"]' ]] ||
+  fail 'moca-settings must hold exactly the four keys the control plane references'
+expect_out 'port-forward svc/moca-supervisor 8080:8080'
+pass 'kind: generated overlay applied; control plane held at 0 without a client id; access printed'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
+[[ "$(replicas_of moca-control-plane)" == 1 ]] || fail 'a client id must render the control plane at 1 replica'
+! grep -q 'rollout restart' "$MOCK_LOG" || fail 'a first run restarted the control plane'
+: >"$MOCK_LOG"
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
+! grep -q 'rollout restart' "$MOCK_LOG" || fail 'an unchanged re-run restarted the control plane'
+(export SH_GITHUB_CLIENT_ID=Iv1.b; expect_ok --target kind --skip-build)
+grep -q 'rollout restart deployment/moca-control-plane -n moca' "$MOCK_LOG" || fail 'a changed client id did not restart the control plane'
+[[ "$(setting SH_GITHUB_CLIENT_ID)" == Iv1.b ]] || fail 'the new client id was not written'
+pass 'a settings change restarts the control plane; no change does not (Review Focus 2)'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=3 MOCK_RECORDS=3; expect_ok --target kind --skip-build)
+[[ "$(replicas_of moca-sandbox)" == 3 ]] || fail 'SH_SANDBOX_COUNT=3 did not set 3 replicas'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=3 MOCK_RECORDS=2; expect_fail --target kind --skip-build)
+expect_out 'only 2 of 3 sandboxes attached'
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0; expect_ok --target kind --skip-build)
+[[ "$(replicas_of moca-sandbox)" == 0 ]] || fail 'SH_SANDBOX_COUNT=0 did not set 0 replicas'
+! grep -q 'exec redis-0' "$MOCK_LOG" || fail 'SH_SANDBOX_COUNT=0 still waited for presence records'
+pass 'SH_SANDBOX_COUNT drives replicas and the presence wait; 0 skips it (Review Focus 3)'
+
+reset_state
+expect_ok --target kind-ci --skip-build
+grep -qF -- "--from-file=mock-anthropic.mjs=$REPO/deploy/microvm/mock-anthropic.mjs" "$MOCK_LOG" || fail 'kind-ci did not load the mock model ConfigMap'
+[[ "$(setting SH_GITHUB_CLIENT_ID)" == Iv1.k8s-smoke-unused ]] || fail 'kind-ci needs the placeholder client id'
+[[ "$(replicas_of moca-control-plane)" == 1 ]] || fail 'kind-ci must run the control plane'
+pass 'kind-ci: mock model ConfigMap, placeholder client id, control plane on'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp)
+[[ "$(grep -c '^oc adm policy add-scc-to-user nonroot-v2' "$MOCK_LOG")" == 5 ]] || fail 'expected 5 SCC grants'
+last_scc="$(grep -n '^oc adm policy' "$MOCK_LOG" | tail -1 | cut -d: -f1)"
+apply_at="$(grep -n 'apply -k' "$MOCK_LOG" | cut -d: -f1)"
+[[ "$last_scc" -lt "$apply_at" ]] || fail 'SCC grants must precede the apply'
+gen | grep -q 'value: moca-moca.apps.example.test' || fail 'the supervisor Route host was not set'
+gen | grep -q 'value: moca-control-plane-moca.apps.example.test' || fail 'the control plane Route host was not set'
+[[ "$(setting SH_PUBLIC_HARNESS_URL)" == https://moca-moca.apps.example.test ]] || fail 'OCP advertises the wrong harness URL'
+grep -q '^openssl req -x509' "$MOCK_LOG" || fail 'no self-signed certificate without --tls-cert'
+[[ -f "$REPO/deploy/k8s/.generated/ocp/moca-supervisor-ca.crt" ]] || fail 'the self-signed CA file is missing'
+expect_out 'NODE_EXTRA_CA_CERTS='
+pass 'ocp: SCC before apply, Route hosts, https harness URL, self-signed cert with the trust line'
+
+: >"$MOCK_LOG"
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp)
+! grep -q 'create secret tls' "$MOCK_LOG" || fail 'an existing TLS Secret was replaced without --tls-cert'
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp --tls-cert "$TMP/c.pem" --tls-key "$TMP/k.pem" --image ghcr.io/me/moca:v1 --sandbox-image quay.io/me/rw@sha256:abc)
+grep -qF -- "--cert=$TMP/c.pem" "$MOCK_LOG" || fail '--tls-cert was not installed'
+gen | grep -q 'newName: ghcr.io/me/moca$' && gen | grep -q 'newTag: v1$' || fail '--image was not rendered'
+gen | grep -q 'digest: sha256:abc$' || fail '--sandbox-image digest was not rendered'
+assert_no_secret_in_argv
+pass 'ocp: an existing cert is kept; --tls-cert replaces it; --image/--sandbox-image render'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a MOCK_NO_DEFAULT_SC=1; expect_ok --target kind --skip-build)
+expect_out 'no default StorageClass'
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
+! grep -q 'no default StorageClass' "$TMP/out" || fail 'warned about a default StorageClass that exists'
+pass 'a cluster with no default StorageClass gets a warning before Redis waits on its PVC (spec §10)'
+
+# An API error is never "missing" (same class as Task 13): an unreadable TLS Secret must not be
+# replaced by a self-signed one, and an unreadable moca-settings must not skip a needed restart.
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp)
+[[ -f "$MOCK_STATE/moca__Secret__moca-supervisor-tls.json" ]] || fail 'the first OCP run wrote no TLS Secret'
+: >"$MOCK_LOG"
+(export SH_GITHUB_CLIENT_ID=Iv1.a MOCK_GET_FAIL=1; expect_fail --target ocp)
+! grep -q 'create secret tls' "$MOCK_LOG" || fail 'a failed GET replaced the TLS Secret'
+: >"$MOCK_LOG"
+(export SH_GITHUB_CLIENT_ID=Iv1.a MOCK_GET_FAIL=moca-supervisor-tls; expect_fail --target ocp)
+expect_out 'etcd timeout'
+! grep -q 'create secret tls' "$MOCK_LOG" || fail 'a failed GET of moca-supervisor-tls alone replaced it with a self-signed one'
+pass 'ocp: a failed GET of the TLS Secret aborts the run and keeps the operator certificate'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a MOCK_GET_CM_FAIL=1; expect_fail --target kind --skip-build)
+expect_out 'etcd timeout'
+! grep -q 'apply -k' "$MOCK_LOG" || fail 'applied although moca-settings could not be read'
+pass 'a failed GET of moca-settings aborts the run instead of skipping a needed restart'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a MOCK_GET_SC_FAIL=1; expect_ok --target kind --skip-build)
+expect_out 'could not list StorageClasses'
+! grep -q 'no default StorageClass' "$TMP/out" || fail 'an unreadable StorageClass list was reported as no default'
+pass 'an unreadable StorageClass list is reported as such, and the advisory check does not abort'
+
+echo "setup.test.sh: all passed"

@@ -148,14 +148,6 @@ secret_json() { kc get secret "$1" -n "$2" --ignore-not-found -o json; }
 # jq on stdin (printf is a builtin), never on argv.
 json_value() { printf '%s' "$1" | jq -r --arg k "$2" '.data[$k] // empty' | base64 --decode; }
 
-# secret_value NAME NS KEY: one key, fetched on its own. Callers needing several keys of one Secret
-# fetch it once with secret_json, so every key comes from the same read.
-secret_value() {
-  local json
-  json="$(secret_json "$1" "$2")" || return 1 # $(...) clears set -e: fail explicitly
-  json_value "$json" "$3"
-}
-
 rand_hex() { openssl rand -hex 32; }
 
 # apply_secret NAME NS KEY...: the values are $S_0, $S_1, ... in this call's environment (callers
@@ -271,12 +263,223 @@ ensure_secrets() {
   ensure_mu1_secret
 }
 
+# --- Settings, TLS, SCC, the generated overlay, apply, wait (spec §4.1 steps 5-7) -----------------
+SUP_HOST=''
+CP_HOST=''
+SETTINGS_CHANGED=0
+GEN_DIR=''
+
+route_hosts() {
+  local domain
+  domain="$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}')"
+  [[ -n "$domain" ]] || die 'could not read the cluster apps domain (ingresses.config/cluster .spec.domain)'
+  SUP_HOST="moca-$NS.$domain"
+  CP_HOST="moca-control-plane-$NS.$domain"
+}
+
+client_id() {
+  if [[ -n "${SH_GITHUB_CLIENT_ID:-}" ]]; then
+    printf '%s' "$SH_GITHUB_CLIENT_ID"
+  elif [[ "$TARGET" == kind-ci ]]; then
+    # The CI smoke mints its own API tokens; no login ever runs, but the control plane needs a value.
+    printf 'Iv1.k8s-smoke-unused'
+  fi
+}
+
+public_harness_url() { if is_kind; then echo 'http://127.0.0.1:8080'; else echo "https://$SUP_HOST"; fi; }
+
+# Non-secret settings, read by the control plane through configMapKeyRef. Env from a ConfigMap is read
+# at container start, so a change needs a restart: SETTINGS_CHANGED tells apply_stack.
+write_settings() {
+  local before after
+  # Absent (first run) reads as empty; any other API error aborts the run, or a needed restart
+  # would be silently skipped.
+  before="$(kc get configmap moca-settings -n "$NS" --ignore-not-found -o json | jq -cS '.data // {}')"
+  after="$(jq -ncS --arg id "$(client_id)" --arg admins "${SH_ADMIN_SUBJECTS:-}" --arg url "$(public_harness_url)" \
+    --arg fb "${SH_ALLOW_OPERATOR_FALLBACK:-false}" \
+    '{SH_GITHUB_CLIENT_ID: $id, SH_ADMIN_SUBJECTS: $admins, SH_PUBLIC_HARNESS_URL: $url, SH_ALLOW_OPERATOR_FALLBACK: $fb}')"
+  jq -n --arg ns "$NS" --argjson data "$after" \
+    '{apiVersion: "v1", kind: "ConfigMap", metadata: {name: "moca-settings", namespace: $ns}, data: $data}' |
+    kc apply --server-side --force-conflicts --field-manager=moca-setup -f - >/dev/null
+  if [[ -n "$before" && "$before" != "$after" ]]; then SETTINGS_CHANGED=1; fi
+}
+
+# kind-ci's mock model, from the file itself: no kustomization reads outside its root.
+ensure_mock_model() {
+  [[ "$TARGET" == kind-ci ]] || return 0
+  kc create configmap moca-mock-model -n "$NS" \
+    --from-file=mock-anthropic.mjs="$REPO_ROOT/deploy/microvm/mock-anthropic.mjs" --dry-run=client -o json |
+    kc apply --server-side --force-conflicts --field-manager=moca-setup -f - >/dev/null
+}
+
+# The passthrough Route needs a certificate valid for the Route host, which service-ca cannot issue.
+ensure_tls() {
+  [[ "$TARGET" == ocp ]] || return 0
+  if [[ -n "$TLS_CERT" ]]; then
+    log "installing the supervisor TLS certificate from $TLS_CERT"
+    kc create secret tls moca-supervisor-tls -n "$NS" --cert="$TLS_CERT" --key="$TLS_KEY" --dry-run=client -o json |
+      kc apply --server-side --force-conflicts --field-manager=moca-setup -f - >/dev/null
+    return 0
+  fi
+  # Absent reads as empty; any other API error aborts (set -e, outside any conditional), so an
+  # unreadable operator certificate is never replaced by a self-signed one.
+  local existing dir ca="$K8S_DIR/.generated/ocp/moca-supervisor-ca.crt"
+  existing="$(kc get secret moca-supervisor-tls -n "$NS" --ignore-not-found -o name)"
+  [[ -z "$existing" ]] || return 0
+  mkdir -p "$(dirname "$ca")"
+  dir="$(mktemp -d)"
+  chmod 700 "$dir"
+  openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=$SUP_HOST" \
+    -addext "subjectAltName=DNS:$SUP_HOST" -keyout "$dir/tls.key" -out "$ca" 2>/dev/null
+  kc create secret tls moca-supervisor-tls -n "$NS" --cert="$ca" --key="$dir/tls.key" --dry-run=client -o json |
+    kc apply --server-side --force-conflicts --field-manager=moca-setup -f - >/dev/null
+  rm -rf "$dir"
+  log "WARNING: no --tls-cert given, so the supervisor uses a SELF-SIGNED certificate for $SUP_HOST."
+  log "  Every mocactl user must trust it: export NODE_EXTRA_CA_CERTS=$ca"
+}
+
+# Explicit non-root UIDs need nonroot-v2 (restricted-v2 does not reliably admit them; see
+# deploy/knative/setup-ocp.sh). Granted BEFORE the apply, so no pod is rejected first.
+grant_scc() {
+  [[ "$TARGET" == ocp ]] || return 0
+  local sa
+  for sa in moca-supervisor sandbox-relay redis moca-control-plane; do
+    oc adm policy add-scc-to-user nonroot-v2 -z "$sa" -n "$NS" >/dev/null
+  done
+  oc adm policy add-scc-to-user nonroot-v2 -z moca-sandbox -n "$SBX_NS" >/dev/null
+}
+
+# image_entry FROM REF: a kustomize images: entry rewriting FROM to REF (tag or digest).
+image_entry() {
+  local from="$1" ref="$2" name tag=''
+  if [[ "$ref" == *@* ]]; then
+    printf '  - name: %s\n    newName: %s\n    digest: %s\n' "$from" "${ref%@*}" "${ref#*@}"
+    return 0
+  fi
+  name="$ref"
+  if [[ "${ref##*/}" == *:* ]]; then
+    name="${ref%:*}"
+    tag="${ref##*:}"
+  fi
+  printf '  - name: %s\n    newName: %s\n' "$from" "$name"
+  [[ -z "$tag" ]] || printf '    newTag: %s\n' "$tag"
+}
+
+# Per-run values go in a generated overlay on top of the checked-in one, so the checked-in
+# manifests stay exactly what the manifest tests render.
+write_overlay() {
+  local cp_replicas=1
+  if [[ -z "$(client_id)" ]]; then
+    cp_replicas=0
+    log 'no SH_GITHUB_CLIENT_ID: the control plane is installed with 0 replicas (nobody can log in without one); re-run with it set'
+  fi
+  GEN_DIR="$K8S_DIR/.generated/$TARGET"
+  mkdir -p "$GEN_DIR"
+  {
+    printf '# GENERATED by deploy/k8s/setup.sh on every run. Do not edit; gitignored.\n'
+    printf 'apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - ../../overlays/%s\n' "$TARGET"
+    printf 'patches:\n'
+    printf '  - target: { kind: Deployment, name: moca-control-plane }\n    patch: |-\n      - { op: replace, path: /spec/replicas, value: %s }\n' "$cp_replicas"
+    printf '  - target: { kind: StatefulSet, name: moca-sandbox }\n    patch: |-\n      - { op: replace, path: /spec/replicas, value: %s }\n' "$SH_SANDBOX_COUNT"
+    if [[ "$TARGET" == ocp ]]; then
+      printf '  - target: { kind: Route, name: moca }\n    patch: |-\n      - { op: replace, path: /spec/host, value: %s }\n' "$SUP_HOST"
+      printf '  - target: { kind: Route, name: moca-control-plane }\n    patch: |-\n      - { op: replace, path: /spec/host, value: %s }\n' "$CP_HOST"
+      if [[ -n "$IMAGE$SANDBOX_IMAGE" ]]; then
+        printf 'images:\n'
+        [[ -z "$IMAGE" ]] || image_entry ghcr.io/rossoctl/moca "$IMAGE"
+        [[ -z "$SANDBOX_IMAGE" ]] || image_entry ghcr.io/rossoctl/moca-remote-worker "$SANDBOX_IMAGE"
+      fi
+    fi
+  } >"$GEN_DIR/kustomization.yaml"
+}
+
+apply_stack() {
+  kc apply -k "$GEN_DIR" >/dev/null
+  if [[ "$SETTINGS_CHANGED" == 1 ]]; then
+    log 'moca-settings changed: restarting the control plane to pick it up'
+    kc rollout restart deployment/moca-control-plane -n "$NS" >/dev/null
+  fi
+}
+
+# Redis's PVC binds only through a default StorageClass. Kind has one; some OpenShift clusters do not,
+# and then redis-0 sits Pending and wait_ready times out with no hint why.
+warn_storage_class() {
+  # Advisory only (listing StorageClasses is cluster-scoped and may be denied), but a failed read is
+  # reported as one, never as "no default".
+  local json n
+  if ! json="$(kc get storageclass -o json)"; then
+    log 'WARNING: could not list StorageClasses; if redis-0 stays Pending, check that one is the default'
+    return 0
+  fi
+  n="$(printf '%s' "$json" |
+    jq '[.items[] | select(.metadata.annotations["storageclass.kubernetes.io/is-default-class"] == "true")] | length')"
+  [[ "$n" != 0 ]] ||
+    log 'WARNING: the cluster has no default StorageClass, so the Redis PVC cannot bind and redis-0 will stay Pending: mark one default (storageclass.kubernetes.io/is-default-class=true)'
+}
+
+wait_ready() {
+  local w
+  for w in statefulset/redis deployment/sandbox-relay deployment/moca-supervisor; do
+    kc rollout status "$w" -n "$NS" --timeout=300s
+  done
+  [[ -z "$(client_id)" ]] || kc rollout status deployment/moca-control-plane -n "$NS" --timeout=300s
+  [[ "$SH_SANDBOX_COUNT" == 0 ]] || kc rollout status statefulset/moca-sandbox -n "$SBX_NS" --timeout=300s
+}
+
+# The install is not done until the relay has mirrored every sandbox into sh:sandbox:records -- that
+# is what the supervisor leases from. redis-cli authenticates from the container's REDISCLI_AUTH.
+wait_records() {
+  if [[ "$SH_SANDBOX_COUNT" == 0 ]]; then
+    log 'SH_SANDBOX_COUNT=0: no container sandboxes to wait for'
+    return 0
+  fi
+  local n waited=0
+  while :; do
+    n="$(kc exec -n "$NS" redis-0 -- sh -c 'redis-cli HLEN sh:sandbox:records' 2>/dev/null | tr -dc '0-9' || true)"
+    [[ "${n:-0}" -lt "$SH_SANDBOX_COUNT" ]] || break
+    [[ "$waited" -lt "$SH_WAIT_SECONDS" ]] ||
+      die "only ${n:-0} of $SH_SANDBOX_COUNT sandboxes attached to the relay after ${SH_WAIT_SECONDS}s: see 'kubectl -n $NS logs deployment/sandbox-relay' and 'kubectl -n $SBX_NS logs statefulset/moca-sandbox'"
+    sleep 2
+    waited=$((waited + 2))
+  done
+  log "$n sandbox(es) attached to the relay"
+}
+
+print_access() {
+  if is_kind; then
+    cat >&2 <<EOF
+P6 is up on kind (context $KIND_CONTEXT). Reach it with two port-forwards:
+  kubectl --context $KIND_CONTEXT -n $NS port-forward svc/moca-supervisor 8080:8080
+  kubectl --context $KIND_CONTEXT -n $NS port-forward svc/moca-control-plane 8090:8080
+then:  mocactl --control-plane-url http://127.0.0.1:8090 login
+EOF
+  else
+    cat >&2 <<EOF
+P6 is up on OpenShift.
+  harness:        https://$SUP_HOST   (TLS passthrough to the supervisor's L4 sidecar)
+  control plane:  https://$CP_HOST
+then:  mocactl --control-plane-url https://$CP_HOST login
+EOF
+  fi
+}
+
 main() {
   parse_args "$@"
   preflight
   ensure_images
   ensure_namespaces
   ensure_secrets
+  [[ "$TARGET" != ocp ]] || route_hosts
+  ensure_tls
+  write_settings
+  ensure_mock_model
+  grant_scc
+  write_overlay
+  warn_storage_class
+  apply_stack
+  wait_ready
+  wait_records
+  print_access
 }
 
 [[ "${SH_SOURCE_ONLY:-}" == 1 ]] || main "$@"
