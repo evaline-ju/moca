@@ -8,9 +8,10 @@
 # SH_SANDBOX_COUNT (default 2; 0 runs no container sandboxes), SH_WAIT_SECONDS (default 120),
 # SH_SOURCE_ONLY=1 (define the functions and stop, for tests).
 #
-# Idempotent: a re-run converges and never rotates a secret. No secret value is ever put on a
-# command line -- values travel through pipes and through the environment of the one jq that
-# writes each Secret.
+# Idempotent: a re-run converges and never rotates a secret. Inputs are sticky: a re-run keeps every
+# setting, --image, --sandbox-image (ocp) and SH_SANDBOX_COUNT it is not given; an explicitly empty
+# setting variable (SH_ADMIN_SUBJECTS=) clears it. No secret value is ever put on a command line --
+# values travel through pipes and through the environment of the one jq that writes each Secret.
 set -euo pipefail
 
 K8S_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,16 +38,20 @@ die() {
 }
 usage() { sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
+# need_value FLAG ARGC [VALUE]: die unless FLAG was given a non-empty value. `shift 2` with one
+# argument left fails without a word, and under set -e that is a silent exit.
+need_value() { [[ "$2" -ge 2 && -n "${3-}" ]] || die "$1 needs a value"; }
+
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
-    --target) TARGET="${2-}"; shift 2 ;;
-    --image) IMAGE="${2-}"; shift 2 ;;
-    --sandbox-image) SANDBOX_IMAGE="${2-}"; shift 2 ;;
+    --target) need_value "$1" $# "${2-}"; TARGET="$2"; shift 2 ;;
+    --image) need_value "$1" $# "${2-}"; IMAGE="$2"; shift 2 ;;
+    --sandbox-image) need_value "$1" $# "${2-}"; SANDBOX_IMAGE="$2"; shift 2 ;;
     --build) BUILD=always; shift ;;
     --skip-build) BUILD=never; shift ;;
-    --tls-cert) TLS_CERT="${2-}"; shift 2 ;;
-    --tls-key) TLS_KEY="${2-}"; shift 2 ;;
+    --tls-cert) need_value "$1" $# "${2-}"; TLS_CERT="$2"; shift 2 ;;
+    --tls-key) need_value "$1" $# "${2-}"; TLS_KEY="$2"; shift 2 ;;
     -h | --help) usage; exit 0 ;;
     *) die "unknown argument: $1 (see --help)" ;;
     esac
@@ -61,8 +66,10 @@ parse_args() {
     [[ -n "$TLS_CERT" && -n "$TLS_KEY" ]] || die '--tls-cert and --tls-key go together'
     [[ -r "$TLS_CERT" && -r "$TLS_KEY" ]] || die "cannot read $TLS_CERT or $TLS_KEY"
   fi
-  SH_SANDBOX_COUNT="${SH_SANDBOX_COUNT:-2}"
-  [[ "$SH_SANDBOX_COUNT" =~ ^[0-9]+$ ]] ||
+  # Validated here, before anything touches a cluster; an unset or empty count is resolved later,
+  # from the earlier run's value (load_setup_inputs).
+  SH_SANDBOX_COUNT="${SH_SANDBOX_COUNT:-}"
+  [[ -z "$SH_SANDBOX_COUNT" || "$SH_SANDBOX_COUNT" =~ ^[0-9]+$ ]] ||
     die "SH_SANDBOX_COUNT='$SH_SANDBOX_COUNT' must be a whole number (0 runs no container sandboxes)"
   SH_WAIT_SECONDS="${SH_WAIT_SECONDS:-120}"
 }
@@ -85,8 +92,11 @@ preflight() {
   command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || missing="$missing sha256sum|shasum"
   [[ -z "$missing" ]] || die "missing required commands:$missing"
   if is_kind; then
-    v="$(kind version | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+    # `|| true`: a grep that matches nothing would otherwise end the run here, under set -e and
+    # pipefail, without a word.
+    v="$(kind version | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
     v="${v#v}"
+    [[ -n "$v" ]] || die "could not read a version from \`kind version\` (got: $(kind version 2>&1 | head -1)); kind v$MIN_KIND_VERSION or newer is required"
     version_ge "$v" "$MIN_KIND_VERSION" ||
       die "kind v$MIN_KIND_VERSION or newer is required (found v$v): it is the first whose default CNI enforces NetworkPolicy, and this deployment's isolation IS NetworkPolicy"
   else
@@ -135,6 +145,46 @@ harness_ref() { if is_kind; then echo "$LOCAL_HARNESS"; else echo "${IMAGE:-ghcr
 
 # Namespaces alone first, so Secrets can land before any workload that mounts them.
 ensure_namespaces() { kc apply -f "$K8S_DIR/base/namespaces.yaml" >/dev/null; }
+
+# configmap_json NAME: the ConfigMap in $NS as JSON, or nothing when it does not exist. Any other
+# API error fails, and the caller's assignment aborts the run (set -e, outside any conditional): an
+# unreadable ConfigMap must never look like a missing one, or this run would reset every input the
+# operator gave an earlier one. One command, like secret_json: a command substitution does not
+# inherit set -e, so a failure inside a longer body here would be swallowed.
+configmap_json() { kc get configmap "$1" -n "$NS" --ignore-not-found -o json; }
+
+# cm_value JSON KEY: KEY's value from configmap_json's output (possibly empty), or nothing.
+cm_value() { printf '%s' "$1" | jq -r --arg k "$2" '.data[$k] // empty'; }
+
+# --- Sticky inputs (moca-setup) -------------------------------------------------------------------
+# A re-run is how an operator changes ONE input (README "Re-running"), so it must not reset the ones
+# it is not given: without this, a rotation recipe that sets one variable rolled an OCP stack back to
+# :latest, scaled the sandboxes back to 2 and the control plane to 0. --image, --sandbox-image and the
+# resolved SH_SANDBOX_COUNT are kept in the non-secret ConfigMap moca-setup and reused when not given.
+# Kind ignores the stored images: it always runs the locally loaded dev.local tags, and --image there
+# only picks what to pull, so only the sandbox count is stored for it.
+load_setup_inputs() {
+  local json
+  json="$(configmap_json moca-setup)"
+  if ! is_kind; then
+    [[ -n "$IMAGE" ]] || IMAGE="$(cm_value "$json" IMAGE)"
+    [[ -n "$SANDBOX_IMAGE" ]] || SANDBOX_IMAGE="$(cm_value "$json" SANDBOX_IMAGE)"
+  fi
+  [[ -n "$SH_SANDBOX_COUNT" ]] || SH_SANDBOX_COUNT="$(cm_value "$json" SH_SANDBOX_COUNT)"
+  [[ -n "$SH_SANDBOX_COUNT" ]] || SH_SANDBOX_COUNT=2
+  [[ "$SH_SANDBOX_COUNT" =~ ^[0-9]+$ ]] ||
+    die "moca-setup holds SH_SANDBOX_COUNT='$SH_SANDBOX_COUNT': re-run with SH_SANDBOX_COUNT set to a whole number"
+  local data
+  if is_kind; then
+    data="$(jq -nc --arg n "$SH_SANDBOX_COUNT" '{SH_SANDBOX_COUNT: $n}')"
+  else
+    data="$(jq -nc --arg n "$SH_SANDBOX_COUNT" --arg i "$IMAGE" --arg s "$SANDBOX_IMAGE" \
+      '{SH_SANDBOX_COUNT: $n, IMAGE: $i, SANDBOX_IMAGE: $s} | with_entries(select(.value != ""))')"
+  fi
+  jq -n --arg ns "$NS" --argjson data "$data" \
+    '{apiVersion: "v1", kind: "ConfigMap", metadata: {name: "moca-setup", namespace: $ns}, data: $data}' |
+    kc apply --server-side --force-conflicts --field-manager=moca-setup -f - >/dev/null
+}
 
 # --- Secrets (spec §4.2) -----------------------------------------------------------------------
 # Generated once and never rotated: an existing value is always kept; only a missing key is filled.
@@ -283,14 +333,11 @@ route_hosts() {
   CP_HOST="moca-control-plane-$NS.$domain"
 }
 
-client_id() {
-  if [[ -n "${SH_GITHUB_CLIENT_ID:-}" ]]; then
-    printf '%s' "$SH_GITHUB_CLIENT_ID"
-  elif [[ "$TARGET" == kind-ci ]]; then
-    # The CI smoke mints its own API tokens; no login ever runs, but the control plane needs a value.
-    printf 'Iv1.k8s-smoke-unused'
-  fi
-}
+# The client id as resolved by write_settings (sticky: the earlier run's value when
+# SH_GITHUB_CLIENT_ID is unset). write_overlay and wait_ready decide replicas from this, never from
+# the raw environment, so a re-run without the variable keeps the control plane running.
+CLIENT_ID=''
+client_id() { printf '%s' "$CLIENT_ID"; }
 
 public_harness_url() { if is_kind; then echo 'http://127.0.0.1:8080'; else echo "https://$SUP_HOST"; fi; }
 
@@ -303,10 +350,23 @@ sha256() {
 # only at container start, so write_overlay stamps SETTINGS_HASH on the control plane's pod template:
 # a change rolls it through the apply itself. Nothing remembers "changed" between runs, so a run that
 # writes new settings and then fails cannot lose the roll -- the next run renders the same new hash.
+#
+# Sticky: each input variable that is UNSET keeps the value moca-settings already holds; one that is
+# set, even to empty (SH_ADMIN_SUBJECTS=), replaces it. SH_PUBLIC_HARNESS_URL is not an input: it is
+# derived from the target (and the Route host) on every run.
 write_settings() {
-  local after
-  after="$(jq -ncS --arg id "$(client_id)" --arg admins "${SH_ADMIN_SUBJECTS:-}" --arg url "$(public_harness_url)" \
-    --arg fb "${SH_ALLOW_OPERATOR_FALLBACK:-false}" \
+  local before after admins fb
+  before="$(configmap_json moca-settings)"
+  if [[ -n "${SH_GITHUB_CLIENT_ID+x}" ]]; then CLIENT_ID="$SH_GITHUB_CLIENT_ID"; else CLIENT_ID="$(cm_value "$before" SH_GITHUB_CLIENT_ID)"; fi
+  if [[ -z "$CLIENT_ID" && "$TARGET" == kind-ci ]]; then
+    # The CI smoke mints its own API tokens; no login ever runs, but the control plane needs a value.
+    CLIENT_ID='Iv1.k8s-smoke-unused'
+  fi
+  if [[ -n "${SH_ADMIN_SUBJECTS+x}" ]]; then admins="$SH_ADMIN_SUBJECTS"; else admins="$(cm_value "$before" SH_ADMIN_SUBJECTS)"; fi
+  if [[ -n "${SH_ALLOW_OPERATOR_FALLBACK+x}" ]]; then fb="$SH_ALLOW_OPERATOR_FALLBACK"; else fb="$(cm_value "$before" SH_ALLOW_OPERATOR_FALLBACK)"; fi
+  fb="${fb:-false}"
+  after="$(jq -ncS --arg id "$CLIENT_ID" --arg admins "$admins" --arg url "$(public_harness_url)" \
+    --arg fb "$fb" \
     '{SH_GITHUB_CLIENT_ID: $id, SH_ADMIN_SUBJECTS: $admins, SH_PUBLIC_HARNESS_URL: $url, SH_ALLOW_OPERATOR_FALLBACK: $fb}')"
   jq -n --arg ns "$NS" --argjson data "$after" \
     '{apiVersion: "v1", kind: "ConfigMap", metadata: {name: "moca-settings", namespace: $ns}, data: $data}' |
@@ -389,7 +449,7 @@ write_overlay() {
   local cp_replicas=1
   if [[ -z "$(client_id)" ]]; then
     cp_replicas=0
-    log 'no SH_GITHUB_CLIENT_ID: the control plane is installed with 0 replicas (nobody can log in without one); re-run with it set'
+    log 'no SH_GITHUB_CLIENT_ID (given or stored): the control plane is installed with 0 replicas (nobody can log in without one); re-run with it set'
   fi
   GEN_DIR="$K8S_DIR/.generated/$TARGET"
   mkdir -p "$GEN_DIR"
@@ -484,6 +544,7 @@ main() {
   preflight
   ensure_images
   ensure_namespaces
+  load_setup_inputs
   ensure_secrets
   [[ "$TARGET" != ocp ]] || route_hosts
   ensure_tls

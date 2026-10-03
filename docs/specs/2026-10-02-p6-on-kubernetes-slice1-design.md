@@ -262,6 +262,14 @@ env: SH_GITHUB_CLIENT_ID, SH_ADMIN_SUBJECTS, SH_ALLOW_OPERATOR_FALLBACK, SH_SAND
 
 Steps, in order. Every step is idempotent.
 
+**Inputs are sticky.** A re-run keeps every input it is not given, so changing one input never
+resets the others. `SH_GITHUB_CLIENT_ID`, `SH_ADMIN_SUBJECTS` and `SH_ALLOW_OPERATOR_FALLBACK` are
+read back from the ConfigMap `moca-settings` when the variable is unset; a variable set to empty
+clears its value. `SH_SANDBOX_COUNT`, and on `ocp` `--image` and `--sandbox-image`, are kept in a
+non-secret ConfigMap `moca-setup` in `moca` and reused when not given (Kind always runs the locally
+loaded images, so it stores none). Both ConfigMaps are read with `--ignore-not-found`; any other
+API error aborts the run instead of resetting the inputs.
+
 1. **Preflight.**
    - Common: `kubectl`, `openssl`, `jq`.
    - `kind`: `kind` ≥ 0.24.0, the first release whose default CNI enforces NetworkPolicy (via
@@ -292,7 +300,8 @@ Steps, in order. Every step is idempotent.
    - With no `SH_GITHUB_CLIENT_ID`, the control plane is **rendered** with `replicas: 0`: setup adds
      a kustomize patch to the render before `apply`, rather than scaling down afterwards, so it never
      starts into a crash-loop. Setup says so. This mirrors `setup-vm.sh`'s "installed but not
-     started"; a re-run with the client id renders `replicas: 1`.
+     started"; a re-run with the client id renders `replicas: 1`, and so does every later re-run
+     without it, because the stored client id is sticky.
 7. **Print how to reach it.**
    - Kind: the two `kubectl port-forward` commands, and
      `mocactl --control-plane-url http://127.0.0.1:8090 login`.

@@ -66,6 +66,11 @@ creates the namespaces, generates the Secrets once, applies the overlay, and wai
 workload is rolled out and every sandbox is attached to the relay. Every kube call is pinned to the
 context `kind-moca`, never the shell's current one.
 
+> **`kind create cluster` switches your current context.** When `setup.sh` creates the cluster,
+> kind sets the current kube context to `kind-moca`, as it always does. `setup.sh` itself never
+> uses the current context, but your next bare `kubectl` will talk to kind until you switch back
+> (`kubectl config use-context <previous>`).
+
 Image choice, for `--target kind`:
 
 - `--build` builds both images from this checkout.
@@ -118,6 +123,23 @@ if an earlier run failed after writing them.
 
 A re-run with nothing changed converges without restarting any pod or touching any Secret. To
 remove everything: `kind delete cluster --name moca`.
+
+**Inputs are sticky.** A re-run keeps every input it is not given, so you change one input by
+re-running with just that one:
+
+- `SH_GITHUB_CLIENT_ID`, `SH_ADMIN_SUBJECTS` and `SH_ALLOW_OPERATOR_FALLBACK` live in the
+  ConfigMap `moca-settings`. A variable that is **unset** keeps the stored value. A variable set
+  to empty **clears** it: `SH_ADMIN_SUBJECTS= deploy/k8s/setup.sh ...` removes every admin, and
+  `SH_GITHUB_CLIENT_ID=` takes the control plane back to 0 replicas.
+- `SH_SANDBOX_COUNT`, and on OpenShift `--image` and `--sandbox-image`, live in the ConfigMap
+  `moca-setup` (namespace `moca`, nothing secret in it). A given value replaces the stored one.
+  To go back to a default, pass it explicitly (`SH_SANDBOX_COUNT=2`,
+  `--image ghcr.io/rossoctl/moca:latest`), or delete the stored key:
+  `kubectl -n moca patch configmap moca-setup --type=json -p '[{"op":"remove","path":"/data/IMAGE"}]'`.
+  On Kind the images are never stored: the stack always runs the locally loaded `dev.local` tags.
+
+`kubectl -n moca get configmap moca-settings moca-setup -o yaml` shows what the next run will reuse.
+A failed read of either ConfigMap aborts the run rather than resetting the inputs.
 
 **The CI variant** is `--target kind-ci`. It adds a scripted mock model to the supervisor pod and a
 placeholder client id, so the smoke can drive real turns with no model key and no login:
@@ -214,8 +236,9 @@ through the environment of the one `jq` that writes each Secret, and are applied
   values sit while the pod runs.
 - `moca-supervisor-tls` is replaced only when `--tls-cert` is given (section 9).
 
-**To rotate on purpose,** delete the Secret, re-run `setup.sh`, then restart what consumes it. For
-example, the relay tokens on Kind:
+**To rotate on purpose,** delete the Secret, re-run `setup.sh`, then restart what consumes it. The
+re-run needs no other input: settings, the sandbox count and (on OpenShift) the images are sticky
+(section 2), so it does not reset them. For example, the relay tokens on Kind:
 
 ```bash
 kubectl --context kind-moca -n moca delete secret moca-relay

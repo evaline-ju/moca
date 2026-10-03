@@ -77,6 +77,11 @@ case "${1-} ${2-}" in
     echo 'Error from server (InternalError): etcd timeout' >&2
     exit 1
   fi
+  # MOCK_GET_CM_FAIL=NAME fails ConfigMap NAME's GET.
+  if [[ "$kind" == ConfigMap && "${MOCK_GET_CM_FAIL-}" == "$3" ]]; then
+    echo 'Error from server (InternalError): etcd timeout' >&2
+    exit 1
+  fi
   f="$(store "$ns" "$kind" "$3")"
   if [[ ! -f "$f" ]]; then
     [[ " $* " != *" --ignore-not-found "* ]] || exit 0
@@ -125,7 +130,7 @@ cat >"$TMP/bin/kind" <<'MOCK'
 #!/usr/bin/env bash
 printf 'kind %s\n' "$*" >>"$MOCK_LOG"
 case "$*" in
-version) echo "kind v${MOCK_KIND_VERSION:-0.27.0} go1.23.4 linux/amd64" ;;
+version) echo "${MOCK_KIND_VERSION_OUT:-kind v${MOCK_KIND_VERSION:-0.27.0} go1.23.4 linux/amd64}" ;;
 "get clusters") [[ -z "${MOCK_KIND_CLUSTERS-moca}" ]] || echo "${MOCK_KIND_CLUSTERS-moca}" ;;
 "create cluster"* | "load docker-image"*) : ;;
 *) echo "mock kind: unhandled: $*" >&2; exit 2 ;;
@@ -200,12 +205,30 @@ expect_out "SH_SANDBOX_COUNT='abc'"
 (export MOCK_KIND_VERSION=0.23.0; expect_fail --target kind)
 expect_out 'kind v0.24.0 or newer is required'
 pass 'bad arguments and an old kind are refused, naming the fix'
+for flag in --target --image --sandbox-image --tls-cert --tls-key; do
+  expect_fail --target ocp "$flag"
+  expect_out "$flag needs a value"
+done
+expect_fail --target
+expect_out '--target needs a value'
+pass 'a value flag given no value is refused, naming the flag'
+(export MOCK_KIND_VERSION_OUT='kind: something unexpected'; expect_fail --target kind)
+expect_out 'could not read a version from `kind version`'
+pass 'unrecognised `kind version` output is refused with a message, not a silent exit'
 
 reset_state
 (export MOCK_CURRENT_CONTEXT=prod-cluster SH_GITHUB_CLIENT_ID=Iv1.test; expect_ok --target kind)
 bad="$(grep '^kubectl ' "$MOCK_LOG" | grep -v '^kubectl --context kind-moca ' || true)"
 [[ -z "$bad" ]] || fail "kubectl ran without --context kind-moca: $bad"
-pass 'every kubectl call on kind is pinned to kind-moca, whatever the ambient context (Review Focus 1)'
+grep -q '^kubectl --context kind-moca apply -f ' "$MOCK_LOG" || fail 'no kubectl --context kind-moca apply -f was logged on kind'
+reset_state
+(export MOCK_CURRENT_CONTEXT=prod-cluster; expect_ok --target kind-ci --skip-build)
+bad="$(grep '^kubectl ' "$MOCK_LOG" | grep -v '^kubectl --context kind-moca ' || true)"
+[[ -z "$bad" ]] || fail "kubectl ran without --context kind-moca on kind-ci: $bad"
+grep -q '^kubectl --context kind-moca apply -f ' "$MOCK_LOG" || fail 'no kubectl --context kind-moca apply -f was logged on kind-ci'
+pass 'every kubectl call on kind and kind-ci is pinned to kind-moca, and the applies did run there (Review Focus 1)'
+reset_state
+(export MOCK_CURRENT_CONTEXT=prod-cluster SH_GITHUB_CLIENT_ID=Iv1.test; expect_ok --target kind)
 for pair in 'ghcr.io/rossoctl/moca:latest dev.local/moca:local' \
   'ghcr.io/rossoctl/moca-remote-worker:latest dev.local/moca-remote-worker:local'; do
   src="${pair% *}"
@@ -432,6 +455,58 @@ reset_state
 (export SH_GITHUB_CLIENT_ID=Iv1.a MOCK_MKTEMP_DIR="$TMP/tmpdir"; expect_ok --target ocp)
 [[ -z "$(ls -A "$TMP/tmpdir")" ]] || fail 'a successful run left the self-signed key behind'
 pass 'ocp: the self-signed private key is removed whether the TLS install succeeds or fails'
+
+echo "== sticky inputs: a re-run keeps every input it is not given"
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ADMIN_SUBJECTS=github:alice SH_ALLOW_OPERATOR_FALLBACK=true; expect_ok --target kind --skip-build)
+h1="$(hash_of)"
+(unset SH_GITHUB_CLIENT_ID SH_ADMIN_SUBJECTS SH_ALLOW_OPERATOR_FALLBACK; expect_ok --target kind --skip-build)
+[[ "$(setting SH_GITHUB_CLIENT_ID)" == Iv1.a ]] || fail 'a re-run without SH_GITHUB_CLIENT_ID dropped the client id'
+[[ "$(setting SH_ADMIN_SUBJECTS)" == github:alice ]] || fail 'a re-run without SH_ADMIN_SUBJECTS dropped the admins'
+[[ "$(setting SH_ALLOW_OPERATOR_FALLBACK)" == true ]] || fail 'a re-run without SH_ALLOW_OPERATOR_FALLBACK reset it'
+[[ "$(replicas_of moca-control-plane)" == 1 ]] || fail 'a re-run without SH_GITHUB_CLIENT_ID scaled the control plane to 0'
+! grep -q 'no SH_GITHUB_CLIENT_ID' "$TMP/out" || fail 'a re-run with a stored client id still warned that there is none'
+[[ "$(hash_of)" == "$h1" ]] || fail 'a re-run with no inputs changed the settings hash (it would roll the control plane)'
+grep -q 'rollout status deployment/moca-control-plane' "$MOCK_LOG" || fail 'the re-run did not wait for the control plane it keeps running'
+pass 'settings are sticky: a re-run without them keeps the client id, admins, fallback, replicas and hash'
+(export SH_ADMIN_SUBJECTS=; expect_ok --target kind --skip-build)
+[[ -z "$(setting SH_ADMIN_SUBJECTS)" ]] || fail 'SH_ADMIN_SUBJECTS= (explicitly empty) did not clear the admins'
+[[ "$(setting SH_GITHUB_CLIENT_ID)" == Iv1.a ]] || fail 'clearing the admins touched the client id'
+(export SH_GITHUB_CLIENT_ID=; expect_ok --target kind --skip-build)
+[[ -z "$(setting SH_GITHUB_CLIENT_ID)" && "$(replicas_of moca-control-plane)" == 0 ]] || fail 'SH_GITHUB_CLIENT_ID= did not clear the client id'
+pass 'an explicitly empty variable clears its setting'
+(export MOCK_GET_CM_FAIL=moca-settings SH_ADMIN_SUBJECTS=github:bob; expect_fail --target kind --skip-build)
+expect_out 'etcd timeout'
+[[ -z "$(setting SH_ADMIN_SUBJECTS)" ]] || fail 'a failed moca-settings read still wrote the settings'
+(export MOCK_GET_CM_FAIL=moca-setup; expect_fail --target kind --skip-build)
+expect_out 'etcd timeout'
+pass 'a failed read of moca-settings or moca-setup aborts the run instead of resetting the inputs'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=3 MOCK_RECORDS=3; expect_ok --target kind --skip-build)
+(export MOCK_RECORDS=3; expect_ok --target kind --skip-build)
+[[ "$(replicas_of moca-sandbox)" == 3 ]] || fail 'a re-run without SH_SANDBOX_COUNT reset the sandbox count'
+[[ "$(jq -r '.data.SH_SANDBOX_COUNT' "$MOCK_STATE/moca__ConfigMap__moca-setup.json")" == 3 ]] || fail 'moca-setup does not hold the sandbox count'
+(export SH_SANDBOX_COUNT=1 MOCK_RECORDS=1; expect_ok --target kind --skip-build)
+[[ "$(replicas_of moca-sandbox)" == 1 ]] || fail 'a given SH_SANDBOX_COUNT did not replace the stored one'
+pass 'SH_SANDBOX_COUNT is sticky, and a given value replaces it'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp --image ghcr.io/me/moca:v1 --sandbox-image quay.io/me/rw@sha256:abc)
+: >"$MOCK_LOG"
+(unset SH_GITHUB_CLIENT_ID; expect_ok --target ocp)
+gen | grep -q 'newName: ghcr.io/me/moca$' && gen | grep -q 'newTag: v1$' || fail 'an OCP re-run without --image rolled the harness image back'
+gen | grep -q 'digest: sha256:abc$' || fail 'an OCP re-run without --sandbox-image rolled the sandbox image back'
+[[ "$(replicas_of moca-control-plane)" == 1 ]] || fail 'an OCP re-run without SH_GITHUB_CLIENT_ID scaled the control plane to 0'
+(expect_ok --target ocp --image ghcr.io/me/moca:v2)
+gen | grep -q 'newTag: v2$' || fail 'a given --image did not replace the stored one'
+gen | grep -q 'digest: sha256:abc$' || fail 'a given --image dropped the stored --sandbox-image'
+pass 'ocp: --image and --sandbox-image are sticky; a given one replaces only itself'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build --image ghcr.io/me/moca:v1)
+! gen | grep -q 'images:' || fail 'kind rendered an images: override (it runs the locally loaded images)'
+pass 'kind: images are for the local load only, never the overlay'
 
 reset_state
 (export SH_GITHUB_CLIENT_ID=Iv1.a MOCK_GET_SC_FAIL=1; expect_ok --target kind --skip-build)
