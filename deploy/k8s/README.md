@@ -89,8 +89,17 @@ P6 is up on kind (context kind-moca). Reach it with two port-forwards:
 then:  mocactl --control-plane-url http://127.0.0.1:8090 login
 ```
 
-Run the two port-forwards in their own terminals, then log in. The control plane advertises the
-harness as `http://127.0.0.1:8080`, so the supervisor's forward must use local port 8080. `mocactl`
+Run the two port-forwards in their own terminals, then log in. Export the URL in the terminal you
+run `mocactl` from, so every later command uses the same one (`mocactl` keys its cached login on
+the control-plane URL):
+
+```bash
+export SH_CONTROL_PLANE_URL=http://127.0.0.1:8090
+mocactl login
+```
+
+The control plane advertises the harness as `http://127.0.0.1:8080`, so the supervisor's forward
+must use local port 8080. `mocactl`
 runs from a checkout ([`packages/mocactl/QUICKSTART.md`](../../packages/mocactl/QUICKSTART.md)). The
 GitHub OAuth app needs **Enable Device Flow** ticked ([`deploy/vm/README.md`](../vm/README.md), "The
 GitHub OAuth app").
@@ -309,11 +318,23 @@ The cluster pulls ghostunnel and `redis:7-alpine` from Docker Hub, so it needs a
 
 ### 9.1 Bring it up
 
+Without a certificate of your own (`setup.sh` generates a self-signed one, see below):
+
 ```bash
 export LOG_DIR=/tmp/kagenti/tdd/moca; mkdir -p "$LOG_DIR"
 SH_GITHUB_CLIENT_ID=<client id> SH_ADMIN_SUBJECTS= \
   deploy/k8s/setup.sh --target ocp --image <registry>/moca:<branch-tag> \
-  [--tls-cert <fullchain.pem> --tls-key <key.pem>] >"$LOG_DIR/t19-setup.log" 2>&1; echo "EXIT:$?"
+  >"$LOG_DIR/t19-setup.log" 2>&1; echo "EXIT:$?"
+tail -6 "$LOG_DIR/t19-setup.log"
+```
+
+With a certificate and key valid for `moca-moca.<apps domain>`:
+
+```bash
+export LOG_DIR=/tmp/kagenti/tdd/moca; mkdir -p "$LOG_DIR"
+SH_GITHUB_CLIENT_ID=<client id> SH_ADMIN_SUBJECTS= \
+  deploy/k8s/setup.sh --target ocp --image <registry>/moca:<branch-tag> \
+  --tls-cert <fullchain.pem> --tls-key <key.pem> >"$LOG_DIR/t19-setup.log" 2>&1; echo "EXIT:$?"
 tail -6 "$LOG_DIR/t19-setup.log"
 ```
 
@@ -342,10 +363,11 @@ its CA in the same file.
 kubectl -n moca get events | grep -i 'security context constraint'
 ```
 
-`unable to validate against any security context constraint` means the explicit Redis UID 999 is
-refused, even with `nonroot-v2`. The fallback (spec §10) is a patch in `overlays/ocp` that drops
-`runAsUser` and `runAsGroup` from the Redis pod's `securityContext` and keeps `fsGroup`, so the SCC
-assigns a UID:
+`unable to validate against any security context constraint` means the explicit Redis UID 999 (or
+its fsGroup 1000) is refused, even with `nonroot-v2`. The fallback (spec §10) is a patch in
+`overlays/ocp` that drops `runAsUser`, `runAsGroup` **and** `fsGroup` from the Redis pod's
+`securityContext`, so restricted-v2 assigns both the UID and the fsGroup from the namespace's
+range:
 
 ```yaml
 # overlays/ocp/kustomization.yaml, under patches:
@@ -353,7 +375,13 @@ assigns a UID:
   patch: |-
     - { op: remove, path: /spec/template/spec/securityContext/runAsUser }
     - { op: remove, path: /spec/template/spec/securityContext/runAsGroup }
+    - { op: remove, path: /spec/template/spec/securityContext/fsGroup }
 ```
+
+Keeping `fsGroup: 1000` does not work: restricted-v2 refuses it (its fsGroup must lie in the
+namespace's range), so `nonroot-v2` admits the pod with no UID at all, and the image runs as root.
+The symptom is `redis-0` in `CreateContainerConfigError`, with
+`container has runAsNonRoot and image will run as root` in `kubectl -n moca describe pod redis-0`.
 
 Commit it, re-run `setup.sh`, and record that it was needed.
 
@@ -479,22 +507,26 @@ Both users' turns lease the same pods (section 7).
 **L4 check (operator), after the acts.** This is spec §10's third risk: the passthrough path must
 keep connections 1:1. Read the counters again (as in the baseline), and while two users' turns are
 running at once, count the established connections inside the supervisor pod, on 8443 (from the
-router) and on 8080 (from the sidecar):
+router) and on 8080 (from the sidecar). Read both socket tables: ghostunnel is a Go program, and
+its `0.0.0.0:8443` listener is a dual-stack IPv6 socket, so the router's connections appear in
+`/proc/net/tcp6` (as `::ffff:` addresses), not in `/proc/net/tcp`:
 
 ```bash
 kubectl -n moca exec deploy/moca-supervisor -c supervisor -- awk \
   '$4 == "01" { split($2, a, ":"); if (a[2] == "20FB") s++; if (a[2] == "1F90") d++ }
-   END { print "8443:", s + 0, "8080:", d + 0 }' /proc/net/tcp
+   END { print "8443:", s + 0, "8080:", d + 0 }' /proc/net/tcp /proc/net/tcp6
 ```
 
 Look for: the two numbers equal, and as many as the clients connected (two concurrent turns from
 two laptops give at least 2). A router that pooled would show fewer 8443 connections than clients.
-Stop any `port-forward` to the supervisor first, since its connections count on 8080 too; on an
-IPv6 cluster read `/proc/net/tcp6` as well.
+Take two readings a few seconds apart: the sidecar's `tcpSocket` readiness probe and keep-alive
+connections come and go. Stop any `port-forward` to the supervisor first, since its connections
+count on 8080 too.
+
 `/metrics` has no per-connection hand-off counter, so record `handoff_retries`, `handoff_failures`
-and `over_admission` before and after as context; they should not rise out of proportion to the
-turns run. If the connections are not 1:1, the fallback is an L4 `LoadBalancer` Service for the
-sidecar's port.
+and `over_admission` before and after as context only. `over_admission` is not a pooling signal on
+its own: in the Kind spike it rose once per turn, with no proxy in front at all. If the connections
+are not 1:1, the fallback is an L4 `LoadBalancer` Service for the sidecar's port.
 
 ### 9.4 Record
 
@@ -505,7 +537,31 @@ and any fallback applied (the Redis SCC patch, the node-CIDR policy). Then tick 
 
 ### 9.5 Cleanup
 
-On each laptop, delete the run's sessions (`mocactl sessions delete ID`) and credentials
+**The smoke's residue.** `smoke.sh` stores a credential `smoke-inference` and creates sessions,
+all under the subject `smoke:1`, and deletes none of them. Deleting the namespaces (below) removes
+them. To keep the stack, delete them through the control plane with a token minted the way the
+smoke mints it, inside the control-plane pod:
+
+```bash
+kubectl -n moca port-forward svc/moca-control-plane 18090:8080 >/dev/null 2>&1 &
+PF=$!; sleep 3
+HDR="$(mktemp)"
+kubectl -n moca exec deploy/moca-control-plane -c control-plane -- \
+  node --import tsx --input-type=module -e \
+  "import { readFileSync } from 'node:fs'; import { makeSigner } from './src/token.ts';
+   const s = makeSigner(readFileSync('/run/credentials/SH_SESSION_TOKEN_PRIVATE_KEY', 'utf8'));
+   process.stdout.write(s.mint({ sub: 'smoke:1', tenant: 'smoke:1', roles: [], scope: ['api'], ttlSeconds: 900 }));" |
+  sed 's/^/Authorization: Bearer /' >"$HDR"
+curl -s -o /dev/null -w '%{http_code}\n' -X DELETE -H @"$HDR" http://127.0.0.1:18090/v1/credentials/smoke-inference
+for id in $(curl -s -H @"$HDR" http://127.0.0.1:18090/v1/sessions | jq -r '.sessions[].sessionId'); do
+  curl -s -o /dev/null -w "$id %{http_code}\n" -X DELETE -H @"$HDR" "http://127.0.0.1:18090/v1/sessions/$id"
+done
+rm -f "$HDR"; kill "$PF"
+```
+
+Each delete answers 204.
+
+**On each laptop,** delete the run's sessions (`mocactl sessions delete ID`) and credentials
 (`mocactl credentials delete NAME`), and remove
 `"${XDG_CONFIG_HOME:-$HOME/.config}/mocactl/auth.json"` to log out. On the cluster, delete the
 three namespaces (`moca`, `moca-sandbox`, `moca-credentials`); deleting `moca` deletes the Redis
@@ -513,6 +569,9 @@ PVC with it. The `nonroot-v2` grants are cluster objects:
 `oc adm policy remove-scc-from-user nonroot-v2 -z <sa> -n <ns>` for each ServiceAccount.
 
 ## 10. Troubleshooting
+
+The commands here are written for Kind (`--context kind-moca`, as `setup.sh` and `smoke.sh` always
+pin it). On OpenShift, drop `--context kind-moca`.
 
 **Kind on macOS with Podman.** Both workarounds were needed on the Task 16 run (macOS arm64, Podman
 5.7.1 behind the `docker` CLI). Neither is expected on Linux with Docker.
@@ -554,8 +613,8 @@ prints the port-forward log itself and keeps nothing. In CI, the directory is in
 generator writes the four values to its stdout, which `setup.sh` reads over the attach, so for the
 pod's few seconds of life they are also in its container log on the node, readable by anyone with
 `pods/log` in `moca`. `--rm` deletes the pod and its log when the run completes. If `setup.sh` is
-killed in that window, delete it yourself: `kubectl -n moca delete pod moca-genkeys
---ignore-not-found` (`setup.sh` also deletes a leftover one before it starts).
+killed in that window, delete it yourself:
+`kubectl --context kind-moca -n moca delete pod moca-genkeys --ignore-not-found` (`setup.sh` also deletes a leftover one before it starts).
 
 **On single-node Kind, a sandbox can reach the kube API and its own node's kubelet.**
 `kubernetes.default.svc:443` and the node's port 10250 are open from a sandbox, although the
@@ -599,14 +658,14 @@ claim 5 inside that 5–10 s reconnect window after the previous run's Redis res
 **`only 0 of N sandboxes attached to the relay`.** The relay retries each sandbox's presence write
 until it lands or the sandbox detaches, so a late Redis delays the records but no longer loses
 them. If the count stays short, the message names the two logs to read:
-`kubectl -n moca logs deployment/sandbox-relay` (`presence put failed ...`) and
-`kubectl -n moca-sandbox logs statefulset/moca-sandbox`.
+`kubectl --context kind-moca -n moca logs deployment/sandbox-relay` (`presence put failed ...`)
+and `kubectl --context kind-moca -n moca-sandbox logs statefulset/moca-sandbox`.
 
 **`redis-0` stays Pending.** Its PVC binds only through a default StorageClass. `setup.sh` warns
 when the cluster has none: mark one default (`storageclass.kubernetes.io/is-default-class=true`).
 
 **A container restarted.** Smoke claim 11 fails on any restart in either namespace. The likeliest is
-the supervisor OOM-killed at its 1Gi limit (`kubectl -n moca describe pod` shows `OOMKilled`):
+the supervisor OOM-killed at its 1Gi limit (`kubectl --context kind-moca -n moca describe pod` shows `OOMKilled`):
 raise the memory request and limit together (section 4). A worker that dies inside the pod is not a
 container restart: look for `worker_exit` in the supervisor's log.
 
