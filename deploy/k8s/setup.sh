@@ -211,12 +211,17 @@ genkeys() {
   fi
   # A pod left behind by a crashed run would make `kc run` fail with AlreadyExists.
   kc delete pod moca-genkeys -n "$NS" --ignore-not-found --wait=true >/dev/null
+  # An attach does not replay output written before it, and `kc run -i` attaches only after it sees
+  # the pod Running: on a busy node that is late enough to lose every line (seen on a fresh kind
+  # cluster). So the generator waits for stdin to close -- which happens only once the attach is up,
+  # since kubectl forwards this </dev/null over it -- and only then writes. The timeout bounds the
+  # wait if the attach never comes; kubectl's fallback then reads the lines from the pod's log.
   kc run moca-genkeys -n "$NS" --rm -i --quiet --restart=Never --image="$ref" \
     --overrides="$(jq -nc --arg ref "$ref" --argjson sc "$sc" '{spec: {automountServiceAccountToken: false,
       securityContext: $sc, containers: [{name: "moca-genkeys", image: $ref, imagePullPolicy: "IfNotPresent",
-      stdin: true, stdinOnce: true,
-      workingDir: "/app/packages/control-plane", command: ["node", "--import", "tsx", "src/genkeys.ts"],
-      securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: ["ALL"]}}}]}}')"
+      stdin: true, stdinOnce: true, workingDir: "/app/packages/control-plane",
+      command: ["sh", "-c", "timeout 60 cat >/dev/null; exec node --import tsx src/genkeys.ts"],
+      securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: ["ALL"]}}}]}}')" </dev/null
 }
 
 GENKEYS_OUT=''

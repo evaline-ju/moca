@@ -256,7 +256,10 @@ run_line="$(grep -n 'run moca-genkeys' "$MOCK_LOG" | head -1 | cut -d: -f1)"
 [[ -n "$del_line" && "$del_line" -lt "$run_line" ]] || fail 'a leftover moca-genkeys pod is not deleted before the run'
 grep 'run moca-genkeys' "$MOCK_LOG" | grep -q '"stdin":true,"stdinOnce":true' || fail 'the genkeys override drops the container stdin that -i attaches to'
 pass 'genkeys runs as 65532 on kind; every stdin apply is server-side'
+grep 'run moca-genkeys' "$MOCK_LOG" | grep -q '"command":\["sh","-c","timeout 60 cat >/dev/null; exec node --import tsx src/genkeys.ts"\]' ||
+  fail 'the generator writes before the attach is up (an attach does not replay earlier output)'
 pass 'a leftover genkeys pod is deleted first; the override keeps stdin for the attach'
+pass 'the generator writes only once the attach has closed its stdin'
 
 snapshot() { for f in "$MOCK_STATE"/*__Secret__*.json; do jq -cS .data "$f"; done; }
 before="$(snapshot)"
