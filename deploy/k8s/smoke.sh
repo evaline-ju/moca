@@ -33,18 +33,22 @@ SBX=moca-sandbox
 OUT="$(mktemp -d)"
 chmod 700 "$OUT"
 PIDS=''
+PASS=0
+FAIL=0
+# Logs are kept for every run that did not pass: a failed claim, and also an early `exit 1` or a
+# set -e death, both of which leave FAIL at 0. So the exit status is captured first, before any
+# command here can overwrite it. Token header files go on every path.
 cleanup() {
+  local rc=$?
   [[ -z "$PIDS" ]] || kill $PIDS 2>/dev/null || true
   rm -f "$OUT"/*.hdr
-  if [[ "$FAIL" -gt 0 ]]; then
+  if [[ "$rc" != 0 || "$FAIL" -gt 0 ]]; then
     echo "logs kept in $OUT"
   else
     rm -rf "$OUT"
   fi
 }
 trap cleanup EXIT
-PASS=0
-FAIL=0
 ok() { PASS=$((PASS + 1)); echo "  ok ${1:-}"; }
 ko() { FAIL=$((FAIL + 1)); echo "  FAIL ${1:-}"; }
 claim() { printf '\n--- Claim %s: %s ---\n' "$1" "$2"; }
@@ -66,16 +70,18 @@ tool_out() { sed -n 's/^data: //p' "$1" | jq -r 'select(.type == "tool_result" a
 # subshell and orphan kubectl, which then kept the ports bound across forward() and after exit.
 # exec makes the background job kubectl itself.
 kc_exec() { if [[ "$TARGET" == kind* ]]; then exec kubectl --context kind-moca "$@"; else exec kubectl "$@"; fi; }
+# forward: (re)start both port-forwards; false, with the reason printed, if either never comes up.
 forward() {
   [[ -z "$PIDS" ]] || { kill $PIDS 2>/dev/null || true; wait $PIDS 2>/dev/null || true; }
   kc_exec -n "$NS" port-forward svc/moca-supervisor 18080:8080 18081:8081 >"$OUT/pf-sup.log" 2>&1 &
   PIDS="$!"
   kc_exec -n "$NS" port-forward svc/moca-control-plane 18090:8080 >"$OUT/pf-cp.log" 2>&1 &
   PIDS="$PIDS $!"
-  wait_for 30 curl -sf -o /dev/null "$ADMIN/healthz" || { echo "port-forward to the supervisor never came up:"; cat "$OUT/pf-sup.log"; exit 1; }
-  wait_for 30 curl -sf -o /dev/null "$CP/healthz" || { echo "port-forward to the control plane never came up:"; cat "$OUT/pf-cp.log"; exit 1; }
+  wait_for 30 curl -sf -o /dev/null "$ADMIN/healthz" || { echo "port-forward to the supervisor never came up:"; cat "$OUT/pf-sup.log"; return 1; }
+  wait_for 30 curl -sf -o /dev/null "$CP/healthz" || { echo "port-forward to the control plane never came up:"; cat "$OUT/pf-cp.log"; return 1; }
 }
-forward
+# Nothing can run without the first forward, so that one ends the run (cleanup keeps the logs).
+forward || exit 1
 
 claim 1 "the supervisor is ready with every worker healthy"
 body="$(curl -s "$ADMIN/readyz" || true)"
@@ -209,19 +215,25 @@ if new_session; then
   wait "$tpid" || true
   if [[ -f "$OUT/drain.ok" ]] && grep -q drained <(tool_out "$OUT/drain.sse"); then ok "pod $pod drained its turn"; else ko "drain: $(head -c 600 "$OUT/drain.sse" 2>/dev/null)"; fi
   kc -n "$NS" rollout status deployment/moca-supervisor --timeout=300s >/dev/null || true
-  forward
+  # Claims 10 and 11 need no forward, so a failed one is a FAIL, not the end of the run.
+  forward || ko "port-forward did not come back after the drain"
 fi
 
 claim 10 "sessions survive a Redis restart (AOF on the PVC)"
-kc -n "$NS" delete pod redis-0 >/dev/null
-kc -n "$NS" rollout status statefulset/redis --timeout=180s >/dev/null
-wait_for 90 kc -n "$NS" exec redis-0 -- sh -c 'redis-cli ping | grep -q PONG' || { ko "redis-0 not ready after restart"; }
-if has_session "$FIRST_SID"; then ok; else ko "session:$FIRST_SID gone after the restart"; fi
+# Every kubectl here is guarded: under set -e an API error would end the run before the summary.
+if ! kc -n "$NS" delete pod redis-0 >/dev/null; then
+  ko "could not delete redis-0"
+elif ! kc -n "$NS" rollout status statefulset/redis --timeout=180s >/dev/null; then
+  ko "redis did not roll out after the restart"
+elif ! wait_for 90 kc -n "$NS" exec redis-0 -- sh -c 'redis-cli ping | grep -q PONG'; then
+  ko "redis-0 not ready after restart"
+elif has_session "$FIRST_SID"; then ok; else ko "session:$FIRST_SID gone after the restart"; fi
 
 claim 11 "no container restarted (no OOM kill, no crash) apart from the pods deleted above"
-restarts="$(kc get pods -n "$NS" -o json | jq '[.items[].status | (.containerStatuses[]?, .initContainerStatuses[]?) | .restartCount] | add // 0')"
-restarts_sbx="$(kc get pods -n "$SBX" -o json | jq '[.items[].status.containerStatuses[]?.restartCount] | add // 0')"
-if [[ "$restarts" == 0 && "$restarts_sbx" == 0 ]]; then ok; else ko "restartCount moca=$restarts moca-sandbox=$restarts_sbx (kubectl describe pod for OOMKilled)"; fi
+if ! restarts="$(kc get pods -n "$NS" -o json | jq '[.items[].status | (.containerStatuses[]?, .initContainerStatuses[]?) | .restartCount] | add // 0')" ||
+  ! restarts_sbx="$(kc get pods -n "$SBX" -o json | jq '[.items[].status.containerStatuses[]?.restartCount] | add // 0')"; then
+  ko "could not read pod restart counts"
+elif [[ "$restarts" == 0 && "$restarts_sbx" == 0 ]]; then ok; else ko "restartCount moca=$restarts moca-sandbox=$restarts_sbx (kubectl describe pod for OOMKilled)"; fi
 
 printf '\nPASS=%s FAIL=%s\n' "$PASS" "$FAIL"
 [[ "$FAIL" == 0 ]]
