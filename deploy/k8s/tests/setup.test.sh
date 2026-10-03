@@ -62,8 +62,16 @@ case "${1-} ${2-}" in
 "get secret" | "get configmap")
   kind=Secret
   [[ "$2" == configmap ]] && kind=ConfigMap
+  if [[ "$kind" == Secret && -n "${MOCK_GET_FAIL-}" ]]; then
+    echo 'Error from server (InternalError): etcd timeout' >&2
+    exit 1
+  fi
   f="$(store "$ns" "$kind" "$3")"
-  [[ -f "$f" ]] || { echo "Error from server (NotFound): $2 \"$3\" not found" >&2; exit 1; }
+  if [[ ! -f "$f" ]]; then
+    [[ " $* " != *" --ignore-not-found "* ]] || exit 0
+    echo "Error from server (NotFound): $2 \"$3\" not found" >&2
+    exit 1
+  fi
   cat "$f" ;;
 "apply --server-side")
   obj="$(cat)"
@@ -88,6 +96,7 @@ case "${1-} ${2-}" in
   printf 'SH_SESSION_TOKEN_PUBLIC_KEYS=%s:MCowBQYDK2VwAyEA%s\n' "$(hex 8)" "$(hex 22)"
   printf 'SH_CREDENTIAL_KEK=%s=\n' "$(hex 22 | cut -c1-43)"
   printf 'SH_EXCHANGE_TOKEN=%s\n' "$(hex 32)" ;;
+"delete pod") : ;;
 "rollout status" | "rollout restart") : ;;
 "exec redis-0") echo "${MOCK_RECORDS:-2}" ;;
 "get storageclass")
@@ -147,7 +156,7 @@ expect_fail() { if run_setup "$@"; then fail "setup.sh $* succeeded; expected a 
 expect_out() { grep -qF -- "$1" "$TMP/out" || fail "output lacks: $1"; }
 sv() { jq -r --arg k "$3" '.data[$k] // empty' "$MOCK_STATE/$1__Secret__$2.json" | base64 --decode; }
 assert_no_secret_in_argv() {
-  local f k v
+  local f k v b
   for f in "$MOCK_STATE"/*__Secret__*.json; do
     [[ -e "$f" ]] || continue
     for k in $(jq -r '.data | keys[]' "$f"); do
@@ -155,6 +164,9 @@ assert_no_secret_in_argv() {
       v="$(jq -r --arg k "$k" '.data[$k]' "$f" | base64 --decode)"
       [[ ${#v} -ge 16 ]] || continue
       if grep -qF -- "$v" "$MOCK_LOG"; then fail "secret $k of $(basename "$f") reached a process argv"; fi
+      b="$(printf '%s' "$v" | base64 | tr -d '\n')"
+      [[ ${#b} -ge 16 ]] || continue
+      if grep -qF -- "$b" "$MOCK_LOG"; then fail "secret $k of $(basename "$f") reached a process argv (base64)"; fi
     done
   done
 }
@@ -224,7 +236,12 @@ assert_no_secret_in_argv
 pass 'no generated secret value reached any process argv'
 grep 'run moca-genkeys' "$MOCK_LOG" | grep -q '"runAsUser":65532' || fail 'the kind genkeys pod has no explicit UID'
 if grep -E '^kubectl .* apply .*-f -$' "$MOCK_LOG" | grep -v -- '--server-side' | grep -q .; then fail 'a stdin apply without --server-side (it would copy values into an annotation)'; fi
+del_line="$(grep -n 'delete pod moca-genkeys -n moca --ignore-not-found --wait=true' "$MOCK_LOG" | head -1 | cut -d: -f1)"
+run_line="$(grep -n 'run moca-genkeys' "$MOCK_LOG" | head -1 | cut -d: -f1)"
+[[ -n "$del_line" && "$del_line" -lt "$run_line" ]] || fail 'a leftover moca-genkeys pod is not deleted before the run'
+grep 'run moca-genkeys' "$MOCK_LOG" | grep -q '"stdin":true,"stdinOnce":true' || fail 'the genkeys override drops the container stdin that -i attaches to'
 pass 'genkeys runs as 65532 on kind; every stdin apply is server-side'
+pass 'a leftover genkeys pod is deleted first; the override keeps stdin for the attach'
 
 snapshot() { for f in "$MOCK_STATE"/*__Secret__*.json; do jq -cS .data "$f"; done; }
 before="$(snapshot)"
@@ -234,6 +251,14 @@ before="$(snapshot)"
 ! grep -q 'run moca-genkeys' "$MOCK_LOG" || fail 'a re-run regenerated keys it already had'
 pass 'a re-run rotates nothing'
 
+# An API error on GET (timeout, 5xx, RBAC, expired token) is not "missing": treating it as missing
+# would silently rotate every value -- for SH_CREDENTIAL_KEK, every stored credential lost.
+if (export MOCK_GET_FAIL=1 SH_GITHUB_CLIENT_ID=Iv1.test; run_setup --target kind --skip-build); then get_fail_rc=0; else get_fail_rc=1; fi
+[[ "$(snapshot)" == "$before" ]] || fail 'a failed GET rotated a secret'
+[[ "$get_fail_rc" == 1 ]] || fail 'setup.sh succeeded although every Secret GET failed'
+expect_out 'etcd timeout'
+pass 'a failed GET aborts the run and rotates nothing'
+
 mu1="$MOCK_STATE/moca__Secret__moca-mu1.json"
 priv="$(sv moca moca-mu1 SH_SESSION_TOKEN_PRIVATE_KEY)"
 xchg="$(sv moca moca-mu1 SH_EXCHANGE_TOKEN)"
@@ -241,6 +266,7 @@ jq 'del(.data.SH_CREDENTIAL_KEK)' "$mu1" >"$mu1.tmp" && mv "$mu1.tmp" "$mu1"
 (export SH_GITHUB_CLIENT_ID=Iv1.test; expect_ok --target kind --skip-build)
 [[ -n "$(sv moca moca-mu1 SH_CREDENTIAL_KEK)" ]] || fail 'a missing KEK was not filled'
 [[ "$(sv moca moca-mu1 SH_SESSION_TOKEN_PRIVATE_KEY)" == "$priv" && "$(sv moca moca-mu1 SH_EXCHANGE_TOKEN)" == "$xchg" ]] || fail 'filling one key changed another'
+assert_no_secret_in_argv
 pass 'a missing key is patched in alone'
 
 jq 'del(.data.SH_SESSION_TOKEN_PUBLIC_KEYS)' "$mu1" >"$mu1.tmp" && mv "$mu1.tmp" "$mu1"

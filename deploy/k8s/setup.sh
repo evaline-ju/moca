@@ -138,10 +138,22 @@ ensure_namespaces() { kc apply -f "$K8S_DIR/base/namespaces.yaml" >/dev/null; }
 # --- Secrets (spec §4.2) -----------------------------------------------------------------------
 # Generated once and never rotated: an existing value is always kept; only a missing key is filled.
 
-# secret_value NAME NS KEY: the decoded value on stdout, or nothing. A missing Secret is the normal
-# first-run case, so it must not fail the pipeline (pipefail) and with it the caller's assignment.
+# secret_json NAME NS: the Secret as JSON, or nothing when it does not exist (the normal first-run
+# case). Any other API error -- timeout, 5xx, RBAC denial, expired token -- fails, and the caller's
+# assignment aborts the run: an unreadable Secret must never look like a missing one, or the next
+# apply would rotate it (for SH_CREDENTIAL_KEK, losing every stored credential).
+secret_json() { kc get secret "$1" -n "$2" --ignore-not-found -o json; }
+
+# json_value JSON KEY: KEY's decoded value from secret_json's output, or nothing. The JSON reaches
+# jq on stdin (printf is a builtin), never on argv.
+json_value() { printf '%s' "$1" | jq -r --arg k "$2" '.data[$k] // empty' | base64 --decode; }
+
+# secret_value NAME NS KEY: one key, fetched on its own. Callers needing several keys of one Secret
+# fetch it once with secret_json, so every key comes from the same read.
 secret_value() {
-  { kc get secret "$1" -n "$2" -o json 2>/dev/null || true; } | jq -r --arg k "$3" '.data[$k] // empty' | base64 --decode
+  local json
+  json="$(secret_json "$1" "$2")" || return 1 # $(...) clears set -e: fail explicitly
+  json_value "$json" "$3"
 }
 
 rand_hex() { openssl rand -hex 32; }
@@ -159,9 +171,10 @@ apply_secret() {
 }
 
 ensure_relay_secrets() {
-  local relay exec_token
-  relay="$(secret_value moca-relay "$NS" SH_RELAY_TOKEN)"
-  exec_token="$(secret_value moca-relay "$NS" MOCA_RELAY_EXEC_TOKEN)"
+  local json relay exec_token
+  json="$(secret_json moca-relay "$NS")"
+  relay="$(json_value "$json" SH_RELAY_TOKEN)"
+  exec_token="$(json_value "$json" MOCA_RELAY_EXEC_TOKEN)"
   [[ -n "$relay" ]] || { log 'generating SH_RELAY_TOKEN'; relay="$(rand_hex)"; }
   [[ -n "$exec_token" ]] || { log 'generating MOCA_RELAY_EXEC_TOKEN'; exec_token="$(rand_hex)"; }
   # The relay refuses to boot on equal tokens (MI1 §5 R5); say why here, before it crash-loops.
@@ -179,8 +192,9 @@ ensure_relay_secrets() {
 }
 
 ensure_redis_secret() {
-  local pw
-  pw="$(secret_value moca-redis "$NS" REDIS_PASSWORD)"
+  local json pw
+  json="$(secret_json moca-redis "$NS")"
+  pw="$(json_value "$json" REDIS_PASSWORD)"
   [[ -n "$pw" ]] || { log 'generating the Redis password'; pw="$(rand_hex)"; }
   # URL and config are re-derived from the password on every run, so the three can never disagree.
   (
@@ -202,9 +216,12 @@ genkeys() {
   else
     sc='{"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}'
   fi
+  # A pod left behind by a crashed run would make `kc run` fail with AlreadyExists.
+  kc delete pod moca-genkeys -n "$NS" --ignore-not-found --wait=true >/dev/null
   kc run moca-genkeys -n "$NS" --rm -i --quiet --restart=Never --image="$ref" \
     --overrides="$(jq -nc --arg ref "$ref" --argjson sc "$sc" '{spec: {automountServiceAccountToken: false,
       securityContext: $sc, containers: [{name: "moca-genkeys", image: $ref, imagePullPolicy: "IfNotPresent",
+      stdin: true, stdinOnce: true,
       workingDir: "/app/packages/control-plane", command: ["node", "--import", "tsx", "src/genkeys.ts"],
       securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: ["ALL"]}}}]}}')"
 }
@@ -220,11 +237,13 @@ generated_value() {
 }
 
 ensure_mu1_secret() {
-  local priv pub kek xchg
-  priv="$(secret_value moca-mu1 "$NS" SH_SESSION_TOKEN_PRIVATE_KEY)"
-  pub="$(secret_value moca-mu1 "$NS" SH_SESSION_TOKEN_PUBLIC_KEYS)"
-  kek="$(secret_value moca-mu1 "$NS" SH_CREDENTIAL_KEK)"
-  xchg="$(secret_value moca-mu1 "$NS" SH_EXCHANGE_TOKEN)"
+  local json priv pub kek xchg
+  json="$(secret_json moca-mu1 "$NS")"
+  priv="$(json_value "$json" SH_SESSION_TOKEN_PRIVATE_KEY)"
+  pub="$(json_value "$json" SH_SESSION_TOKEN_PUBLIC_KEYS)"
+  kek="$(json_value "$json" SH_CREDENTIAL_KEK)"
+  xchg="$(json_value "$json" SH_EXCHANGE_TOKEN)"
+  json=''
   if { [[ -n "$priv" ]] && [[ -z "$pub" ]]; } || { [[ -z "$priv" ]] && [[ -n "$pub" ]]; }; then
     die 'moca-mu1 holds half a signing keypair (SH_SESSION_TOKEN_PRIVATE_KEY without SH_SESSION_TOKEN_PUBLIC_KEYS, or the reverse): delete both keys and re-run to generate a matching pair'
   fi
