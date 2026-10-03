@@ -72,15 +72,19 @@ export function createRelay(deps: RelayDeps): Relay {
    * One put used to be the whole story, so a Redis that was not reachable at attach time -- on
    * Kubernetes, where setup.sh applies every workload at once, Redis routinely comes up after the
    * sandboxes -- left an attached sandbox missing from sh:sandbox:records for good: the stream stayed
-   * up, so the worker never re-Hello'd, and no turn could lease it (#423, Task 16b). RedisRecordStore
-   * gives up after a bounded reconnect and re-arms on the next call, so retrying the put is enough.
+   * up, so the worker never re-Hello'd, and no turn could lease it (#423, Task 16b). RedisRecordStore's
+   * client gives up after a bounded reconnect, and the store then reconnects that same client on its
+   * next call -- both after a failed first connect and after an established connection was given up
+   * on -- so retrying the put is enough.
    *
    * Every attempt first checks that the session map still holds THIS session object, by identity.
    * After teardown it does not, so no attempt starts after teardown's remove: a late write would point
    * turns at a gone worker. A reattach under the same id is a different object, so a stale retry
    * cannot write on its behalf either. An attempt already in flight when teardown runs is ordered
-   * before the remove: both go through RedisRecordStore's one client and its one connect memo, so
-   * the hSet is queued ahead of the hDel.
+   * before the remove: both go through RedisRecordStore's one client (a re-arm reconnects that client,
+   * it never builds a second one), whose command queue is FIFO, so the hSet is queued ahead of the
+   * hDel. If the put is still waiting on a reconnect, the remove waits on the same connect promise
+   * and is issued after it.
    */
   function putPresence(id: string, session: Parked, rec: SandboxRecord): void {
     let delay = PRESENCE_RETRY_BASE_MS;
