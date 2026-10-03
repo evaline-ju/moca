@@ -11,17 +11,24 @@ on:
     paths:
       - 'deploy/k8s/**'
       - 'deploy/microvm/mock-anthropic.mjs'
-      - 'packages/supervisor/**'
-      - 'packages/sandbox-relay/**'
-      - 'packages/control-plane/**'
-      - 'packages/knative-server/**'
+      - 'packages/**'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'pi-fork'
       - 'harness/**'
       - 'remote-worker/**'
+      - 'go.work'
+      - 'gen/go/**'
+      - '.dockerignore'
       - 'Dockerfile'
       - '.github/workflows/k8s-e2e.yml'
 
 permissions:
   contents: read
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   k8s-kind-e2e:
@@ -31,6 +38,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: recursive
+          persist-credentials: false
 
       - name: Install kind
         env:
@@ -47,6 +55,7 @@ jobs:
 
       - name: Live smoke
         run: |
+          set -o pipefail
           mkdir -p /tmp/k8s-logs
           K8S_LIVE_SMOKE=1 deploy/k8s/smoke.sh --target kind-ci 2>&1 | tee /tmp/k8s-logs/smoke.log
 
