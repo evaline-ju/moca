@@ -161,7 +161,7 @@ export async function startSupervisor(opts: {
     host: config.adminHost,
     env: process.env,
   });
-  log({ event: 'admin_listening', port: admin.port });
+  log({ event: 'admin_listening', port: admin.port, address: admin.address });
 
   return {
     port,
