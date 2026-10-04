@@ -533,10 +533,12 @@ reset_state
 expect_out "'moca-microvm-0' must match"
 (export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS=a,b,a; expect_fail --target ocp)
 expect_out "lists 'a' twice"
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS='*'; expect_fail --target ocp)
+expect_out "'*' must match"
 (export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS=a; expect_fail --target kind --skip-build)
 expect_out 'needs --target ocp'
 ! grep -q '^kubectl' "$MOCK_LOG" || fail 'a refused ID list still reached the cluster'
-pass 'refused: an ID with a dash, a duplicate, P4 IDs on kind -- before anything touches a cluster'
+pass 'refused: an ID with a dash, a duplicate, glob char, P4 IDs on kind -- before anything touches a cluster'
 
 # The live switch from a slice-1 stack: moca-setup already holds SH_SANDBOX_COUNT=2.
 reset_state

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deploy/k8s/setup.sh -- bring up P6 on Kubernetes (docs/specs/2026-10-02-p6-on-kubernetes-slice2-design.md §4).
+# deploy/k8s/setup.sh -- bring up P6 on Kubernetes (docs/specs/2026-10-02-p6-on-kubernetes-slice1-design.md §4).
 #
 #   deploy/k8s/setup.sh --target kind|kind-ci|ocp [--image IMG] [--sandbox-image IMG]
 #                       [--build|--skip-build] [--tls-cert FILE --tls-key FILE]
@@ -182,8 +182,10 @@ cm_value() { printf '%s' "$1" | jq -r --arg k "$2" '.data[$k] // empty'; }
 # ID must match the relay's token-directory rule (spec §2.1: the relay reads <dir>/<id>) and appear
 # once -- two hosts with one ID would share a token and a workspace.
 normalize_p4_ids() {
-  local IFS=',' id out=''
-  for id in $1; do
+  local -a parts
+  local id out=''
+  IFS=',' read -ra parts <<<"$1"
+  for id in "${parts[@]}"; do
     id="${id#"${id%%[![:space:]]*}"}"
     id="${id%"${id##*[![:space:]]}"}"
     [[ -n "$id" ]] || continue
@@ -211,12 +213,15 @@ check_tiers() {
 # when not given. Kind ignores the stored images: it always runs the locally loaded dev.local tags, and
 # --image there only picks what to pull, so only the sandbox count is stored for it.
 load_setup_inputs() {
-  local json
+  local json stored
   json="$(configmap_json moca-setup)"
   if ! is_kind; then
     [[ -n "$IMAGE" ]] || IMAGE="$(cm_value "$json" IMAGE)"
     [[ -n "$SANDBOX_IMAGE" ]] || SANDBOX_IMAGE="$(cm_value "$json" SANDBOX_IMAGE)"
-    [[ -n "$P4_IDS_GIVEN" ]] || P4_IDS="$(normalize_p4_ids "$(cm_value "$json" SH_P4_SANDBOX_IDS)")"
+    [[ -n "$P4_IDS_GIVEN" ]] || {
+      stored="$(cm_value "$json" SH_P4_SANDBOX_IDS)"
+      P4_IDS="$(normalize_p4_ids "$stored")"
+    }
   fi
   [[ -n "$SH_SANDBOX_COUNT" ]] || SH_SANDBOX_COUNT="$(cm_value "$json" SH_SANDBOX_COUNT)"
   [[ -n "$SH_SANDBOX_COUNT" ]] || SH_SANDBOX_COUNT=2
