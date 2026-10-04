@@ -48,7 +48,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: redis
-          image: docker.io/redis:7-alpine # the tag deploy/vm/setup-vm.sh pins
+          image: docker.io/redis:7-alpine # the tag deploy/vm/setup-vm.sh pins; base/kustomization.yaml adds the digest
           # The password is in redis.conf (requirepass), mounted from the Secret, never in argv:
           # --requirepass would put it in /proc/<pid>/cmdline and in `ps` on the node.
           command:
