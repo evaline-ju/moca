@@ -99,4 +99,15 @@ describe('makeDefaultValidateToken with SH_RELAY_TOKEN_DIR (spec §2.1-2.2)', ()
     expect(v('global', 'moca-sandbox-0')).toBe(true);
     expect(readFile).not.toHaveBeenCalled();
   });
+
+  it('refuses reserved name DIR outright, not falling through to SH_RELAY_TOKEN', () => {
+    const v = makeDefaultValidateToken({
+      SH_RELAY_TOKEN_DIR: '/run/relay-tokens',
+      SH_RELAY_TOKEN: 'global',
+    });
+    // DIR must not authenticate with the config path itself.
+    expect(v('/run/relay-tokens', 'DIR')).toBe(false);
+    // DIR must not authenticate even with the fallback global token.
+    expect(v('global', 'DIR')).toBe(false);
+  });
 });

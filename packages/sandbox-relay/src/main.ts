@@ -70,6 +70,13 @@ export interface RelayServerDeps extends RelayDeps {
 }
 
 /**
+ * Reserved sandbox ID names (configuration keys, not sandboxes). These must be excluded from both
+ * the directory lookup and the env-var fallback to prevent them being used as actual sandbox tokens.
+ * For example, 'DIR' must not resolve to SH_RELAY_TOKEN_DIR.
+ */
+const RESERVED_SANDBOX_IDS = new Set(['DIR']);
+
+/**
  * The SandboxExec caller check. FAIL-CLOSED: with no MOCA_RELAY_EXEC_TOKEN there is no valid caller,
  * so building the validator throws and the relay does not boot. The token is the WORKERS' credential
  * and must be distinct from every sandbox's SH_RELAY_TOKEN[_<id>] (spec R5): a relay configured with
@@ -86,9 +93,13 @@ export function makeExecTokenValidator(
     );
   }
   const clashes = Object.keys(env)
-    .filter(
-      (k) => (k === 'SH_RELAY_TOKEN' || k.startsWith('SH_RELAY_TOKEN_')) && env[k] === expected,
-    )
+    .filter((k) => {
+      if (k === 'SH_RELAY_TOKEN') return env[k] === expected;
+      if (!k.startsWith('SH_RELAY_TOKEN_')) return false;
+      const suffix = k.slice('SH_RELAY_TOKEN_'.length);
+      if (RESERVED_SANDBOX_IDS.has(suffix)) return false;
+      return env[k] === expected;
+    })
     .sort();
   if (clashes.length > 0) {
     throw new Error(
@@ -284,7 +295,8 @@ const SANDBOX_ID_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
  * attach without falling through. A directory token equal to MOCA_RELAY_EXEC_TOKEN is refused (MI1
  * R5: a sandbox credential must never be a caller credential). Only ids matching SANDBOX_ID_RE are
  * looked up in the directory (no path traversal); any other id -- the container tier's dashed
- * moca-sandbox-N -- takes the env path exactly as before. Constant-time, like the exec token's comparison. Logs name the id, never a value.
+ * moca-sandbox-N -- takes the env path exactly as before. Reserved names are refused outright with
+ * no fallthrough. Constant-time, like the exec token's comparison. Logs name the id, never a value.
  */
 export function makeDefaultValidateToken(
   env: NodeJS.ProcessEnv,
@@ -294,6 +306,10 @@ export function makeDefaultValidateToken(
   const dir = env.SH_RELAY_TOKEN_DIR;
   const execToken = env.MOCA_RELAY_EXEC_TOKEN;
   return (token, sandboxId) => {
+    // Reserved names are never valid sandboxes (they are configuration keys).
+    if (RESERVED_SANDBOX_IDS.has(sandboxId)) {
+      return false;
+    }
     let expected: string | undefined;
     let fromDir = false;
     if (dir && SANDBOX_ID_RE.test(sandboxId)) {
