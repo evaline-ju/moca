@@ -1,4 +1,5 @@
 import { timingSafeEqual } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import {
   Server,
   ServerCredentials,
@@ -272,23 +273,48 @@ function bind(server: Server, addr: string): Promise<number> {
   );
 }
 
+/** A sandbox id the relay will look up: the shell-variable rule the VM path already enforces. */
+const SANDBOX_ID_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
 /**
- * Default token validator: fail-closed. A sandbox authenticates only against
- * an exact, non-empty match on its per-sandbox override (`SH_RELAY_TOKEN_<id>`)
- * or the global `SH_RELAY_TOKEN`. If neither env var is set for a sandbox,
- * `expected` is `undefined` and every token — including an undefined one from
- * a tokenless worker — is rejected, instead of the two `undefined`s comparing
- * equal. Constant-time, like the exec token's comparison.
+ * Default token validator, fail-closed (spec P6.2 §2.1-2.2). A sandbox's expected token is, in
+ * order: the file `$SH_RELAY_TOKEN_DIR/<id>` (read on EACH attach, so a host added to the mounted
+ * Secret is admitted without a relay restart), then `SH_RELAY_TOKEN_<id>`, then `SH_RELAY_TOKEN`.
+ * A missing file (or directory) falls through; any other read error, and an empty file, refuse the
+ * attach without falling through. A directory token equal to MOCA_RELAY_EXEC_TOKEN is refused (MI1
+ * R5: a sandbox credential must never be a caller credential). Only ids matching SANDBOX_ID_RE are
+ * looked up in the directory (no path traversal); any other id -- the container tier's dashed
+ * moca-sandbox-N -- takes the env path exactly as before. Constant-time, like the exec token's comparison. Logs name the id, never a value.
  */
 export function makeDefaultValidateToken(
   env: NodeJS.ProcessEnv,
+  deps: { readFile?: (path: string) => string } = {},
 ): (token: string | undefined, sandboxId: string) => boolean {
+  const readFile = deps.readFile ?? ((p: string) => readFileSync(p, 'utf8'));
+  const dir = env.SH_RELAY_TOKEN_DIR;
+  const execToken = env.MOCA_RELAY_EXEC_TOKEN;
   return (token, sandboxId) => {
-    const expected = env[`SH_RELAY_TOKEN_${sandboxId}`] ?? env.SH_RELAY_TOKEN;
-    // `!`, not `=== undefined`: an empty SH_RELAY_TOKEN= is a configuration mistake, not a token,
-    // and must not admit a worker presenting an empty one.
+    let expected: string | undefined;
+    let fromDir = false;
+    if (dir && SANDBOX_ID_RE.test(sandboxId)) {
+      try {
+        expected = readFile(`${dir}/${sandboxId}`).replace(/\n$/, '');
+        fromDir = true;
+      } catch (e) {
+        if ((e as { code?: string }).code !== 'ENOENT') {
+          console.error(`relay token for ${sandboxId} unreadable`);
+          return false;
+        }
+      }
+    }
+    if (!fromDir) expected = env[`SH_RELAY_TOKEN_${sandboxId}`] ?? env.SH_RELAY_TOKEN;
+    // `!`, not `=== undefined`: an empty token (file or env) is a configuration mistake, not a
+    // token, and must not admit a worker presenting an empty one.
     if (!expected || !token) return false;
-    // Constant-time, length-checked first -- the same comparison as the exec token's.
+    if (fromDir && execToken && expected === execToken) {
+      console.error(`relay token for ${sandboxId} equals the exec token; refused`);
+      return false;
+    }
     const want = Buffer.from(expected);
     const got = Buffer.from(token);
     return got.length === want.length && timingSafeEqual(got, want);
