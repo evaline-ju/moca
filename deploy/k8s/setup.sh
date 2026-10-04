@@ -182,10 +182,12 @@ cm_value() { printf '%s' "$1" | jq -r --arg k "$2" '.data[$k] // empty'; }
 # ID must match the relay's token-directory rule (spec §2.1: the relay reads <dir>/<id>) and appear
 # once -- two hosts with one ID would share a token and a workspace.
 normalize_p4_ids() {
+  [[ -n "$1" ]] || return 0
+  [[ "$1" != *$'\n'* ]] || die "SH_P4_SANDBOX_IDS must be one line"
   local -a parts
   local id out=''
   IFS=',' read -ra parts <<<"$1"
-  for id in "${parts[@]}"; do
+  for id in ${parts[@]+"${parts[@]}"}; do
     id="${id#"${id%%[![:space:]]*}"}"
     id="${id%"${id##*[![:space:]]}"}"
     [[ -n "$id" ]] || continue
