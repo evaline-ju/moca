@@ -19,9 +19,12 @@ if [[ "${K8S_LIVE_SMOKE:-}" != 1 ]]; then
 fi
 
 TARGET=kind-ci
+# A value flag given last would make `shift 2` fail under set -e with no message (setup.sh's
+# need_value guards the same case).
+need_value() { [[ $# -ge 2 ]] || { echo "smoke.sh: $1 needs a value" >&2; exit 2; }; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
-  --target) TARGET="${2-}"; shift 2 ;;
+  --target) need_value "$@"; TARGET="$2"; shift 2 ;;
   *) echo "smoke.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done

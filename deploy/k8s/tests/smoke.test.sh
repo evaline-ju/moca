@@ -107,4 +107,9 @@ pass 'a post-drain port-forward that never comes back is a FAIL, and the run rea
 
 if out="$(bash "$SMOKE" 2>&1)" && [[ "$out" == SKIP:* ]]; then pass 'without K8S_LIVE_SMOKE=1 it SKIPs'; else fail "no SKIP without K8S_LIVE_SMOKE: $out"; fi
 
+rc=0
+out="$(K8S_LIVE_SMOKE=1 PATH="$TMP/bin:$PATH" bash "$SMOKE" --target 2>&1)" || rc=$?
+[[ "$rc" == 2 && "$out" == *'--target needs a value'* ]] || fail "--target with no value: rc=$rc out=$out"
+pass '--target with no value exits 2 and says why'
+
 echo "smoke.test.sh: all passed"
