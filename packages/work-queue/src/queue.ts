@@ -3,9 +3,11 @@ import { createClient, type RedisClientType } from 'redis';
 /**
  * Inline implementation of redactUrl (canonical copy at @moca/session-backend).
  * A URL safe to print: any userinfo becomes `***@`. Non-URLs pass unchanged.
- * Inline rather than imported to avoid a package dependency on session-backend.
+ * Inline rather than imported to avoid a package dependency on session-backend. Both copies run
+ * against the same cases (session-backend/test/fixtures/redact-url-cases.json), so they cannot
+ * drift apart silently. Exported for that test only; not part of the package index.
  */
-function redactUrl(raw: string): string {
+export function redactUrl(raw: string): string {
   let u: URL;
   try {
     u = new URL(raw);
