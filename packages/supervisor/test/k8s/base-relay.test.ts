@@ -64,4 +64,25 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s base: relay', () => {
       },
     ]);
   });
+
+  it('reads per-sandbox tokens from an OPTIONAL mounted Secret (P6.2 §2.5)', () => {
+    const c = container(dep(), 'sandbox-relay');
+    expect(envVar(c, 'SH_RELAY_TOKEN_DIR')?.value).toBe('/run/relay-tokens');
+    expect(c.volumeMounts).toContainEqual({
+      name: 'relay-tokens',
+      mountPath: '/run/relay-tokens',
+      readOnly: true,
+    });
+    const vol = podSpec(dep()).volumes.find((v: { name: string }) => v.name === 'relay-tokens');
+    // optional: a stack with no P4 host has no such Secret, and must run exactly as in slice 1.
+    expect(vol.secret).toEqual({
+      secretName: 'moca-relay-sandbox-tokens',
+      optional: true,
+      defaultMode: 256,
+    });
+    // The container tier's global token is untouched.
+    expect(envVar(c, 'SH_RELAY_TOKEN')?.valueFrom).toEqual({
+      secretKeyRef: { name: 'moca-relay', key: 'SH_RELAY_TOKEN' },
+    });
+  });
 });
