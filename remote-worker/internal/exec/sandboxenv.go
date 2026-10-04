@@ -10,6 +10,7 @@ var workerSettings = map[string]bool{
 	"SANDBOX_TOKEN":         true,
 	"RELAY_ADDR":            true,
 	"RELAY_TLS":             true,
+	"RELAY_CA_FILE":         true,
 	"SANDBOX_ID":            true,
 	"SANDBOX_IMAGE":         true,
 	"SANDBOX_TRUST":         true,

@@ -10,7 +10,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"log"
 	"math/rand/v2"
@@ -22,8 +21,6 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 
 	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
@@ -110,11 +107,9 @@ func main() {
 
 	// Plaintext h2c for an in-cluster ClusterIP or an `oc port-forward` tunnel;
 	// TLS for a relay exposed on :443 (spec §9 mode A).
-	var creds credentials.TransportCredentials
-	if useTLS {
-		creds = credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12})
-	} else {
-		creds = insecure.NewCredentials()
+	creds, credsErr := session.TransportCredentials(useTLS, env("RELAY_CA_FILE", ""))
+	if credsErr != nil {
+		log.Fatalf("%v", credsErr)
 	}
 
 	// Keepalive is what bounds a half-open connection. recvLoop blocks in
