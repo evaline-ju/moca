@@ -514,4 +514,51 @@ expect_out 'could not list StorageClasses'
 ! grep -q 'no default StorageClass' "$TMP/out" || fail 'an unreadable StorageClass list was reported as no default'
 pass 'an unreadable StorageClass list is reported as such, and the advisory check does not abort'
 
+echo "== P6.2 Task 5: P4 inputs"
+p4_stored() { jq -r '.data.SH_P4_SANDBOX_IDS // empty' "$MOCK_STATE/moca__ConfigMap__moca-setup.json"; }
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS=' moca_microvm_0 , moca_microvm_1,'; expect_ok --target ocp)
+[[ "$(p4_stored)" == moca_microvm_0,moca_microvm_1 ]] || fail "spaces and a trailing comma were not normalised: '$(p4_stored)'"
+pass 'SH_P4_SANDBOX_IDS: spaces trimmed, empty entries dropped, stored comma-joined (Review Focus 1)'
+
+(unset SH_P4_SANDBOX_IDS; export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp)
+[[ "$(p4_stored)" == moca_microvm_0,moca_microvm_1 ]] || fail 'a re-run without SH_P4_SANDBOX_IDS dropped the stored IDs'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_P4_SANDBOX_IDS=; expect_ok --target ocp)
+[[ -z "$(p4_stored)" ]] || fail 'SH_P4_SANDBOX_IDS= (explicitly empty) did not clear the IDs'
+pass 'SH_P4_SANDBOX_IDS is sticky, and an explicitly empty value clears it'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS=moca-microvm-0; expect_fail --target ocp)
+expect_out "'moca-microvm-0' must match"
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS=a,b,a; expect_fail --target ocp)
+expect_out "lists 'a' twice"
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS=a; expect_fail --target kind --skip-build)
+expect_out 'needs --target ocp'
+! grep -q '^kubectl' "$MOCK_LOG" || fail 'a refused ID list still reached the cluster'
+pass 'refused: an ID with a dash, a duplicate, P4 IDs on kind -- before anything touches a cluster'
+
+# The live switch from a slice-1 stack: moca-setup already holds SH_SANDBOX_COUNT=2.
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp)
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_P4_SANDBOX_IDS=moca_microvm_0; expect_fail --target ocp)
+expect_out 'SH_SANDBOX_COUNT=2'
+expect_out 'Re-run with SH_SANDBOX_COUNT=0'
+[[ -z "$(p4_stored)" ]] || fail 'a refused run still stored the P4 IDs'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS=moca_microvm_0; expect_ok --target ocp)
+[[ "$(p4_stored)" == moca_microvm_0 ]] || fail 'the switch with SH_SANDBOX_COUNT=0 did not store the ID'
+pass 'one tier per stack: the stored count of 2 refuses P4 IDs, names the fix, and stores nothing (Review Focus 2)'
+
+reset_state
+expect_fail --target kind --relay-tls-cert "$TMP/c.pem" --relay-tls-key "$TMP/k.pem"
+expect_out 'apply to --target ocp only'
+expect_fail --target ocp --relay-tls-cert "$TMP/c.pem"
+expect_out 'go together'
+expect_fail --target ocp --relay-tls-cert
+expect_out '--relay-tls-cert needs a value'
+expect_ok --help
+expect_out 'SH_P4_SANDBOX_IDS'
+expect_out '--relay-tls-cert FILE --relay-tls-key FILE'
+pass '--relay-tls-cert/--relay-tls-key: ocp only, a pair, a value each; --help lists them'
+
 echo "setup.test.sh: all passed"

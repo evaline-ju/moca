@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
-# deploy/k8s/setup.sh -- bring up P6 on Kubernetes (docs/specs/2026-10-02-p6-on-kubernetes-slice1-design.md §4).
+# deploy/k8s/setup.sh -- bring up P6 on Kubernetes (docs/specs/2026-10-02-p6-on-kubernetes-slice2-design.md §4).
 #
 #   deploy/k8s/setup.sh --target kind|kind-ci|ocp [--image IMG] [--sandbox-image IMG]
 #                       [--build|--skip-build] [--tls-cert FILE --tls-key FILE]
+#                       [--relay-tls-cert FILE --relay-tls-key FILE]
 #
 # Environment: SH_GITHUB_CLIENT_ID, SH_ADMIN_SUBJECTS, SH_ALLOW_OPERATOR_FALLBACK (default false),
 # SH_SANDBOX_COUNT (default 2; 0 runs no container sandboxes), SH_WAIT_SECONDS (default 120),
-# SH_SOURCE_ONLY=1 (define the functions and stop, for tests).
+# SH_P4_SANDBOX_IDS (ocp only: comma-separated IDs of P4 microVM hosts outside the cluster, each
+# attaching to the relay over TLS; needs SH_SANDBOX_COUNT=0 -- see
+# docs/specs/2026-10-04-p6-on-kubernetes-slice2-design.md), SH_SOURCE_ONLY=1 (define the functions
+# and stop, for tests).
 #
 # Idempotent: a re-run converges and never rotates a secret. Inputs are sticky: a re-run keeps every
-# setting, --image, --sandbox-image (ocp) and SH_SANDBOX_COUNT it is not given; an explicitly empty
-# setting variable (SH_ADMIN_SUBJECTS=) clears it. No secret value is ever put on a command line --
-# values travel through pipes and through the environment of the one jq that writes each Secret.
+# setting, --image, --sandbox-image (ocp), SH_SANDBOX_COUNT and SH_P4_SANDBOX_IDS it is not given; an
+# explicitly empty variable (SH_ADMIN_SUBJECTS=) clears it. No secret value is ever put on a command
+# line -- values travel through pipes and through the environment of the one jq that writes each Secret.
 set -euo pipefail
 
 K8S_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,13 +34,18 @@ SANDBOX_IMAGE=''
 BUILD=auto
 TLS_CERT=''
 TLS_KEY=''
+RELAY_TLS_CERT=''
+RELAY_TLS_KEY=''
+# P4 sandbox IDs (P6.2), space-separated once normalised; resolved against moca-setup in load_setup_inputs.
+P4_IDS=''
+P4_IDS_GIVEN=''
 
 log() { printf '==> %s\n' "$*" >&2; }
 die() {
   printf 'setup.sh: %s\n' "$*" >&2
   exit 1
 }
-usage() { sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { awk 'NR > 1 && /^set -euo/ { exit } NR > 1' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # need_value FLAG ARGC [VALUE]: die unless FLAG was given a non-empty value. `shift 2` with one
 # argument left fails without a word, and under set -e that is a silent exit.
@@ -52,6 +61,8 @@ parse_args() {
     --skip-build) BUILD=never; shift ;;
     --tls-cert) need_value "$1" $# "${2-}"; TLS_CERT="$2"; shift 2 ;;
     --tls-key) need_value "$1" $# "${2-}"; TLS_KEY="$2"; shift 2 ;;
+    --relay-tls-cert) need_value "$1" $# "${2-}"; RELAY_TLS_CERT="$2"; shift 2 ;;
+    --relay-tls-key) need_value "$1" $# "${2-}"; RELAY_TLS_KEY="$2"; shift 2 ;;
     -h | --help) usage; exit 0 ;;
     *) die "unknown argument: $1 (see --help)" ;;
     esac
@@ -66,6 +77,17 @@ parse_args() {
     [[ -n "$TLS_CERT" && -n "$TLS_KEY" ]] || die '--tls-cert and --tls-key go together'
     [[ -r "$TLS_CERT" && -r "$TLS_KEY" ]] || die "cannot read $TLS_CERT or $TLS_KEY"
   fi
+  if [[ -n "$RELAY_TLS_CERT$RELAY_TLS_KEY" ]]; then
+    [[ "$TARGET" == ocp ]] || die '--relay-tls-cert/--relay-tls-key apply to --target ocp only'
+    [[ -n "$RELAY_TLS_CERT" && -n "$RELAY_TLS_KEY" ]] || die '--relay-tls-cert and --relay-tls-key go together'
+    [[ -r "$RELAY_TLS_CERT" && -r "$RELAY_TLS_KEY" ]] || die "cannot read $RELAY_TLS_CERT or $RELAY_TLS_KEY"
+  fi
+  # Normalised and validated here, before anything touches a cluster. Unset means "the earlier run's
+  # IDs" (load_setup_inputs); set-but-empty means none.
+  P4_IDS_GIVEN="${SH_P4_SANDBOX_IDS+x}"
+  P4_IDS="$(normalize_p4_ids "${SH_P4_SANDBOX_IDS-}")"
+  [[ -z "$P4_IDS" ]] || [[ "$TARGET" == ocp ]] ||
+    die "SH_P4_SANDBOX_IDS ($P4_IDS) needs --target ocp: a P4 host outside the cluster reaches the relay through an OpenShift Route, and $TARGET has none"
   # Validated here, before anything touches a cluster; an unset or empty count is resolved later,
   # from the earlier run's value (load_setup_inputs).
   SH_SANDBOX_COUNT="${SH_SANDBOX_COUNT:-}"
@@ -156,30 +178,57 @@ configmap_json() { kc get configmap "$1" -n "$NS" --ignore-not-found -o json; }
 # cm_value JSON KEY: KEY's value from configmap_json's output (possibly empty), or nothing.
 cm_value() { printf '%s' "$1" | jq -r --arg k "$2" '.data[$k] // empty'; }
 
+# normalize_p4_ids "a, b,," -> "a b": comma-separated; each entry trimmed, empty entries dropped. An
+# ID must match the relay's token-directory rule (spec §2.1: the relay reads <dir>/<id>) and appear
+# once -- two hosts with one ID would share a token and a workspace.
+normalize_p4_ids() {
+  local IFS=',' id out=''
+  for id in $1; do
+    id="${id#"${id%%[![:space:]]*}"}"
+    id="${id%"${id##*[![:space:]]}"}"
+    [[ -n "$id" ]] || continue
+    [[ "$id" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] ||
+      die "SH_P4_SANDBOX_IDS: '$id' must match ^[A-Za-z_][A-Za-z0-9_]*\$ (the relay looks its token up by this name)"
+    case " $out " in *" $id "*) die "SH_P4_SANDBOX_IDS lists '$id' twice" ;; esac
+    out="${out:+$out }$id"
+  done
+  printf '%s' "$out"
+}
+
+# One sandbox tier per stack until slice 3 (#425), spec §4.2: the supervisor re-selects a sandbox on
+# every turn, so a session would hop between a container workspace and a microVM one.
+check_tiers() {
+  [[ -n "$P4_IDS" ]] || return 0
+  [[ "$SH_SANDBOX_COUNT" == 0 ]] ||
+    die "SH_P4_SANDBOX_IDS ($P4_IDS) with SH_SANDBOX_COUNT=$SH_SANDBOX_COUNT: one sandbox tier per stack until slice 3 (#425) -- the supervisor re-selects a sandbox every turn, so sessions would hop between container and microVM workspaces. Re-run with SH_SANDBOX_COUNT=0"
+}
+
 # --- Sticky inputs (moca-setup) -------------------------------------------------------------------
 # A re-run is how an operator changes ONE input (README "Re-running"), so it must not reset the ones
 # it is not given: without this, a rotation recipe that sets one variable rolled an OCP stack back to
-# :latest, scaled the sandboxes back to 2 and the control plane to 0. --image, --sandbox-image and the
-# resolved SH_SANDBOX_COUNT are kept in the non-secret ConfigMap moca-setup and reused when not given.
-# Kind ignores the stored images: it always runs the locally loaded dev.local tags, and --image there
-# only picks what to pull, so only the sandbox count is stored for it.
+# :latest, scaled the sandboxes back to 2 and the control plane to 0. --image, --sandbox-image,
+# SH_SANDBOX_COUNT and SH_P4_SANDBOX_IDS are kept in the non-secret ConfigMap moca-setup and reused
+# when not given. Kind ignores the stored images: it always runs the locally loaded dev.local tags, and
+# --image there only picks what to pull, so only the sandbox count is stored for it.
 load_setup_inputs() {
   local json
   json="$(configmap_json moca-setup)"
   if ! is_kind; then
     [[ -n "$IMAGE" ]] || IMAGE="$(cm_value "$json" IMAGE)"
     [[ -n "$SANDBOX_IMAGE" ]] || SANDBOX_IMAGE="$(cm_value "$json" SANDBOX_IMAGE)"
+    [[ -n "$P4_IDS_GIVEN" ]] || P4_IDS="$(normalize_p4_ids "$(cm_value "$json" SH_P4_SANDBOX_IDS)")"
   fi
   [[ -n "$SH_SANDBOX_COUNT" ]] || SH_SANDBOX_COUNT="$(cm_value "$json" SH_SANDBOX_COUNT)"
   [[ -n "$SH_SANDBOX_COUNT" ]] || SH_SANDBOX_COUNT=2
   [[ "$SH_SANDBOX_COUNT" =~ ^[0-9]+$ ]] ||
     die "moca-setup holds SH_SANDBOX_COUNT='$SH_SANDBOX_COUNT': re-run with SH_SANDBOX_COUNT set to a whole number"
+  check_tiers
   local data
   if is_kind; then
     data="$(jq -nc --arg n "$SH_SANDBOX_COUNT" '{SH_SANDBOX_COUNT: $n}')"
   else
-    data="$(jq -nc --arg n "$SH_SANDBOX_COUNT" --arg i "$IMAGE" --arg s "$SANDBOX_IMAGE" \
-      '{SH_SANDBOX_COUNT: $n, IMAGE: $i, SANDBOX_IMAGE: $s} | with_entries(select(.value != ""))')"
+    data="$(jq -nc --arg n "$SH_SANDBOX_COUNT" --arg i "$IMAGE" --arg s "$SANDBOX_IMAGE" --arg p "${P4_IDS// /,}" \
+      '{SH_SANDBOX_COUNT: $n, IMAGE: $i, SANDBOX_IMAGE: $s, SH_P4_SANDBOX_IDS: $p} | with_entries(select(.value != ""))')"
   fi
   jq -n --arg ns "$NS" --argjson data "$data" \
     '{apiVersion: "v1", kind: "ConfigMap", metadata: {name: "moca-setup", namespace: $ns}, data: $data}' |
