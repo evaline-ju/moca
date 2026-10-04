@@ -1,5 +1,25 @@
 import { createClient, type RedisClientType } from 'redis';
 
+/**
+ * Inline implementation of redactUrl (canonical copy at @moca/session-backend).
+ * A URL safe to print: any userinfo becomes `***@`. Non-URLs pass unchanged.
+ * Inline rather than imported to avoid a package dependency on session-backend. Both copies run
+ * against the same cases (session-backend/test/fixtures/redact-url-cases.json), so they cannot
+ * drift apart silently. Exported for that test only; not part of the package index.
+ */
+export function redactUrl(raw: string): string {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return raw;
+  }
+  if (u.username === '' && u.password === '') return raw;
+  u.username = '';
+  u.password = '';
+  return u.toString().replace(/^([a-z][a-z0-9+.-]*:\/\/)/i, '$1***@');
+}
+
 export interface ClaimedEntry {
   entryId: string;
   envelope: unknown;
@@ -54,7 +74,7 @@ export class RedisWorkQueue implements WorkQueue {
       socket: {
         reconnectStrategy: (retries: number) =>
           retries > 10
-            ? new Error(`redis at ${url} unreachable after ${retries} attempts`)
+            ? new Error(`redis at ${redactUrl(url)} unreachable after ${retries} attempts`)
             : Math.min(retries * 100, 1000),
       },
     }) as RedisClientType;

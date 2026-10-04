@@ -1,0 +1,28 @@
+[
+  {
+    "why": "a password-only userinfo",
+    "in": "redis://:s3cret@redis.moca.svc:6379",
+    "out": "redis://***@redis.moca.svc:6379"
+  },
+  {
+    "why": "user and password, keeping scheme, host, port and path",
+    "in": "rediss://default:pw@[::1]:6380/0",
+    "out": "rediss://***@[::1]:6380/0"
+  },
+  {
+    "why": "a username-only userinfo (an ACL user name is still an identifier)",
+    "in": "redis://alice@h:6379",
+    "out": "redis://***@h:6379"
+  },
+  {
+    "why": "a URL without credentials is unchanged",
+    "in": "redis://127.0.0.1:6379",
+    "out": "redis://127.0.0.1:6379"
+  },
+  { "why": "an unparseable string is unchanged", "in": "not a url", "out": "not a url" },
+  {
+    "why": "a percent-encoded password",
+    "in": "redis://:p%40ss%3Aword@h:6379",
+    "out": "redis://***@h:6379"
+  }
+]
