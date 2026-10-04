@@ -1,0 +1,13 @@
+# The relay's EXTERNAL path for P4 hosts outside the cluster (P6.2, spec §2.4). A Component, not an
+# overlay: setup.sh's generated overlay lists it only when SH_P4_SANDBOX_IDS is non-empty, so a stack
+# with no P4 host renders exactly as slice 1. The sidecar names its image in full: this component is
+# applied after overlays/ocp's image transformer has already run, so a placeholder would never be
+# rewritten.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - service.yaml
+  - route.yaml
+  - network-policy.yaml
+patches:
+  - path: patch-relay-tls.yaml

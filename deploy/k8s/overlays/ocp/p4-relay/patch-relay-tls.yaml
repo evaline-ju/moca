@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: sandbox-relay, namespace: moca }
+spec:
+  template:
+    spec:
+      containers:
+        # Byte-for-byte TCP: TLS ends here and each external worker connection becomes one connection
+        # to the ATTACH listener on loopback. That listener does not serve SandboxExec (the exec
+        # listener is split onto :9444), so the external path cannot reach SandboxExec at all.
+        - name: tls
+          image: docker.io/ghostunnel/ghostunnel:v1.11.3@sha256:2599b8a04bae16d70a4209495618dea61b46a00a9a05fcf74da282688ad3517f
+          args:
+            - server
+            - --listen
+            - 0.0.0.0:8444
+            - --target
+            - 127.0.0.1:9443
+            - --cert
+            - /tls/tls.crt
+            - --key
+            - /tls/tls.key
+            - --disable-authentication
+            # grpc-go >= 1.67 (the workers are on 1.83) fails a TLS handshake whose server selects no
+            # ALPN protocol, and ghostunnel advertises none unless told to.
+            - --alpn
+            - h2
+          ports:
+            - { name: https, containerPort: 8444 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          readinessProbe:
+            tcpSocket: { port: https }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 64Mi }
+          volumeMounts:
+            - { name: relay-tls, mountPath: /tls, readOnly: true }
+      volumes:
+        - name: relay-tls
+          secret:
+            secretName: moca-relay-tls
+            defaultMode: 288 # 0440

@@ -1,0 +1,12 @@
+# Additive (policies union): the router may reach the relay's TLS sidecar, and nothing else on it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: sandbox-relay-from-router, namespace: moca }
+spec:
+  podSelector: { matchLabels: { app: sandbox-relay } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { 'policy-group.network.openshift.io/ingress': '' } }
+      ports:
+        - { protocol: TCP, port: 8444 }
