@@ -23,10 +23,7 @@ func TransportCredentials(useTLS bool, caFile string) (credentials.TransportCred
 		}
 		return insecure.NewCredentials(), nil
 	}
-	cfg := &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		NextProtos: []string{"h2"},
-	}
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
 	if caFile != "" {
 		pemBytes, err := os.ReadFile(caFile)
 		if err != nil {
@@ -41,6 +38,5 @@ func TransportCredentials(useTLS bool, caFile string) (credentials.TransportCred
 		}
 		cfg.RootCAs = pool
 	}
-	// grpc.Dial will set ServerName from the dialed host; we do not override it here.
 	return credentials.NewTLS(cfg), nil
 }

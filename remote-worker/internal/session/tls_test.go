@@ -33,7 +33,7 @@ func selfSigned(t *testing.T) (tls.Certificate, []byte) {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "localhost"},
-		DNSNames: []string{"localhost", "127.0.0.1"}, NotBefore: time.Now().Add(-time.Hour),
+		DNSNames: []string{"localhost"}, NotBefore: time.Now().Add(-time.Hour),
 		NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true,
 		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
@@ -46,7 +46,7 @@ func selfSigned(t *testing.T) (tls.Certificate, []byte) {
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, pemBytes
 }
 
-// serve starts a TLS gRPC server with the standard health service and returns "localhost:<port>".
+// serve starts a TLS gRPC server with the standard health service and returns a passthrough address.
 func serve(t *testing.T, cert tls.Certificate) string {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -55,16 +55,10 @@ func serve(t *testing.T, cert tls.Certificate) string {
 	}
 	s := grpc.NewServer(grpc.Creds(credentials.NewServerTLSFromCert(&cert)))
 	healthpb.RegisterHealthServer(s, health.NewServer())
-	done := make(chan struct{})
-	go func() {
-		close(done)
-		_ = s.Serve(lis)
-	}()
-	<-done // Wait for goroutine to start
+	go func() { _ = s.Serve(lis) }()
 	t.Cleanup(s.Stop)
-	time.Sleep(100 * time.Millisecond) // Ensure server is ready
 	_, port, _ := net.SplitHostPort(lis.Addr().String())
-	return "localhost:" + port
+	return "passthrough:///localhost:" + port
 }
 
 func check(t *testing.T, addr string, creds credentials.TransportCredentials) error {
@@ -84,36 +78,30 @@ func check(t *testing.T, addr string, creds credentials.TransportCredentials) er
 
 func TestTransportCredentials(t *testing.T) {
 	cert, caPEM := selfSigned(t)
-	_ = serve(t, cert) // Start a test server (unused for now, kept for future protocol-level tests)
+	addr := serve(t, cert)
 	dir := t.TempDir()
 	caFile := filepath.Join(dir, "relay-ca.crt")
 	if err := os.WriteFile(caFile, caPEM, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	t.Run("with RELAY_CA_FILE a self-signed relay should verify", func(t *testing.T) {
+	t.Run("with RELAY_CA_FILE a self-signed relay verifies", func(t *testing.T) {
 		creds, err := TransportCredentials(true, caFile)
 		if err != nil {
-			t.Fatalf("TransportCredentials with CA file failed: %v", err)
+			t.Fatal(err)
 		}
-		if creds.Info().SecurityProtocol != "tls" {
-			t.Fatalf("expected TLS credentials, got %s", creds.Info().SecurityProtocol)
+		if err := check(t, addr, creds); err != nil {
+			t.Fatalf("dial with the CA file failed: %v", err)
 		}
-		// Verify by attempting to dial (this will timeout on the health check but that's OK -
-		// the important part is that TLS cert verification succeeds, which we've confirmed by
-		// getting TLS credentials without error when given the CA file).
 	})
 	t.Run("without it the same relay is refused (system roots only)", func(t *testing.T) {
 		creds, err := TransportCredentials(true, "")
 		if err != nil {
-			t.Fatalf("TransportCredentials without CA file failed: %v", err)
+			t.Fatal(err)
 		}
-		if creds.Info().SecurityProtocol != "tls" {
-			t.Fatalf("expected TLS credentials, got %s", creds.Info().SecurityProtocol)
+		if err := check(t, addr, creds); err == nil {
+			t.Fatal("a self-signed relay verified against system roots alone")
 		}
-		// With system roots only (no CA file), attempting to connect to a self-signed relay
-		// would fail at cert verification time. We trust that grpc-go handles this correctly
-		// and focus on testing that TransportCredentials creates the right config.
 	})
 	t.Run("RELAY_CA_FILE without RELAY_TLS is a contradiction", func(t *testing.T) {
 		if _, err := TransportCredentials(false, caFile); err == nil ||
