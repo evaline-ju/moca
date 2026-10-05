@@ -338,6 +338,25 @@ describe('readyz', () => {
     expect(get).not.toHaveBeenCalled();
   });
 
+  it('fails fast when the client is ready but Redis never answers the probe (#434)', async () => {
+    // Connected but wedged: node-redis reports ready, and the GET just never comes back. Unbounded,
+    // readyz would fail only at the kubelet's probe timeout, as a timeout rather than a 503.
+    const get = vi.fn(() => new Promise<never>(() => undefined));
+    const d = makeDeps({
+      index: { get } as unknown as OwnershipIndex,
+      redisReady: () => true,
+      readyzTimeoutMs: 20,
+    });
+    const started = Date.now();
+    const code = await Promise.race([
+      codeOf(() => HANDLERS.readyz!(ctx(), d)),
+      new Promise<string>((resolve) => setTimeout(() => resolve('hung'), 1000).unref()),
+    ]);
+    expect(code).toBe('redis_unavailable');
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+
   it('is ok when the client is ready and the index answers', async () => {
     const d = makeDeps({ redisReady: () => true });
     expect(await HANDLERS.readyz!(ctx(), d)).toEqual({ status: 200, body: 'ok' });

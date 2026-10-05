@@ -69,6 +69,24 @@ describe('probes', () => {
   });
 });
 
+describe('SIGTERM', () => {
+  it('closes the server, then releases the deps (Redis), then exits 0 (#434)', async () => {
+    const order: string[] = [];
+    const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      order.push(`exit ${code}`);
+    }) as never);
+    try {
+      d.close = vi.fn(async () => void order.push('close'));
+      server.once('close', () => order.push('server closed'));
+      process.emit('SIGTERM');
+      await vi.waitFor(() => expect(exit).toHaveBeenCalled(), { timeout: 2000 });
+      expect(order).toEqual(['server closed', 'close', 'exit 0']);
+    } finally {
+      exit.mockRestore();
+    }
+  });
+});
+
 describe('routing', () => {
   it('404s an unknown path and an unsupported method', async () => {
     expect((await request('GET', '/nope')).status).toBe(404);
