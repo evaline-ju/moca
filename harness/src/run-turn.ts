@@ -45,7 +45,8 @@ import { leaseTimings } from './lease-timings.js';
 
 // Re-exported because they are now part of executeTurn's CONTRACT: since /turn leases from the pool,
 // every caller of executeTurn can be handed these errors and needs to distinguish them from a generic
-// failure (both are transient — a 503, not a 500). harness/package.json exposes no ./select-sandbox
+// failure (all three are transient — a 503, not a 500: a full pool, an empty pool or tier, and a
+// session waiting for its own briefly-absent sandbox). harness/package.json exposes no ./select-sandbox
 // subpath, and this is the module those callers already import.
 export { SandboxPoolSaturatedError, SandboxPoolEmptyError, SandboxAffinityPendingError };
 

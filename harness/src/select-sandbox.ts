@@ -283,16 +283,20 @@ export class SandboxAffinityPendingError extends SandboxPoolSaturatedError {
  * The pods wording is unchanged, which is what keeps existing log greps and the `/pool selector/`
  * assertions matching; only the source that never produced it truthfully says something else.
  *
- * With tiers declared, the tier is named too: an empty TIER on a healthy relay is the commonest
- * misconfiguration (P6.3 spec §5).
+ * With a tier given, neither wording is used: both would be untrue. Pods are never candidates for a
+ * non-default tier, so "no Running pods" blames the wrong inventory, and records of OTHER tiers may
+ * well be attached, so "no sandbox has attached" is false too. The message names the tier and the
+ * fix instead, because an empty TIER on a healthy relay is the commonest misconfiguration (P6.3 spec
+ * §5).
  */
 export class SandboxPoolEmptyError extends Error {
   constructor(selector: string, source: DiscoverySource = 'both', tier?: string) {
     super(
-      (source === 'records'
-        ? `no sandbox presence records (SH_SANDBOX_DISCOVERY=records — no sandbox has attached to the relay yet)`
-        : `no Running pods for pool selector '${selector}'`) +
-        (tier ? ` in sandbox tier '${tier}'` : ''),
+      tier
+        ? `no attached sandbox in sandbox tier '${tier}' (SH_SANDBOX_TIERS is set; check that the workers of this tier set SANDBOX_TIER=${tier})`
+        : source === 'records'
+          ? `no sandbox presence records (SH_SANDBOX_DISCOVERY=records — no sandbox has attached to the relay yet)`
+          : `no Running pods for pool selector '${selector}'`,
     );
     this.name = 'SandboxPoolEmptyError';
   }

@@ -1,9 +1,10 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   selectPoolSandbox,
   SandboxAffinityPendingError,
   SandboxPoolEmptyError,
   SandboxPoolSaturatedError,
+  resetTierWarnings,
   type SelectDeps,
 } from '../src/select-sandbox.js';
 import type { LeaseStore } from '../src/sandbox-lease.js';
@@ -76,6 +77,9 @@ export function deps(
 }
 
 describe('selectPoolSandbox: tier filter (P6.3 spec §4 step 1)', () => {
+  // The unlabelled-record warning is once per id per PROCESS; forget it so no test depends on order.
+  beforeEach(() => resetTierWarnings());
+
   it('no tiers declared: nothing is filtered, an unlabelled record is selected', async () => {
     const { lease } = fakeLease();
     const sel = await selectPoolSandbox(env(), '/h', 's-1', opts(), deps([rec('a')], lease));
@@ -140,10 +144,14 @@ describe('selectPoolSandbox: tier filter (P6.3 spec §4 step 1)', () => {
     );
     await expect(p).rejects.toBeInstanceOf(SandboxPoolEmptyError);
     await expect(p).rejects.toThrow("sandbox tier 'microvm'");
+    // Neither inventory wording is true of a tier: pods are not its candidates, and other-tier
+    // records may be attached.
+    await expect(p).rejects.not.toThrow('pool selector');
   });
 
   it('pods (discovery both) count as the default tier only', async () => {
-    const { lease } = fakeLease();
+    // pod-0 is the MORE loaded, so an unfiltered container selection would pick m-1.
+    const { lease } = fakeLease({ 'pod-0': 1 });
     const e = env({ ...TIERS, SH_SANDBOX_DISCOVERY: 'both' });
     const d = deps([rec('m-1', 'microvm')], lease, { listPods: async () => ['pod-0'] });
     expect(
