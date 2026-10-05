@@ -109,7 +109,7 @@ case "${1-} ${2-}" in
   [[ -f "$f" ]] || { echo "Error from server (NotFound): secrets \"$3\" not found" >&2; exit 1; }
   p=''
   while [[ $# -gt 0 ]]; do [[ "$1" == -p ]] && { p="$2"; break; }; shift; done
-  jq --argjson ops "$p" 'reduce ($ops[] | select(.op == "remove") | .path | ltrimstr("/data/")) as $k (.; del(.data[$k]))' "$f" >"$f.new"
+  jq --argjson p "$p" '.data = ((.data // {}) + ($p.data // {}) | with_entries(select(.value != null)))' "$f" >"$f.new"
   mv "$f.new" "$f" ;;
 "run moca-genkeys")
   hex() { od -An -tx1 -N"$1" /dev/urandom | tr -d ' \n'; }
@@ -637,6 +637,21 @@ grep -q '^kubectl patch secret moca-relay-sandbox-tokens' "$MOCK_LOG" || fail 'r
 [[ ! -e "$P4B/moca_microvm_0" ]] || fail 'clearing the IDs left a bundle'
 pass 'tokens are kept on a re-run; a dropped ID loses its token and bundle; clearing the list empties the Secret'
 
+# Revocation uses an idempotent merge patch: nulling an absent key is a no-op, even if someone
+# manually deleted a stale key. Verify that a patch still succeeds when revocation tries to remove
+# a key that the API server may have already pruned.
+p4_ok moca_microvm_0,moca_microvm_1
+# Manually add a third stale key to the Secret to ensure the patch command is issued.
+jq '.data.stale_microvm = "dGVzdA=="' "$MOCK_STATE/moca__Secret__moca-relay-sandbox-tokens.json" >"$TMP/t.json"
+mv "$TMP/t.json" "$MOCK_STATE/moca__Secret__moca-relay-sandbox-tokens.json"
+# Now call with only moca_microvm_0; both moca_microvm_1 and stale_microvm are stale.
+: >"$MOCK_LOG"
+p4_ok moca_microvm_0
+# Revocation should patch to remove both stale keys.
+grep -q '^kubectl patch secret moca-relay-sandbox-tokens' "$MOCK_LOG" || fail 'revocation was not called'
+[[ "$(tok_keys)" == moca_microvm_0 ]] || fail 'revocation idempotency failed; remaining keys wrong'
+pass 'revocation uses idempotent merge patch: stale key removal succeeds'
+
 # A stored token equal to the exec token (the relay would refuse it, spec §2.2) is regenerated.
 reset_state
 p4_ok moca_microvm_0
@@ -665,6 +680,7 @@ p4_ok moca_microvm_0
 [[ -s "$RCA" ]] || fail 'a re-run lost the relay CA file'
 : >"$MOCK_LOG"
 (export SH_GITHUB_CLIENT_ID=Iv1.a SH_P4_SANDBOX_IDS=moca_microvm_0 MOCK_GET_FAIL=moca-relay-tls; expect_fail --target ocp)
+expect_out 'etcd timeout'
 ! grep -q 'create secret tls moca-relay-tls' "$MOCK_LOG" || fail 'a failed GET of moca-relay-tls replaced it with a self-signed one'
 reset_state
 (export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp)

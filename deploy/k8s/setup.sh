@@ -292,11 +292,11 @@ ensure_relay_secrets() {
 
 # P4 hosts' attach tokens (spec §4.3): one key per P4 ID in moca-relay-sandbox-tokens, which the relay
 # reads on every attach from its SH_RELAY_TOKEN_DIR mount (base/relay.yaml). Generated once and
-# kept; a key whose ID is no longer listed is removed -- that is revocation. Removal is an explicit
-# JSON patch, not left to server-side apply's field pruning, so it does not depend on how the API
-# server tracks stringData ownership. With no IDs the Secret stays, empty: the relay's mount of it is
-# optional, but an emptied Secret revokes deterministically where a deleted one may not. Never in
-# moca-sandbox: no P4 host runs there.
+# kept; a key whose ID is no longer listed is removed -- that is revocation. Removal uses an
+# idempotent merge patch (nulling absent keys is a no-op), so it does not depend on whether the
+# API server's server-side apply pruned the dropped stringData key itself. With no IDs the Secret
+# stays, empty: the relay's mount of it is optional, but an emptied Secret revokes deterministically
+# where a deleted one may not. Never in moca-sandbox: no P4 host runs there.
 P4_TOKENS_SECRET=moca-relay-sandbox-tokens
 ensure_p4_tokens() {
   [[ "$TARGET" == ocp ]] || return 0
@@ -327,8 +327,8 @@ ensure_p4_tokens() {
     '($keep | split(" ")) as $k | .data // {} | keys[] | select(. as $x | ($k | index($x)) == null)')"
   [[ -n "$stale" ]] || return 0
   log "revoking the relay token of P4 sandbox(es) no longer listed: $(printf '%s' "$stale" | tr '\n' ' ')"
-  kc patch secret "$P4_TOKENS_SECRET" -n "$NS" --type=json \
-    -p "$(printf '%s\n' "$stale" | jq -Rnc '[inputs | {op: "remove", path: "/data/\(.)"}]')" >/dev/null
+  kc patch secret "$P4_TOKENS_SECRET" -n "$NS" --type=merge \
+    -p "$(printf '%s\n' "$stale" | jq -Rnc '{data: ([inputs | {key: ., value: null}] | from_entries)}')" >/dev/null
 }
 
 ensure_redis_secret() {
