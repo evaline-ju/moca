@@ -28,6 +28,7 @@ import {
   selectPoolSandbox,
   SandboxPoolSaturatedError,
   SandboxPoolEmptyError,
+  SandboxAffinityPendingError,
   assertServerSandbox,
   type SelectDeps,
 } from './select-sandbox.js';
@@ -46,7 +47,7 @@ import { leaseTimings } from './lease-timings.js';
 // every caller of executeTurn can be handed these errors and needs to distinguish them from a generic
 // failure (both are transient — a 503, not a 500). harness/package.json exposes no ./select-sandbox
 // subpath, and this is the module those callers already import.
-export { SandboxPoolSaturatedError, SandboxPoolEmptyError };
+export { SandboxPoolSaturatedError, SandboxPoolEmptyError, SandboxAffinityPendingError };
 
 /**
  * One session store per process, not per turn.

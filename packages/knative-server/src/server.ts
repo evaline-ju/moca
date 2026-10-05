@@ -229,7 +229,12 @@ async function handleTurn(req: IncomingMessage, res: ServerResponse): Promise<vo
  * was observed, not hypothesised. The paired test constructs the REAL class, so this string stays
  * pinned to the class rather than drifting from it.
  */
-const NO_CAPACITY = new Set(['SandboxPoolSaturatedError', 'SandboxPoolEmptyError']);
+const NO_CAPACITY = new Set([
+  'SandboxPoolSaturatedError',
+  'SandboxPoolEmptyError',
+  // P6.3: the session's own sandbox is briefly absent. Same advice: retry after Retry-After.
+  'SandboxAffinityPendingError',
+]);
 
 export function turnErrorStatus(err: unknown): number {
   if (err instanceof Error && NO_CAPACITY.has(err.name)) return 503;

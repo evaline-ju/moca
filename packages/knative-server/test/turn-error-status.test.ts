@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { SandboxPoolSaturatedError, SandboxPoolEmptyError } from '@moca/harness/run-turn';
+import {
+  SandboxPoolSaturatedError,
+  SandboxPoolEmptyError,
+  SandboxAffinityPendingError,
+} from '@moca/harness/run-turn';
 import { turnErrorStatus, turnErrorHeaders } from '../src/server.js';
 
 // /turn now leases a sandbox from the pool (it used to run tool calls in the harness process), so
@@ -22,6 +26,10 @@ describe('turnErrorStatus', () => {
     // starting" got a code meaning "never retry" while "every sandbox is busy" got Retry-After. Same
     // cause (no capacity yet), so the same advice.
     expect(turnErrorStatus(new SandboxPoolEmptyError('app=sandbox'))).toBe(503);
+  });
+
+  it('maps a pending affine sandbox to 503 too: the session is waiting for ITS sandbox', () => {
+    expect(turnErrorStatus(new SandboxAffinityPendingError('m-0', 5_000))).toBe(503);
   });
 
   it('keeps the legacy 404 for a missing session', () => {

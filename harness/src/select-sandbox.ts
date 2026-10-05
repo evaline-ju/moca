@@ -11,6 +11,7 @@ import {
 } from '@moca/k8s-sandbox';
 import { RedisLeaseStore, type LeaseStore } from './sandbox-lease.js';
 import { RedisRecordStore, type RecordStore, type SandboxRecord } from './pool-records.js';
+import { parseSandboxTiers, TIER_LABEL } from './sandbox-affinity.js';
 
 /**
  * Process-wide Redis-backed stores, reused across selections instead of built per call.
@@ -229,9 +230,36 @@ export function resolveDiscoverySource(
 
 /** Thrown when a pool is configured but every pod is at the soft cap. */
 export class SandboxPoolSaturatedError extends Error {
-  constructor(selector: string) {
-    super(`sandbox pool '${selector}' saturated: all pods at capacity`);
+  constructor(selector: string, detail?: string) {
+    super(
+      detail
+        ? `sandbox pool '${selector}' saturated: ${detail}`
+        : `sandbox pool '${selector}' saturated: all pods at capacity`,
+    );
     this.name = 'SandboxPoolSaturatedError';
+  }
+}
+
+/**
+ * Thrown when the sandbox that served this session's previous turn is not attached, and has been
+ * gone for less than SH_SANDBOX_AFFINITY_GRACE_SECONDS (P6.3 spec §4 step 4). Usually a relay
+ * restart: every worker reattaches under the same id within seconds, and moving the session meanwhile
+ * would lose a workspace that is about to come back.
+ *
+ * A SUBCLASS of SandboxPoolSaturatedError on purpose: the three leaf paths classify by `instanceof
+ * SandboxPoolSaturatedError` (run-leaf.ts) and must treat this as the same retryable no-capacity
+ * outcome. `name` is its own, for knative-server's NO_CAPACITY set (server.ts), which matches names.
+ */
+export class SandboxAffinityPendingError extends SandboxPoolSaturatedError {
+  constructor(
+    readonly sandboxId: string,
+    readonly retryInMs: number,
+  ) {
+    super('');
+    this.message =
+      `this session's sandbox '${sandboxId}' is not attached; waiting up to ` +
+      `${Math.ceil(retryInMs / 1000)}s for it to return before moving the session within its tier`;
+    this.name = 'SandboxAffinityPendingError';
   }
 }
 
@@ -254,13 +282,17 @@ export class SandboxPoolSaturatedError extends Error {
  *
  * The pods wording is unchanged, which is what keeps existing log greps and the `/pool selector/`
  * assertions matching; only the source that never produced it truthfully says something else.
+ *
+ * With tiers declared, the tier is named too: an empty TIER on a healthy relay is the commonest
+ * misconfiguration (P6.3 spec §5).
  */
 export class SandboxPoolEmptyError extends Error {
-  constructor(selector: string, source: DiscoverySource = 'both') {
+  constructor(selector: string, source: DiscoverySource = 'both', tier?: string) {
     super(
-      source === 'records'
+      (source === 'records'
         ? `no sandbox presence records (SH_SANDBOX_DISCOVERY=records — no sandbox has attached to the relay yet)`
-        : `no Running pods for pool selector '${selector}'`,
+        : `no Running pods for pool selector '${selector}'`) +
+        (tier ? ` in sandbox tier '${tier}'` : ''),
     );
     this.name = 'SandboxPoolEmptyError';
   }
@@ -298,6 +330,11 @@ export function assertServerSandbox(
   }
 }
 
+export interface WorkspaceReset {
+  from: string;
+  reason: 'detached' | 'retiered';
+}
+
 export interface SelectedSandbox {
   config: K8sSandboxConfig;
   /** Present ONLY for a leased grpc presence record; undefined for pods. */
@@ -315,6 +352,12 @@ export interface SelectedSandbox {
   leased: boolean;
   heartbeat: () => Promise<void>;
   release: () => Promise<void>;
+  /** The leased sandbox's id (pod name or presence-record id). Absent on the no-selector path. */
+  sandboxId?: string;
+  /** The effective tier this selection ran in; '' when the deployment declares none. */
+  tier?: string;
+  /** Present when this selection moved the session off its previous sandbox (P6.3 spec §4, §6). */
+  workspaceReset?: WorkspaceReset;
 }
 
 export interface SelectDeps {
@@ -372,6 +415,35 @@ function defaultExecClient(_sandboxId: string, env: NodeJS.ProcessEnv): ExecClie
   return makeRelayExecClient(addr, token);
 }
 
+/** Sandbox ids already reported as unlabelled, so a misconfigured worker logs once, not per turn. */
+const warnedUnlabelled = new Set<string>();
+
+/** Test-only: forget which unlabelled sandboxes were reported. */
+export function resetTierWarnings(): void {
+  warnedUnlabelled.clear();
+}
+
+/**
+ * Whether a presence record is in `tier`. With tiers declared an UNLABELLED record is in none: it
+ * would otherwise serve whichever tier asked first, which is exactly the cross-tier hop this slice
+ * removes (P6.3 spec §4 step 1). Reported once per id, naming its labels, so the operator can see
+ * which worker lacks SANDBOX_TIER.
+ */
+function recordInTier(r: SandboxRecord, tier: string): boolean {
+  const t = r.labels?.[TIER_LABEL];
+  if (!t) {
+    if (!warnedUnlabelled.has(r.sandboxId)) {
+      warnedUnlabelled.add(r.sandboxId);
+      console.warn(
+        `sandbox '${r.sandboxId}' advertises no ${TIER_LABEL} label (labels ${JSON.stringify(r.labels ?? {})}); ` +
+          'excluded while SH_SANDBOX_TIERS is set — set SANDBOX_TIER on its worker',
+      );
+    }
+    return false;
+  }
+  return t === tier;
+}
+
 /**
  * Choose a sandbox pod for a leaf.
  *  - No `KAGENTI_SANDBOX_POOL_SELECTOR` ⇒ fall back to single-pod resolution
@@ -391,7 +463,17 @@ export async function selectPoolSandbox(
   env: NodeJS.ProcessEnv,
   headCwd: string,
   sessionId: string,
-  opts: { cap: number; ttlMs: number; remoteSandbox?: boolean; holderId?: string },
+  opts: {
+    cap: number;
+    ttlMs: number;
+    remoteSandbox?: boolean;
+    holderId?: string;
+    /**
+     * The session's sandbox tier (P6.3). `''` or absent means the deployment default; ignored when
+     * no tiers are declared.
+     */
+    tier?: string;
+  },
   deps: SelectDeps = {},
 ): Promise<SelectedSandbox | null> {
   // Defaults to the session id, which is exactly what every leaf path wants and what this function
@@ -412,7 +494,13 @@ export async function selectPoolSandbox(
   const lease = deps.lease ?? sharedLease(env.REDIS_URL);
 
   const source = resolveDiscoverySource(env, opts.remoteSandbox === true);
-  const pods = source === 'records' ? [] : await list(selector, namespace, context, deps.run);
+  // Read per call, like every other knob here; a bad value fails the selection naming the variable.
+  const tiers = parseSandboxTiers(env);
+  // `||`, not `??`: a session stored with '' (created before tiers were declared) gets the default.
+  const tier = tiers ? opts.tier || tiers.default : '';
+  const listed = source === 'records' ? [] : await list(selector, namespace, context, deps.run);
+  // Pods are the Knative-era container inventory: the default tier, and only that (spec §4 step 1).
+  const pods = tiers && tier !== tiers.default ? [] : listed;
 
   // Inertness: when the flag is off, never construct a RedisRecordStore or call .list() —
   // the pod path must stay byte-for-byte identical to today (no extra Redis connection).
@@ -422,10 +510,13 @@ export async function selectPoolSandbox(
     const injected = deps.records;
     grpcRecs = injected ? await injected.list() : await sharedRecords(env.REDIS_URL).list();
   }
+  const allRecs = grpcRecs;
+  if (tiers) grpcRecs = grpcRecs.filter((r) => recordInTier(r, tier));
   const grpcById = new Map(grpcRecs.map((r) => [r.sandboxId, r]));
 
   const candidates = [...pods, ...grpcRecs.map((r) => r.sandboxId)];
-  if (candidates.length === 0) throw new SandboxPoolEmptyError(selector, source);
+  if (candidates.length === 0)
+    throw new SandboxPoolEmptyError(selector, source, tiers ? tier : undefined);
 
   const loads = await Promise.all(
     candidates.map(async (name) => ({ pod: name, active: await lease.load(name) })),
@@ -462,6 +553,8 @@ export async function selectPoolSandbox(
           leased: true,
           heartbeat: () => lease.heartbeat(name, holderId, opts.ttlMs),
           release: () => lease.release(name, holderId),
+          sandboxId: name,
+          tier,
         };
       } catch (err) {
         // Best effort: a failed release must not replace the error that explains the failure.
