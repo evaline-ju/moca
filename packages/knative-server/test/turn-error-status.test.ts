@@ -86,4 +86,29 @@ describe('turnErrorHeaders', () => {
       expect(turnErrorHeaders(status)).toMatchObject({ 'Content-Type': 'application/json' });
     }
   });
+
+  it("uses a pending affine sandbox's retryInMs, capped at 10 s", () => {
+    const pending30s = new SandboxAffinityPendingError('m-0', 30_000);
+    expect(turnErrorHeaders(503, pending30s)).toMatchObject({ 'Retry-After': '10' });
+  });
+
+  it("rounds up a pending sandbox's retryInMs to the next second", () => {
+    const pending4_2s = new SandboxAffinityPendingError('m-0', 4_200);
+    expect(turnErrorHeaders(503, pending4_2s)).toMatchObject({ 'Retry-After': '5' });
+  });
+
+  it('enforces a 1 s minimum for pending sandbox retryInMs', () => {
+    const pending0 = new SandboxAffinityPendingError('m-0', 0);
+    expect(turnErrorHeaders(503, pending0)).toMatchObject({ 'Retry-After': '1' });
+  });
+
+  it('uses the config default Retry-After for a plain saturation error (no retryInMs)', () => {
+    const saturated = new SandboxPoolSaturatedError('app=sandbox');
+    expect(turnErrorHeaders(503, saturated)).toMatchObject({ 'Retry-After': '5' });
+  });
+
+  it('uses the config default Retry-After on non-503 status, even with a pending error', () => {
+    const pending = new SandboxAffinityPendingError('m-0', 30_000);
+    expect(turnErrorHeaders(500, pending)).not.toHaveProperty('Retry-After');
+  });
 });

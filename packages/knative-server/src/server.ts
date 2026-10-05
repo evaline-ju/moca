@@ -196,7 +196,7 @@ async function handleTurn(req: IncomingMessage, res: ServerResponse): Promise<vo
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const status = turnErrorStatus(err);
-    res.writeHead(status, turnErrorHeaders(status)).end(
+    res.writeHead(status, turnErrorHeaders(status, err)).end(
       JSON.stringify({
         error: status === 404 ? 'session_not_found' : message,
         ...(sessionId ? { sessionId } : {}),
@@ -260,9 +260,24 @@ export function turnErrorStatus(err: unknown): number {
  * re-attempts acquisition (see §4.3 above); on `/turn` the session is already open by the time the
  * acquire runs, and re-entering `executeTurn` to retry would re-open it. That asymmetry is real and
  * E8 reads the region it shows up in, so it is worth stating rather than quietly matching.
+ *
+ * When `err` is a SandboxAffinityPendingError carrying a grace-relative retry interval, use its
+ * `retryInMs` instead — proportional backoff, capped at 10 s so a sandbox returning early is still
+ * noticed quickly.
  */
-export function turnErrorHeaders(status: number): Record<string, string> {
+export function turnErrorHeaders(status: number, err?: unknown): Record<string, string> {
   if (status !== 503) return JSON_HEADERS;
+  if (
+    err &&
+    typeof err === 'object' &&
+    'name' in err &&
+    err.name === 'SandboxAffinityPendingError' &&
+    'retryInMs' in err &&
+    typeof err.retryInMs === 'number'
+  ) {
+    const seconds = Math.min(10, Math.max(1, Math.ceil(err.retryInMs / 1000)));
+    return { ...JSON_HEADERS, 'Retry-After': String(seconds) };
+  }
   return { ...JSON_HEADERS, 'Retry-After': String(saturationWaitConfig().retryAfterS) };
 }
 
@@ -336,7 +351,7 @@ async function handleTurnStream(
       // still returns real 404 JSON, byte-identical to the sync path (§3.4 regime 2).
       const message = err instanceof Error ? err.message : String(err);
       const status = turnErrorStatus(err);
-      res.writeHead(status, turnErrorHeaders(status)).end(
+      res.writeHead(status, turnErrorHeaders(status, err)).end(
         JSON.stringify({
           error: status === 404 ? 'session_not_found' : message,
           ...(sessionId ? { sessionId } : {}),
