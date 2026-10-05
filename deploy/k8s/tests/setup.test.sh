@@ -660,7 +660,7 @@ t_mv0="$(tok moca_microvm_0)"
 # Revocation should have tried to patch and succeeded despite moca_microvm_1 already being absent.
 grep -q '^kubectl patch secret moca-relay-sandbox-tokens' "$MOCK_LOG" || fail 'revocation patch was not called'
 [[ "$(tok moca_microvm_0)" == "$t_mv0" ]] || fail 'moca_microvm_0 token was rotated'
-[[ -z "$(sv moca moca-relay-sandbox-tokens moca_microvm_1 2>/dev/null || true)" ]] || fail 'moca_microvm_1 token was not revoked'
+[[ "$(tok_keys)" == moca_microvm_0 ]] || fail 'moca_microvm_1 token was not revoked or another key remained'
 [[ ! -e "$P4B/moca_microvm_1" ]] || fail "moca_microvm_1 bundle was not deleted"
 pass 'revocation is idempotent: the merge patch succeeds when the stale key is absent (server-side apply pruned it)'
 
