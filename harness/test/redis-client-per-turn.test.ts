@@ -56,6 +56,9 @@ describe('no Redis client is constructed per turn', () => {
     expect(body).toMatch(/leaseMemo\s*=\s*\{[^}]*new RedisLeaseStore/s);
     expect(body).toMatch(/recordsMemo\s*=\s*\{[^}]*new RedisRecordStore/s);
     expect(body).toMatch(/deps\.lease \?\? sharedLease\(/);
+    expect(body.match(/new RedisAffinityStore/g) ?? []).toHaveLength(1);
+    expect(body).toMatch(/affinityMemo\s*=\s*\{[^}]*new RedisAffinityStore/s);
+    expect(body).toMatch(/deps\.affinity \?\? sharedAffinity\(/);
   });
 
   it('the shared stores are dropped on failure rather than cached broken', () => {
@@ -66,6 +69,7 @@ describe('no Redis client is constructed per turn', () => {
     expect(body).toMatch(/function guard</);
     expect(body).toMatch(/recordsMemo = null/);
     expect(body).toMatch(/leaseMemo = null/);
+    expect(body).toMatch(/affinityMemo = null/);
     // The eviction must be identity-checked, or a rejection arriving after the memo was rebuilt
     // discards a store that never failed (and orphans it, connected and unreferenced).
     expect(body).toMatch(/read\(\)\?\.store !== store/);

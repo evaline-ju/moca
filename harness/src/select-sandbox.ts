@@ -11,7 +11,13 @@ import {
 } from '@moca/k8s-sandbox';
 import { RedisLeaseStore, type LeaseStore } from './sandbox-lease.js';
 import { RedisRecordStore, type RecordStore, type SandboxRecord } from './pool-records.js';
-import { parseSandboxTiers, TIER_LABEL } from './sandbox-affinity.js';
+import {
+  affinityTimings,
+  parseSandboxTiers,
+  RedisAffinityStore,
+  TIER_LABEL,
+  type AffinityStore,
+} from './sandbox-affinity.js';
 
 /**
  * Process-wide Redis-backed stores, reused across selections instead of built per call.
@@ -40,6 +46,7 @@ import { parseSandboxTiers, TIER_LABEL } from './sandbox-affinity.js';
 type Closable = { close(): Promise<void> };
 let recordsMemo: { url: string | undefined; store: RecordStore & Closable } | null = null;
 let leaseMemo: { url: string | undefined; store: LeaseStore & Closable } | null = null;
+let affinityMemo: { url: string | undefined; store: AffinityStore & Closable } | null = null;
 
 /**
  * Resolve the memoised store, building one if there is none or the URL changed.
@@ -64,6 +71,14 @@ function leaseStore(url: string | undefined): LeaseStore & Closable {
     leaseMemo = { url, store: new RedisLeaseStore(url) };
   }
   return leaseMemo.store;
+}
+
+function affinityStore(url: string | undefined): AffinityStore & Closable {
+  if (!affinityMemo || affinityMemo.url !== url) {
+    if (affinityMemo) void affinityMemo.store.close().catch(() => {});
+    affinityMemo = { url, store: new RedisAffinityStore(url) };
+  }
+  return affinityMemo.store;
 }
 
 function sharedRecords(url: string | undefined): RecordStore {
@@ -131,6 +146,26 @@ function sharedLease(url: string | undefined): LeaseStore {
   };
 }
 
+/** The affinity store behind the same per-command memo and drop-guard as `sharedLease`. */
+function sharedAffinity(url: string | undefined): AffinityStore {
+  const call = <T>(fn: (store: AffinityStore) => Promise<T>): Promise<T> => {
+    const store = affinityStore(url);
+    return guard(fn(store), () =>
+      dropMemo(
+        store,
+        () => affinityMemo,
+        () => (affinityMemo = null),
+      ),
+    );
+  };
+  return {
+    get: (s) => call((st) => st.get(s)),
+    claim: (s, e, ttl) => call((st) => st.claim(s, e, ttl)),
+    replace: (s, e, ttl) => call((st) => st.replace(s, e, ttl)),
+    detachedSince: (id, now, ttl) => call((st) => st.detachedSince(id, now, ttl)),
+  };
+}
+
 /**
  * Evict `store` from its memo, but ONLY if it is still the memoised one.
  *
@@ -180,14 +215,17 @@ async function guard<T>(p: Promise<T>, drop: () => void): Promise<T> {
 /**
  * Test-only: drop the cached stores so a test can inject its own or force a reconnect.
  *
- * Named for BOTH memos, not just records — it always reset the lease store too, and the old
- * `resetSharedRecords` left the next reader to assume leases survived it.
+ * Named for ALL the memos, not just records — it always reset the lease store too, and the old
+ * `resetSharedRecords` left the next reader to assume leases survived it. The affinity memo (P6.3)
+ * is the third, and is reset here for the same reason.
  */
 export function resetSharedStores(): void {
   if (recordsMemo) void recordsMemo.store.close().catch(() => {});
   if (leaseMemo) void leaseMemo.store.close().catch(() => {});
+  if (affinityMemo) void affinityMemo.store.close().catch(() => {});
   recordsMemo = null;
   leaseMemo = null;
+  affinityMemo = null;
 }
 
 /** Pure: pods ordered ascending by active load (stable — ties keep input order). */
@@ -387,6 +425,10 @@ export interface SelectDeps {
     client: ExecClientLike,
     opts?: { workspaceKey?: string },
   ) => SandboxTransport;
+  /** Session-to-sandbox affinity (P6.3); defaults to a RedisAffinityStore. Only consulted when remoteOn. */
+  affinity?: AffinityStore;
+  /** Clock for the grace period; injectable so tests do not wait in real time. */
+  now?: () => number;
 }
 
 /** Adds the worker's relay credential to every SandboxExec call (MI1 §5 R5). */
@@ -449,6 +491,27 @@ function recordInTier(r: SandboxRecord, tier: string): boolean {
 }
 
 /**
+ * An affinity WRITE after the lease is taken: best effort (P6.3 spec §5). The sandbox is right and
+ * the lease is held, so failing the turn here would turn a Redis blip into a lost turn for nothing;
+ * the next turn simply finds the old entry or none. Returns undefined on failure.
+ */
+async function remember<T>(
+  write: () => Promise<T>,
+  sessionId: string,
+  sandboxId: string,
+): Promise<T | undefined> {
+  try {
+    return await write();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `sandbox affinity: could not record '${sandboxId}' for session ${sessionId}: ${message}`,
+    );
+    return undefined;
+  }
+}
+
+/**
  * Choose a sandbox pod for a leaf.
  *  - No `KAGENTI_SANDBOX_POOL_SELECTOR` ⇒ fall back to single-pod resolution
  *    (`KAGENTI_SANDBOX_POD`/`_NAME`); returns null if that too is unset (run local tools).
@@ -462,6 +525,11 @@ function recordInTier(r: SandboxRecord, tier: string): boolean {
  * must be unique per concurrent holder. They are equal for a leaf (one session executing once) and
  * differ for `/turn` (many concurrent turns of one session), which is why the holder is a separate,
  * optional argument that defaults to the session id rather than something derived here.
+ *
+ * **Tiers and affinity (P6.3).** On the records path the candidates are the session's tier, and the
+ * sandbox that served its previous turn is preferred: saturated → `SandboxPoolSaturatedError`, absent
+ * within the grace → `SandboxAffinityPendingError`, absent past it (or retiered) → least-loaded in the
+ * tier, with `workspaceReset` set. See spec §4.
  */
 export async function selectPoolSandbox(
   env: NodeJS.ProcessEnv,
@@ -479,6 +547,22 @@ export async function selectPoolSandbox(
     tier?: string;
   },
   deps: SelectDeps = {},
+): Promise<SelectedSandbox | null> {
+  return select(env, headCwd, sessionId, opts, deps, false);
+}
+
+/**
+ * The body of `selectPoolSandbox`, with `raced` saying whether this is the one permitted re-run
+ * after losing a first-turn claim race (spec §4 step 6). Split out so that retry can recurse exactly
+ * once while the exported signature stays unchanged.
+ */
+async function select(
+  env: NodeJS.ProcessEnv,
+  headCwd: string,
+  sessionId: string,
+  opts: Parameters<typeof selectPoolSandbox>[3],
+  deps: SelectDeps,
+  raced: boolean,
 ): Promise<SelectedSandbox | null> {
   // Defaults to the session id, which is exactly what every leaf path wants and what this function
   // did before /turn began leasing here — so a caller that passes no holder keeps today's behaviour.
@@ -522,50 +606,139 @@ export async function selectPoolSandbox(
   if (candidates.length === 0)
     throw new SandboxPoolEmptyError(selector, source, tiers ? tier : undefined);
 
-  const loads = await Promise.all(
-    candidates.map(async (name) => ({ pod: name, active: await lease.load(name) })),
-  );
-  for (const name of orderByLoad(loads)) {
-    if (await lease.acquire(name, opts.cap, holderId, opts.ttlMs)) {
-      // The lease is held from here on: every step after the acquire runs inside this try, so a
-      // throw (an exec client that cannot be built, a transport constructor) releases it before the
-      // original error propagates, rather than holding a slot until the lease TTL expires.
-      try {
-        const config: K8sSandboxConfig = { pod: name, namespace, context, podCwd, headCwd };
-        const rec = grpcById.get(name);
-        const make = deps.makeTransport ?? GrpcRelayTransport;
-        const transport = rec
-          ? make(
-              name,
-              (deps.makeExecClient ?? ((id: string) => defaultExecClient(id, env)))(name),
-              // The SESSION id becomes the Exec's workspace_key -- never the lease holder id. This
-              // is the ONLY harness change the microVM tier needs, and it is required for
-              // correctness rather than convenience: without it, consecutive leaseholders of one
-              // sandbox_id inherit the previous session's workspace (spec §3.4).
-              //
-              // It has to be the session id specifically, because the key is also what makes a
-              // session CONTINUOUS: `WorkspaceRoot/<workspace_key>` is created on the first Exec for
-              // an unseen key and lives until an idle Reclaim (§4.4), so keying it per turn would
-              // open turn 2 of a session in an empty workspace and give it its own standby VM pool
-              // (§4.3) -- continuity lost and standbys multiplied per turn rather than per session.
-              { workspaceKey: sessionId },
-            )
-          : undefined;
-        return {
-          config,
-          transport,
-          leased: true,
-          heartbeat: () => lease.heartbeat(name, holderId, opts.ttlMs),
-          release: () => lease.release(name, holderId),
-          sandboxId: name,
-          tier,
-        };
-      } catch (err) {
-        // Best effort: a failed release must not replace the error that explains the failure.
-        await lease.release(name, holderId).catch(() => {});
-        throw err;
-      }
+  // Acquire `name`, then build what the caller gets; a throw after the acquire releases the lease
+  // before the original error propagates (unchanged from before -- it is just shared by two paths now).
+  const take = async (
+    name: string,
+    workspaceReset?: WorkspaceReset,
+  ): Promise<SelectedSandbox | null> => {
+    if (!(await lease.acquire(name, opts.cap, holderId, opts.ttlMs))) return null;
+    // The lease is held from here on: every step after the acquire runs inside this try, so a
+    // throw (an exec client that cannot be built, a transport constructor) releases it before the
+    // original error propagates, rather than holding a slot until the lease TTL expires.
+    try {
+      const config: K8sSandboxConfig = { pod: name, namespace, context, podCwd, headCwd };
+      const rec = grpcById.get(name);
+      const make = deps.makeTransport ?? GrpcRelayTransport;
+      const transport = rec
+        ? make(
+            name,
+            (deps.makeExecClient ?? ((id: string) => defaultExecClient(id, env)))(name),
+            // The SESSION id becomes the Exec's workspace_key -- never the lease holder id. This
+            // is the ONLY harness change the microVM tier needs, and it is required for
+            // correctness rather than convenience: without it, consecutive leaseholders of one
+            // sandbox_id inherit the previous session's workspace (spec §3.4).
+            //
+            // It has to be the session id specifically, because the key is also what makes a
+            // session CONTINUOUS: `WorkspaceRoot/<workspace_key>` is created on the first Exec for
+            // an unseen key and lives until an idle Reclaim (§4.4), so keying it per turn would
+            // open turn 2 of a session in an empty workspace and give it its own standby VM pool
+            // (§4.3) -- continuity lost and standbys multiplied per turn rather than per session.
+            { workspaceKey: sessionId },
+          )
+        : undefined;
+      return {
+        config,
+        transport,
+        leased: true,
+        sandboxId: name,
+        tier,
+        ...(workspaceReset ? { workspaceReset } : {}),
+        heartbeat: () => lease.heartbeat(name, holderId, opts.ttlMs),
+        release: () => lease.release(name, holderId),
+      };
+    } catch (err) {
+      // Best effort: a failed release must not replace the error that explains the failure.
+      await lease.release(name, holderId).catch(() => {});
+      throw err;
     }
+  };
+  const leastLoaded = async (): Promise<string[]> =>
+    orderByLoad(
+      await Promise.all(
+        candidates.map(async (name) => ({ pod: name, active: await lease.load(name) })),
+      ),
+    );
+
+  // The pods-only path stays byte-for-byte what it was: no affinity store is built or called.
+  if (!remoteOn) {
+    for (const name of await leastLoaded()) {
+      const got = await take(name);
+      if (got) return got;
+    }
+    throw new SandboxPoolSaturatedError(selector);
+  }
+
+  // P6.3 spec §4 steps 2-4. A READ failure propagates (the turn fails rather than scattering the
+  // session across sandboxes on a Redis blip, §5); only the WRITE after a lease is best effort.
+  const affinity = deps.affinity ?? sharedAffinity(env.REDIS_URL);
+  const { ttlMs: affinityTtlMs, graceMs } = affinityTimings(env);
+  const now = (deps.now ?? Date.now)();
+  const prior = await affinity.get(sessionId);
+  let reset: WorkspaceReset | undefined;
+  if (prior && prior.tier === tier) {
+    if (candidates.includes(prior.sandboxId)) {
+      const got = await take(prior.sandboxId);
+      // Saturated means alive and holding the workspace, just busy: wait, never move (spec §0).
+      if (!got) {
+        throw new SandboxPoolSaturatedError(
+          selector,
+          `this session's sandbox '${prior.sandboxId}' is at capacity`,
+        );
+      }
+      await remember(
+        () => affinity.claim(sessionId, { sandboxId: prior.sandboxId, tier }, affinityTtlMs),
+        sessionId,
+        prior.sandboxId,
+      );
+      return got;
+    }
+    if (allRecs.some((r) => r.sandboxId === prior.sandboxId)) {
+      // Present, but advertising another tier: an operator re-tiered the worker. It will not come
+      // back to this tier by waiting, so the grace would only delay the same outcome (Review Focus 3).
+      reset = { from: prior.sandboxId, reason: 'retiered' };
+    } else {
+      const since = await affinity.detachedSince(prior.sandboxId, now, affinityTtlMs);
+      // A mark in the future (relay clock ahead) gives left > graceMs: still pending, never negative-time logic.
+      const left = graceMs - (now - since);
+      if (left > 0) {
+        console.warn(
+          `sandbox affinity: session ${sessionId} waits for '${prior.sandboxId}' ` +
+            `(absent; ${Math.ceil(left / 1000)}s of grace left)`,
+        );
+        throw new SandboxAffinityPendingError(prior.sandboxId, left);
+      }
+      reset = { from: prior.sandboxId, reason: 'detached' };
+    }
+  }
+
+  // Step 5: least-loaded within the tier. Step 6: record the choice.
+  for (const name of await leastLoaded()) {
+    const got = await take(name, reset);
+    if (!got) continue;
+    const entry = { sandboxId: name, tier };
+    if (prior) {
+      // A fallback, or an entry from another tier: deliberately overwrite.
+      await remember(() => affinity.replace(sessionId, entry, affinityTtlMs), sessionId, name);
+      if (reset) {
+        console.warn(
+          `sandbox affinity: session ${sessionId} moved from '${reset.from}' to '${name}' in tier ` +
+            `'${tier}' (${reset.reason}); its workspace starts empty`,
+        );
+      }
+      return got;
+    }
+    const winner = await remember(
+      () => affinity.claim(sessionId, entry, affinityTtlMs),
+      sessionId,
+      name,
+    );
+    if (!winner || winner.sandboxId === name) return got;
+    // Another first turn of this session claimed a different sandbox between our read and our claim.
+    // Converge on it, once: two concurrent turns of one session must share one workspace.
+    await got.release().catch(() => {});
+    if (raced) throw new SandboxAffinityPendingError(winner.sandboxId, 0);
+    return select(env, headCwd, sessionId, opts, deps, true);
   }
   throw new SandboxPoolSaturatedError(selector);
 }
