@@ -151,8 +151,12 @@ refused. It also checks that `sh-relay.service` is installed and that the golden
 
 **The token:**
 
-- It is generated once and never rotated. The worker's file is the source of truth, and the relay's
-  file is rebuilt from it on every run, so changing `MICROVM_SANDBOX_ID` leaves no stale token valid.
+- It is generated once and never rotated. The relay's copy (`microvm-relay.env`) is the source of
+  truth when it exists, so a token edited by hand into `microvm-worker.env` is reverted on the next
+  run; to rotate, delete both files and re-run. The relay's file is rewritten from scratch on every
+  run, so changing `MICROVM_SANDBOX_ID` leaves no stale token valid. (After `--remote`, the worker's
+  file holds the cluster's token; switching back takes the relay's copy instead, and a worker file
+  with `RELAY_TLS=true` never donates its token to the local relay.)
 - The relay validates `SH_RELAY_TOKEN_<id>` in preference to the global `SH_RELAY_TOKEN`, so the
   container tier's token does not also admit this worker.
 - The worker's file never carries the relay's exec token (MI1 §5 R5).
@@ -175,11 +179,13 @@ exactly that problem, which is why the installer refuses dashed ids.
 
 The install is not finished until the relay has mirrored the worker into `sh:sandbox:records`. That
 record is what the supervisor leases from, so the installer waits for it (`MICROVM_ATTACH_TIMEOUT`,
-default 60s).
+default 60s). With `--remote` there is no local record to read: the installer waits instead for the
+worker's own `attached, serving execs` line, which must then hold for `MICROVM_ATTACH_SETTLE`
+seconds (default 5) with no reconnect, all within `MICROVM_ATTACH_TIMEOUT`.
 
 **Re-running changes nothing.** On the rig, the second run printed `nothing to change` and restarted
-nothing. Edits an operator makes to `microvm-worker.env` are kept, including `SH_WORKSPACE_IDLE`,
-the token and any added lines. They take effect after
+nothing. Edits an operator makes to `microvm-worker.env` are kept, including `SH_WORKSPACE_IDLE`
+and any added lines, but not the token (see "The token" above). They take effect after
 `sudo systemctl restart microvm-worker.service`.
 
 The worker's banner in `journalctl -u microvm-worker` confirms the result:
@@ -491,3 +497,14 @@ The `p4-real-model.env` removal matters: it holds a live API key.
 Restarting the relay drops its copy of the worker's token. Deleting `microvm-relay.env` **without**
 removing its drop-in stops `sh-relay` from starting, because the drop-in's `EnvironmentFile=` is
 required, not optional. Remove both together.
+
+## With P6 on Kubernetes instead
+
+When P6 runs in an OpenShift cluster rather than on this host, the same P4 worker attaches to the
+in-cluster relay over TLS: `deploy/k8s/setup.sh` issues a bundle per host, and
+`sudo deploy/microvm/setup-microvm.sh --remote <bundle>` installs it. Everything above about the
+host itself -- KVM, Firecracker, the snapshot, the memory budget -- still applies; nothing about the
+local P6 does. Remote mode also writes `/etc/serverless-harness/microvm-relay-ca.crt` (when the
+bundle carries a CA) and the drop-in `microvm-worker.service.d/50-moca-remote.conf` in place of
+`50-moca-p6.conf`. See
+[`deploy/k8s/README.md` §11](../k8s/README.md#11-p4-on-kubernetes-microvm-hosts-outside-the-cluster).

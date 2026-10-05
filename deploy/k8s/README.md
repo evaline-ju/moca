@@ -700,3 +700,114 @@ OCP.
 **`port-forward` is filtered.** Not seen on Kind (port 8080 has no ingress rule at all, yet answers
 through `port-forward`). On a CNI that does filter it, smoke claims 1, 3 and 5 fail; the fallback is
 an allow from the node CIDR on that overlay, as for the probes.
+
+## 11. P4 on Kubernetes: microVM hosts outside the cluster
+
+P6 runs in the cluster; only the P4 microVM tier needs a KVM host (bare metal or a nested-virt VM).
+Each such host runs `microvm-worker` and attaches to the in-cluster relay over TLS, through an L4
+sidecar (ghostunnel) behind the passthrough Route `moca-relay`. The cluster issues each host's
+token; the relay reads it from a mounted Secret on every attach, so adding a host restarts nothing.
+Design:
+[`docs/specs/2026-10-04-p6-on-kubernetes-slice2-design.md`](../../docs/specs/2026-10-04-p6-on-kubernetes-slice2-design.md).
+
+**OpenShift only, and one tier per stack** (until #425): a stack runs container sandboxes _or_ P4
+hosts, never both, because the supervisor re-selects a sandbox every turn and a session would hop
+between workspaces. `setup.sh` refuses `SH_P4_SANDBOX_IDS` with `SH_SANDBOX_COUNT` above 0, and on
+kind. The same re-selection makes two attached P4 hosts hop a session between their workspaces, so
+until #425 keep one host serving sessions; `setup.sh` accepts several IDs, but does not check this.
+
+### 11.1 Switch a stack to P4
+
+```bash
+SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS=moca_microvm_0 deploy/k8s/setup.sh --target ocp
+```
+
+- IDs match `^[A-Za-z_][A-Za-z0-9_]*$` (no dashes: the relay looks each up by name), comma-separated,
+  each listed once.
+- The list is sticky like every other input; `SH_P4_SANDBOX_IDS=` (empty) clears it.
+- `--relay-tls-cert FILE --relay-tls-key FILE` installs an operator certificate for
+  `moca-relay-moca.<apps domain>`. Without them a self-signed one is generated once and kept.
+- Every bundle carries the relay certificate as `relay-ca.crt` whenever it is **self-issued**
+  (`setup.sh`'s own, or a self-signed one you supplied). A certificate issued by another CA is not
+  shipped: that CA must be one the hosts already trust system-wide.
+
+`setup.sh` ends by printing, per ID, the bundle path and the two commands to install it:
+
+```
+P4 hosts attach to https://moca-relay-moca.<apps domain> (the relay, TLS passthrough). One bundle each -- it holds
+that host's relay token, so copy it straight to the host, install it, then delete the copy:
+  moca_microvm_0:  <checkout>/deploy/k8s/.generated/ocp/p4/moca_microvm_0
+    scp -r <checkout>/deploy/k8s/.generated/ocp/p4/moca_microvm_0 <kvm-host>:moca-p4-moca_microvm_0
+    on <kvm-host>, from a moca checkout:  sudo deploy/microvm/setup-microvm.sh --remote ~/moca-p4-moca_microvm_0
+```
+
+The bundle (`worker.env` and `relay-ca.crt`, mode 0600, in a 0700 directory) holds that host's relay
+token. Copy it straight to its host and delete the copy once installed.
+
+### 11.2 Install a host
+
+The host needs what `deploy/microvm/P4-ON-P6.md` lists for P4 (`/dev/kvm`, Firecracker and jailer,
+a golden snapshot, Go or `MICROVM_BIN`) and outbound TCP 443 to the relay Route host. Check that
+first with `curl -v https://moca-relay-moca.<apps domain>`. It does **not** need P6 installed.
+
+`setup-microvm.sh --remote <bundle>` installs the worker with the bundle's address, TLS, ID and
+token (the cluster's token replaces any local one), installs `relay-ca.crt` as
+`/etc/serverless-harness/microvm-relay-ca.crt`, and swaps the worker's drop-in to
+`50-moca-remote.conf`. It touches nothing of a local P6.
+
+It finishes only once the worker's **current** process has logged `attached, serving execs` and the
+attach has then held for `MICROVM_ATTACH_SETTLE` seconds (default 5) with no reconnect, all within
+`MICROVM_ATTACH_TIMEOUT` (default 60). The hold matters because the worker logs `attached` when its
+stream opens, before the relay checks the token; a refused token ends the stream milliseconds later.
+Otherwise it dies naming that process's journal
+(`journalctl -u microvm-worker _SYSTEMD_INVOCATION_ID=…`), which carries the TLS or token error.
+
+Running `setup-microvm.sh` again **without** `--remote` switches the host back to its local P6
+relay, restoring its local token.
+
+### 11.3 Verify
+
+```bash
+K8S_LIVE_SMOKE=1 SMOKE_MODEL_URL=… SMOKE_MODEL_TOKEN=… deploy/k8s/smoke.sh --target ocp --tier p4
+```
+
+Claims 1, 5 and 6 are the container tier's. P2: every P4 ID is attached, and no container sandbox
+is. P3: a turn runs on a kernel that is no node's and writes a file. P4: a second turn reads it
+back. P6: through the relay Route, a wrong attach token is refused at the relay, and SandboxExec is
+not served even with the exec token. P7 (only with `SMOKE_P4_ADD_ID=<scratch id>`): `setup.sh` adds
+that ID and removes it again, and the relay pod is the same one, with the same start time and no
+restart. Claims 7–11 do not run on this tier.
+
+### 11.4 Add, revoke, and their timing
+
+- **Add** an ID to the list and re-run `setup.sh`: the new token reaches the relay's directory
+  within the kubelet's Secret sync (about a minute; P7 prints the measured time), and the host's
+  next attach succeeds. Attached hosts stay attached.
+- **Revoke** by removing the ID: its token and bundle are deleted, and its **next** attach is
+  refused. A host already attached stays attached until its stream drops; to cut it off at once,
+  restart the relay (`kubectl -n moca rollout restart deployment/sandbox-relay`), which drops every
+  attached sandbox.
+
+### 11.5 Troubleshooting
+
+The relay pod has two containers here, and the `tls` sidecar is listed first, so name the relay's:
+`kubectl -n moca logs deployment/sandbox-relay -c sandbox-relay`.
+
+**`setup-microvm.sh --remote` dies with `did not stay attached`.** The message names the worker
+journal to read. A wrong or revoked token shows there as `attached, serving execs` followed at once
+by `stream ended (…); reconnecting`: the bundle is stale, or its ID is no longer listed. Re-run
+`setup.sh`, copy the fresh bundle and install it again.
+
+**The worker journal says `missing selected ALPN property`.** The relay sidecar is not negotiating
+`h2` (`--alpn h2` in `overlays/ocp/p4-relay`); grpc-go 1.67+ requires it.
+
+**`x509: certificate signed by unknown authority`.** The bundle's `relay-ca.crt` was not installed
+(re-run `--remote` with the full bundle), or an operator certificate does not chain to a CA the host
+trusts.
+
+**The worker attaches, then drops every few minutes.** The router's idle timeout is shorter than the
+stream's quiet periods. The Route carries `haproxy.router.openshift.io/timeout: 5m`, above the
+worker's 30 s keepalive; check the annotation survived.
+
+**`P2` fails with a P4 ID missing.** The host's worker is not attached; read its journal on the
+host (`journalctl -u microvm-worker`).

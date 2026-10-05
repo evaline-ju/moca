@@ -64,7 +64,7 @@ The rules around that lookup:
 
 - **A missing file is not an error.** `ENOENT` means this ID has no directory token, and the lookup falls through to steps 2–3. That is how in-cluster sandbox pods keep authenticating with `SH_RELAY_TOKEN`.
 - **Fail closed on every other read problem.** A read that fails with anything other than `ENOENT` (permissions, I/O, a directory where a file should be) does **not** fall through, and the attach is refused. The relay logs `relay token for <id> unreadable`, never the value. An **empty** file is likewise no token and no fallthrough: the ID is listed but has no usable token, so the attach is refused.
-- **The ID rule.** Only `sandboxId`s matching `^[A-Za-z_][A-Za-z0-9_]*$` are looked up at all; any other ID is refused. This is the rule `setup-microvm.sh` already enforces for the VM path's environment-variable names, and it also rules out path traversal.
+- **The ID rule.** Only `sandboxId`s matching `^[A-Za-z_][A-Za-z0-9_]*$` are looked up in the directory, which rules out path traversal. Any other ID skips the directory and takes steps 2–3 exactly as before. The container tier's own IDs (`moca-sandbox-0`, …) contain dashes and authenticate with `SH_RELAY_TOKEN`, so refusing them would break that tier.
 - **Comparison.** The comparison stays constant-time and length-checked.
 
 ### 2.2 Exec-token separation under reload (MI1 R5)
@@ -78,12 +78,12 @@ The boot-time check in `makeExecTokenValidator` stays as it is. In addition, a t
 
 ### 2.4 OpenShift overlay additions (`deploy/k8s/overlays/ocp`)
 
-| Object                                    | Spec                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Relay pod sidecar `tls`                   | The same digest-pinned ghostunnel image as the supervisor's, run as `server --listen 0.0.0.0:8444 --target 127.0.0.1:9443 --cert /tls/tls.crt --key /tls/tls.key --disable-authentication`. Secret `moca-relay-tls` is mounted at `/tls` with mode 0440. Hardening matches the supervisor sidecar: UID 65532 from the pod, `readOnlyRootFilesystem`, `drop: [ALL]`, no privilege escalation, and a `tcpSocket` readiness probe. |
-| Service `sandbox-relay-tls`               | Port `https` 8444 → the sidecar.                                                                                                                                                                                                                                                                                                                                                                                                |
-| Route `moca-relay`                        | `tls.termination: passthrough`, `insecureEdgeTerminationPolicy: None`, pointing at `sandbox-relay-tls:https`. It carries the annotation `haproxy.router.openshift.io/timeout: 5m`, which is above the worker's 30 s gRPC keepalive (`remote-worker/internal/session/dial.go`). `setup.sh`'s generated overlay sets the host to `moca-relay-moca.<apps domain>`.                                                                 |
-| NetworkPolicy `sandbox-relay-from-router` | An additive policy admitting the router namespace (`policy-group.network.openshift.io/ingress`) to TCP **8444 only**. The exec port 9444 gets no new ingress.                                                                                                                                                                                                                                                                   |
+| Object                                    | Spec                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Relay pod sidecar `tls`                   | The same digest-pinned ghostunnel image as the supervisor's, run as `server --listen 0.0.0.0:8444 --target 127.0.0.1:9443 --cert /tls/tls.crt --key /tls/tls.key --disable-authentication --alpn h2`. `--alpn h2` is required: grpc-go 1.67+ (the workers run 1.83) fails a TLS handshake whose server selects no ALPN protocol, and ghostunnel advertises none unless told to. Secret `moca-relay-tls` is mounted at `/tls` with mode 0440. Hardening matches the supervisor sidecar: UID 65532 from the pod, `readOnlyRootFilesystem`, `drop: [ALL]`, no privilege escalation, and a `tcpSocket` readiness probe. |
+| Service `sandbox-relay-tls`               | Port `https` 8444 → the sidecar.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Route `moca-relay`                        | `tls.termination: passthrough`, `insecureEdgeTerminationPolicy: None`, pointing at `sandbox-relay-tls:https`. It carries the annotation `haproxy.router.openshift.io/timeout: 5m`, which is above the worker's 30 s gRPC keepalive (`remote-worker/internal/session/dial.go`). `setup.sh`'s generated overlay sets the host to `moca-relay-moca.<apps domain>`.                                                                                                                                                                                                                                                     |
+| NetworkPolicy `sandbox-relay-from-router` | An additive policy admitting the router namespace (`policy-group.network.openshift.io/ingress`) to TCP **8444 only**. The exec port 9444 gets no new ingress.                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 These objects are rendered only when there is at least one P4 host. §4.6 explains how.
 
@@ -132,14 +132,14 @@ The relay Route host `moca-relay-moca.<apps domain>` gets the same treatment as 
 
 - with `--relay-tls-cert`, that certificate is installed into Secret `moca-relay-tls`;
 - otherwise a self-signed certificate is generated once, valid for 825 days with the SAN set to the host, and kept on every re-run;
-- the CA is written to `deploy/k8s/.generated/ocp/moca-relay-ca.crt`.
+- the CA is written to `deploy/k8s/.generated/ocp/moca-relay-ca.crt` when the certificate in `moca-relay-tls` is self-issued (its subject hash equals its issuer hash), and removed otherwise. It is read back from the Secret on every run, so it is right whichever checkout created the certificate.
 
 ### 4.5 Bundles
 
 For each ID, `setup.sh` writes `deploy/k8s/.generated/ocp/p4/<id>/`. The directory is mode 0700, the files mode 0600, and all of it is gitignored. It contains:
 
 - `worker.env`, holding `RELAY_ADDR=moca-relay-moca.<apps domain>:443`, `RELAY_TLS=true`, `SANDBOX_ID=<id>` and `SANDBOX_TOKEN=<token>`;
-- `relay-ca.crt`, the relay CA, which is absent when an operator certificate was given.
+- `relay-ca.crt`, the relay CA, present whenever the certificate in `moca-relay-tls` is **self-issued** (`setup.sh`'s own self-signed one, or a self-signed one the operator supplied), and absent when it is issued by another CA, which must be one the hosts already trust system-wide.
 
 The token reaches the file through bash's builtin `printf` and never appears on argv. Bundles for IDs no longer listed are deleted. `setup.sh` prints, for each ID, the bundle path and the exact `scp -r` and `sudo deploy/microvm/setup-microvm.sh --remote <dir>` commands.
 
@@ -169,12 +169,14 @@ The generated overlay adds the §2.4 objects only when the ID list is non-empty.
 
 - **Points the worker at the network instead of the local relay.** The worker drop-in `50-moca-p6.conf` is replaced by `50-moca-remote.conf`, which loads the worker env file with `After=` and `Wants=network-online.target` and does not refer to `sh-relay.service`.
 - **Touches nothing local:** no relay drop-in, no `microvm-relay.env` (a stale one is left in place, so switching back works), no `podman`, no Redis, and no requirement for an installed P6. The P4-only container check is skipped, because the host's own P6 is not used.
-- **Checks the attach.** It records `start="$(date '+%Y-%m-%d %H:%M:%S')"`, restarts the worker, and then polls `journalctl -u microvm-worker --since "$start"` for `attached, serving execs` for up to `MICROVM_ATTACH_TIMEOUT` seconds. On a timeout it dies, pointing at that journal, which carries the TLS or auth error.
+- **Checks the attach.** It polls the journal of the unit's **current** process (`systemctl show -p InvocationID`, then `journalctl _SYSTEMD_INVOCATION_ID=<id>`) for `attached, serving execs`, for up to `MICROVM_ATTACH_TIMEOUT` seconds. A timestamp would also match the previous process's line, and an unchanged re-run leaves the worker running, so its line predates any timestamp. Once that line appears, it waits `MICROVM_ATTACH_SETTLE` seconds (default 5) and reads the journal again. It passes only if the InvocationID is unchanged, no new `attached` or `stream ended` line appeared during the window, and the last such line is `attached`. The window is needed because the worker logs `attached` when its stream opens, before the relay checks the token: a refused token shows as `stream ended … reconnecting` within milliseconds, then a retry. On a timeout it dies, naming that journal, which carries the TLS or auth error.
 - **Switching back.** Running the script again without `--remote` restores local-relay mode:
   - `50-moca-p6.conf` comes back;
   - the local token comes back from `microvm-relay.env`, the relay's copy;
   - `RELAY_CA_FILE` is removed;
-  - the local P6 relay is restarted only if its own drop-in changed, as today.
+  - the local P6 relay is restarted only if its own drop-in or token file (`microvm-relay.env`) changed, as today.
+
+  Local mode takes the token from the relay's copy (`microvm-relay.env`) when there is one. A worker file written by `--remote` (`RELAY_TLS=true`) never donates its cluster token to the local relay.
 
 ## 6. `deploy/k8s/smoke.sh --tier p4`
 
@@ -185,8 +187,10 @@ The generated overlay adds the §2.4 objects only when the ID list is non-empty.
 3. An authenticated turn runs `uname -r; echo p4-proof | tee proof.txt`. The tool-result preview shows a kernel that is **not** the cluster node's RHCOS kernel, `p4-proof` comes back, and the turn ends with its done frame.
 4. A second turn in the same session runs `cat proof.txt` and gets back `p4-proof`, so the workspace persisted.
 5. The control plane is ready, and an unauthenticated `/turn` is refused (as the container tier's claims 5–6).
-6. **Through the external Route**, an Attach call presenting a deliberately wrong token gets `UNAUTHENTICATED`, which proves the TLS path reaches the relay's attach listener without using any real sandbox token. A SandboxExec call made with the real exec token gets `UNIMPLEMENTED` or `UNAVAILABLE`, never `OK`. This is done by a small Node gRPC client run inside the control-plane pod, which already has `@grpc/grpc-js`. The exec token is passed through the environment of a `kubectl exec`, never argv.
+6. **Through the external Route**, an Attach presenting a deliberately wrong token is refused at the relay: the relay ends the stream with status OK and parks nothing (`relay.ts`). A TLS or dial failure would be `UNAVAILABLE`, and an accepted attach would stay open. A SandboxExec call with the real exec token gets `UNIMPLEMENTED` or `UNAVAILABLE`, never `OK`. The client is a small Node gRPC program run in the control-plane pod from `/app/packages/sandbox-relay`, where the image's `tsx`, `@grpc/grpc-js` and `@moca/k8s-sandbox` resolve. The exec token and the relay certificate reach it on stdin, never argv.
 7. Adding a P4 host left the relay pod's restart count and start time unchanged. The smoke compares them before and after a `setup.sh` run that adds a scratch ID. That run is skipped unless `SMOKE_P4_ADD_ID` is set.
+
+The script prints claims 2–4, 6 and 7 as P2–P4, P6 and P7. Claim 5 is the container tier's claims 5 and 6.
 
 The mock model gains scripts for claims 3–4, `K8S-SMOKE-P4-WRITE` and `K8S-SMOKE-P4-READ`. With a real model, the prompts state their commands outright, as in slice 1.
 
@@ -258,6 +262,7 @@ Run on the OpenShift 4.20.8 stack left running after slice 1, plus the shared KV
 | The kubelet's Secret refresh is slower than expected.                       | Live claim 7 measures add-to-attach time.                                                                        | Document the measured time; the smoke waits for up to 3 minutes.               |
 | The rig's outbound access to `*.apps.moca1.kubestellar.org:443` is blocked. | Before step 3, run `curl -v` from the rig against the relay host.                                                | Open egress on the rig, or use an LB address.                                  |
 | The shared rig's local P6 and its remote worker conflict.                   | The test proves that remote mode touches no P6 file, and the manifest records the rig's state.                   | Restore from the manifest.                                                     |
+| grpc-go refuses the sidecar's handshake for lack of ALPN.                   | A manifest test pins `--alpn h2`, and the live attach.                                                           | The flag itself; there is no other fallback.                                   |
 
 ## 10. Deliverables
 
