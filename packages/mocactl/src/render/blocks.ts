@@ -116,6 +116,8 @@ export const FRAME_REDUCERS: Record<string, FrameReducer> = {
     };
     return { ...s, blocks };
   },
+  workspace_reset: (s, f) =>
+    f.type === 'workspace_reset' ? addNotice(s, workspaceResetText(f), 'warning') : s,
   done: (s, f) =>
     f.type === 'done'
       ? push(finalizeOpen(s), { kind: 'turn-end', outcome: 'done', usage: f.usage })
@@ -145,6 +147,18 @@ export function markSent(s: BlockState): BlockState {
   const blocks = [...s.blocks];
   blocks[i] = { ...(blocks[i] as Extract<Block, { kind: 'user' }>), queued: false };
   return { ...s, blocks };
+}
+
+export function workspaceResetText(f: {
+  from: string;
+  tier: string;
+  reason: 'detached' | 'retiered';
+}): string {
+  // No tier when the deployment declares none: name no tier rather than print "in tier ''".
+  const where = f.tier ? ` in tier '${f.tier}'` : '';
+  return f.reason === 'retiered'
+    ? `workspace reset: sandbox '${f.from}' moved to another tier; this turn runs on a fresh workspace${where}`
+    : `workspace reset: sandbox '${f.from}' is gone; this turn runs on a fresh workspace${where}`;
 }
 
 export function addNotice(

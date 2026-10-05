@@ -1,4 +1,5 @@
 import { createClient, type RedisClientType } from 'redis';
+import { detachedKey } from './sandbox-affinity.js';
 import { redactUrl } from './redact-url.js';
 
 export interface SandboxRecord {
@@ -142,6 +143,20 @@ export class RedisRecordStore implements RecordStore {
   async remove(sandboxId: string): Promise<void> {
     await this.connectOnce();
     await this.client.hDel(recordsKey(), sandboxId);
+  }
+  /**
+   * The relay's detach mark (P6.3 spec §3.2): a plain SET, overwriting. The relay knows the true
+   * detach time; the harness's own mark (`detachedSince`, SET-if-absent) only stands in when the relay
+   * wrote none. Through THIS client, so it is queued after the same teardown's hDel.
+   */
+  async markDetached(sandboxId: string, atMs: number, ttlMs: number): Promise<void> {
+    await this.connectOnce();
+    await this.client.set(detachedKey(sandboxId), String(atMs), { PX: ttlMs });
+  }
+  /** Cleared on a successful Hello, queued ahead of the presence put. */
+  async clearDetached(sandboxId: string): Promise<void> {
+    await this.connectOnce();
+    await this.client.del(detachedKey(sandboxId));
   }
   async list(): Promise<SandboxRecord[]> {
     await this.connectOnce();

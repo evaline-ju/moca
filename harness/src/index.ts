@@ -6,3 +6,10 @@ export {
   type SandboxRecord,
 } from './pool-records.js';
 export { redactUrl } from './redact-url.js';
+export {
+  TIER_LABEL,
+  detachedKey,
+  parseSandboxTiers,
+  affinityTimings,
+  type SandboxTiers,
+} from './sandbox-affinity.js';

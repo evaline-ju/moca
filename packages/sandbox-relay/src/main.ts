@@ -23,8 +23,8 @@ import {
   type AbortResponse,
   MAX_EXEC_MESSAGE_BYTES,
 } from '@moca/k8s-sandbox';
-import { RedisRecordStore } from '@moca/harness';
-import { createRelay, type RelayDeps, type AttachStream } from './relay.js';
+import { RedisRecordStore, affinityTimings } from '@moca/harness';
+import { createRelay, type RelayDeps, type AttachStream, type DetachMarks } from './relay.js';
 
 /**
  * Ends a server-streaming exec call with a non-OK status.
@@ -337,6 +337,19 @@ export function makeDefaultValidateToken(
   };
 }
 
+/**
+ * The relay's detach marks, on the SAME RedisRecordStore as presence so a teardown's remove and mark
+ * (and a Hello's clear and put) share one FIFO command queue. The TTL is the affinity TTL: a mark is
+ * only ever read for an affine sandbox, and affinity cannot outlive SH_SANDBOX_AFFINITY_TTL_SECONDS.
+ */
+export function detachMarks(records: RedisRecordStore, env: NodeJS.ProcessEnv): DetachMarks {
+  const { ttlMs } = affinityTimings(env);
+  return {
+    mark: (id) => records.markDetached(id, Date.now(), ttlMs),
+    clear: (id) => records.clearDetached(id),
+  };
+}
+
 export async function startRelay(
   opts: { port?: number; execAddr?: string; deps?: RelayServerDeps; env?: NodeJS.ProcessEnv } = {},
 ): Promise<{ port: number; execPort?: number; shutdown: () => Promise<void> }> {
@@ -346,8 +359,10 @@ export async function startRelay(
     opts.deps ??
     (() => {
       const validateExecToken = makeExecTokenValidator(env);
+      const records = new RedisRecordStore();
       return {
-        records: new RedisRecordStore(),
+        records,
+        detach: detachMarks(records, env),
         validateToken: makeDefaultValidateToken(env),
         validateExecToken,
       };

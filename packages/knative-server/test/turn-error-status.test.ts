@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { SandboxPoolSaturatedError, SandboxPoolEmptyError } from '@moca/harness/run-turn';
+import {
+  SandboxPoolSaturatedError,
+  SandboxPoolEmptyError,
+  SandboxAffinityPendingError,
+} from '@moca/harness/run-turn';
 import { turnErrorStatus, turnErrorHeaders } from '../src/server.js';
 
 // /turn now leases a sandbox from the pool (it used to run tool calls in the harness process), so
@@ -22,6 +26,10 @@ describe('turnErrorStatus', () => {
     // starting" got a code meaning "never retry" while "every sandbox is busy" got Retry-After. Same
     // cause (no capacity yet), so the same advice.
     expect(turnErrorStatus(new SandboxPoolEmptyError('app=sandbox'))).toBe(503);
+  });
+
+  it('maps a pending affine sandbox to 503 too: the session is waiting for ITS sandbox', () => {
+    expect(turnErrorStatus(new SandboxAffinityPendingError('m-0', 5_000))).toBe(503);
   });
 
   it('keeps the legacy 404 for a missing session', () => {
@@ -77,5 +85,35 @@ describe('turnErrorHeaders', () => {
     for (const status of [404, 500, 503]) {
       expect(turnErrorHeaders(status)).toMatchObject({ 'Content-Type': 'application/json' });
     }
+  });
+
+  it("uses a pending affine sandbox's retryInMs, capped at 10 s", () => {
+    const pending30s = new SandboxAffinityPendingError('m-0', 30_000);
+    expect(turnErrorHeaders(503, pending30s)).toMatchObject({ 'Retry-After': '10' });
+  });
+
+  it("rounds up a pending sandbox's retryInMs to the next second", () => {
+    const pending7_2s = new SandboxAffinityPendingError('m-0', 7_200);
+    expect(turnErrorHeaders(503, pending7_2s)).toMatchObject({ 'Retry-After': '8' });
+  });
+
+  it('enforces a 1 s minimum for pending sandbox retryInMs', () => {
+    const pending0 = new SandboxAffinityPendingError('m-0', 0);
+    expect(turnErrorHeaders(503, pending0)).toMatchObject({ 'Retry-After': '1' });
+  });
+
+  it('uses the config default Retry-After for a plain saturation error (no retryInMs)', () => {
+    const saturated = new SandboxPoolSaturatedError('app=sandbox');
+    expect(turnErrorHeaders(503, saturated)).toMatchObject({ 'Retry-After': '5' });
+  });
+
+  it('adds no Retry-After to a non-503, even with a pending error', () => {
+    const pending = new SandboxAffinityPendingError('m-0', 30_000);
+    expect(turnErrorHeaders(500, pending)).not.toHaveProperty('Retry-After');
+  });
+
+  it('falls back to configured value when pending error has NaN retryInMs', () => {
+    const pendingNaN = new SandboxAffinityPendingError('m-0', NaN);
+    expect(turnErrorHeaders(503, pendingNaN)).toMatchObject({ 'Retry-After': '5' });
   });
 });

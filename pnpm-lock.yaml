@@ -209,6 +209,9 @@ importers:
       '@types/node':
         specifier: ^22.0.0
         version: 22.19.21
+      redis:
+        specifier: ^6.2.1
+        version: 6.2.1
       tsx:
         specifier: ^4.23.15
         version: 4.23.15

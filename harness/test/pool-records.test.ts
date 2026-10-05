@@ -1,4 +1,6 @@
+import { createClient } from 'redis';
 import { afterEach, describe, expect, it } from 'vitest';
+import { detachedKey } from '../src/sandbox-affinity.js';
 import { RedisRecordStore, type SandboxRecord } from '../src/pool-records.js';
 
 const rec: SandboxRecord = {
@@ -26,5 +28,20 @@ describe('RedisRecordStore', () => {
     await store.remove(rec.sandboxId);
     const all = await store.list();
     expect(all.find((r) => r.sandboxId === rec.sandboxId)).toBeUndefined();
+  });
+
+  it('markDetached overwrites (the relay knows the true time); clearDetached deletes', async () => {
+    const raw = createClient({ url: process.env.REDIS_URL ?? 'redis://127.0.0.1:6379' });
+    await raw.connect();
+    try {
+      await store.markDetached(rec.sandboxId, 1_000, 60_000);
+      await store.markDetached(rec.sandboxId, 2_000, 60_000);
+      expect(await raw.get(detachedKey(rec.sandboxId))).toBe('2000');
+      expect(await raw.pTTL(detachedKey(rec.sandboxId))).toBeGreaterThan(0);
+      await store.clearDetached(rec.sandboxId);
+      expect(await raw.get(detachedKey(rec.sandboxId))).toBeNull();
+    } finally {
+      await raw.close();
+    }
   });
 });

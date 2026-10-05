@@ -610,6 +610,24 @@ describe('runtimeFieldsForTurn', () => {
   it('omits a field the environment does not carry, rather than writing an empty string', async () => {
     expect(runtimeFieldsForTurn({}, 'start').harnessPod).toBeUndefined();
   });
+
+  it('reports where the turn ran, and a workspace reset, at the end (P6.3)', async () => {
+    const end = runtimeFieldsForTurn({}, 'end', {
+      id: 'm-1',
+      tier: 'microvm',
+      workspaceReset: { from: 'm-0', reason: 'detached' },
+    });
+    expect(end).toMatchObject({
+      sandboxId: 'm-1',
+      sandboxTier: 'microvm',
+      workspaceResetFrom: 'm-0',
+    });
+    expect(Number(end.workspaceResetAt)).toBeGreaterThan(0);
+    const plain = runtimeFieldsForTurn({}, 'end', { id: 'c-0', tier: '' });
+    expect(plain.sandboxId).toBe('c-0');
+    expect(plain.sandboxTier).toBeUndefined();
+    expect(plain.workspaceResetFrom).toBeUndefined();
+  });
 });
 
 describe('makeRuntimeReporter', () => {

@@ -12,6 +12,15 @@ export type TurnStreamFrame =
   | { type: 'thinking'; delta: string } // reasoning token (optional; may never fire — §3.5)
   | { type: 'tool_use'; id: string; name: string; args: unknown } // tool call started (args verbatim)
   | { type: 'tool_result'; id: string; isError: boolean; preview: string } // tool call ended (clipped)
+  // P6.3: emitted first when this turn's sandbox is not the one the session's previous turn used, so
+  // the user learns at the turn itself why earlier files are gone. Old clients ignore unknown types.
+  | {
+      type: 'workspace_reset';
+      sessionId: string;
+      from: string;
+      tier: string;
+      reason: 'detached' | 'retiered';
+    }
   | { type: 'done'; sessionId: string; stopReason: string; usage?: LeafUsage }
   | {
       type: 'error';

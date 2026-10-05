@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { acquireTurnSandbox } from '../src/run-turn.js';
 import type { LeaseStore } from '../src/sandbox-lease.js';
 
@@ -193,5 +193,72 @@ describe('acquireTurnSandbox', () => {
         },
       ),
     ).rejects.toThrow(/pool selector/);
+  });
+
+  it('passes the tier to the selection and reports where the turn landed (P6.3)', async () => {
+    const lease = fakeLeaseStore();
+    const records = {
+      put: async () => {},
+      remove: async () => {},
+      list: async () => [
+        {
+          sandboxId: 'c-0',
+          labels: { 'moca.dev/tier': 'container' },
+          capabilities: [],
+          capacityMax: 4,
+          transport: 'grpc' as const,
+        },
+        {
+          sandboxId: 'm-0',
+          labels: { 'moca.dev/tier': 'microvm' },
+          capabilities: [],
+          capacityMax: 4,
+          transport: 'grpc' as const,
+        },
+      ],
+    };
+    const affinity = {
+      get: async () => ({ sandboxId: 'm-gone', tier: 'microvm' }),
+      claim: async (_s: string, e: { sandboxId: string; tier: string }) => e,
+      replace: async () => {},
+      detachedSince: async () => 0, // long gone: past any grace
+    };
+    // The fallback logs one line by design; silenced here so the suite's output stays clean.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const got = await acquireTurnSandbox(
+        undefined,
+        {
+          KAGENTI_SANDBOX_POOL_SELECTOR: 'app=sandbox',
+          SH_REMOTE_SANDBOX: '1',
+          SH_SANDBOX_DISCOVERY: 'records',
+          SH_SANDBOX_TIERS: 'container,microvm',
+          SH_SANDBOX_DEFAULT_TIER: 'container',
+        },
+        '/head',
+        'sess-7',
+        {
+          lease,
+          records,
+          affinity,
+          makeExecClient: () => ({}) as never,
+          makeTransport: () => ({ exec: async () => ({}) as never, close: async () => {} }),
+        },
+        'microvm',
+      );
+      expect(got.placement).toEqual({
+        sandboxId: 'm-0',
+        tier: 'microvm',
+        workspaceReset: { from: 'm-gone', reason: 'detached' },
+      });
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("moved from 'm-gone' to 'm-0'"));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('reports no placement when nothing was leased', async () => {
+    const got = await acquireTurnSandbox(undefined, {}, '/head', 'sess-8');
+    expect(got.placement).toBeUndefined();
   });
 });
