@@ -77,6 +77,42 @@ describe('LoginOverlay', () => {
     expect(copy).toHaveBeenCalledTimes(1);
   });
 
+  it('swaps in a re-issued code when the first expires, and says why it changed', async () => {
+    // #431: the overlay shows the second code with a fresh countdown, not a failure.
+    let n = 0;
+    const cp = fakeControlPlane({
+      startDeviceAuth: async () => {
+        n += 1;
+        return {
+          deviceCode: `d${n}`,
+          userCode: `CODE-000${n}`,
+          verificationUri: 'https://github.com/login/device',
+          interval: 5,
+          expiresIn: 900,
+        };
+      },
+      pollDeviceAuth: async (dc) => (dc === 'd1' ? 'expired' : 'pending'),
+    });
+    let first = true;
+    const sleep = (ms: number, signal?: AbortSignal) =>
+      first ? ((first = false), Promise.resolve()) : waitForAbort(ms, signal);
+    const { lastFrame, unmount } = render(
+      withTheme(
+        <LoginOverlay
+          deps={{ cp, now: () => 0, sleep }}
+          controlPlaneUrl="http://cp"
+          onLoggedIn={vi.fn()}
+          onCancel={vi.fn()}
+        />,
+      ),
+    );
+    await waitFor(() => (lastFrame() ?? '').includes('CODE-0002'), 1000, lastFrame);
+    expect(lastFrame()).not.toContain('CODE-0001');
+    expect(lastFrame()).toContain('that code expired');
+    expect(lastFrame()).toContain('code expires in 15m00s');
+    unmount();
+  });
+
   it('reports the login once approved', async () => {
     const onLoggedIn = vi.fn();
     const cp = fakeControlPlane({

@@ -30,6 +30,8 @@ const EXPECTED: Record<CpErrorCode, number> = {
   endpoint_unresolved: 400,
   // 428 Precondition Required: a polling client tells "not yet" from "denied" without a body read.
   authorization_pending: 428,
+  // 410 Gone: the device code itself is spent; a client starts a new one rather than polling on.
+  device_code_expired: 410,
   // 502: GitHub refused the control plane's own OAuth-app configuration; no caller input fixes it.
   identity_provider_misconfigured: 502,
   redis_unavailable: 503,

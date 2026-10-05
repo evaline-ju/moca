@@ -1,5 +1,12 @@
 import type { CredentialConsumer, SessionSummary } from './api/types.js';
-import { LoginCancelledError, apiTokenValid, deviceLogin, toCachedAuth } from './core/auth.js';
+import {
+  LoginCancelledError,
+  LoginExpiredError,
+  apiTokenValid,
+  codeValidity,
+  deviceLogin,
+  toCachedAuth,
+} from './core/auth.js';
 import {
   credentialProblem,
   credentialRequest,
@@ -39,9 +46,10 @@ export async function cmdLogin(rt: Runtime, io: Io, signal?: AbortSignal): Promi
   try {
     const login = await deviceLogin(
       { cp: rt.cp, sleep: rt.sleep, now: rt.now },
-      (s) =>
+      (s, attempt) =>
         io.err(
-          `Open ${sanitizeRemote(s.verificationUri)} and enter the code ${sanitizeRemote(s.userCode)}`,
+          `${attempt > 1 ? 'That code expired. ' : ''}Open ${sanitizeRemote(s.verificationUri)} ` +
+            `and enter the code ${sanitizeRemote(s.userCode)} (valid for ${codeValidity(s.expiresIn)})`,
         ),
       signal,
     );
@@ -50,6 +58,11 @@ export async function cmdLogin(rt: Runtime, io: Io, signal?: AbortSignal): Promi
     return 0;
   } catch (err) {
     if (err instanceof LoginCancelledError) return 130;
+    if (err instanceof LoginExpiredError) {
+      // The re-issued code lapsed too: nobody is at the browser, so a third code would only wait.
+      io.err('login failed: the code expired before it was approved — run `mocactl login` again');
+      return 1;
+    }
     io.err(`login failed: ${describeError(err)}`);
     return 1;
   }

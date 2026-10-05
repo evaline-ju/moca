@@ -248,7 +248,9 @@ day-to-day invocation is plain `mocactl`.
    `token_expired`**: open the Login overlay. `POST /v1/auth/device` returns a user code and
    verification URL, rendered large, with `c` to copy the code and `o` to open the URL in the browser
    where the platform allows. Poll `POST /v1/auth/device/token` at the server's `interval`; `428
-authorization_pending` means keep polling; show the remaining `expiresIn` as a countdown.
+authorization_pending` means keep polling; show the remaining `expiresIn` as a countdown. `410
+device_code_expired` (or `expiresIn` passing) re-issues the code once; a second expiry ends the
+   login with "run `mocactl login` again" (#431).
 2. On success, cache `{ apiToken, subject, displayName, roles, expiresAt }` (§6.7) and return to where
    the user was.
 3. **Resuming** mints a session token via `POST /v1/sessions/{id}/token`; **creating** gets one
@@ -593,6 +595,7 @@ One table from the API's error codes (`docs/api/openapi.yaml`, `Error.error`) to
 | `credential_required` / `credential_ambiguous`                    | control plane | handled proactively in §6.3                                              |
 | `endpoint_unresolved`                                             | either        | "credential NAME has no gateway endpoint — edit it in /credentials"      |
 | `authorization_pending` (428)                                     | control plane | expected while polling                                                   |
+| `device_code_expired` (410)                                       | control plane | re-issue the code once; then "run `mocactl login` again"                 |
 | `identity_provider_misconfigured` (502)                           | control plane | "the operator must fix it", then `message` (the fix); never "retry"      |
 | `redis_unavailable` / `credential_unavailable` / `internal_error` | either        | "service unavailable — retry"; server-side, not the user's fault         |
 | `503` + `Retry-After` on `/turn`                                  | harness       | countdown and automatic retry (§5.7)                                     |

@@ -76,6 +76,7 @@ components:
             - credential_unavailable
             - endpoint_unresolved
             - authorization_pending
+            - device_code_expired
             - identity_provider_misconfigured
             - redis_unavailable
             - internal_error
@@ -252,6 +253,11 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '428':
           description: authorization_pending — the user has not approved yet; poll again
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '410':
+          description: device_code_expired — the code expired before it was approved; start a new one
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

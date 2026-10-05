@@ -81,7 +81,8 @@ export interface ControlPlaneApi {
   readyz(): Promise<void>;
   discovery(): Promise<Discovery>;
   startDeviceAuth(): Promise<DeviceStart>;
-  pollDeviceAuth(deviceCode: string): Promise<ApiLogin | 'pending'>;
+  /** 'pending' until approved; 'expired' once the code lapsed unapproved (start a new one). */
+  pollDeviceAuth(deviceCode: string): Promise<ApiLogin | 'pending' | 'expired'>;
   me(): Promise<Me>;
   listSessions(opts?: { limit?: number; cursor?: number }): Promise<SessionPage>;
   createSession(req: CreateSessionRequest): Promise<CreatedSession>;
