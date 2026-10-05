@@ -461,10 +461,13 @@ function defaultExecClient(_sandboxId: string, env: NodeJS.ProcessEnv): ExecClie
   return makeRelayExecClient(addr, token);
 }
 
-/** Sandbox ids already reported as unlabelled, so a misconfigured worker logs once, not per turn. */
+/**
+ * Sandbox ids already reported as unlabelled or mislabelled, so a misconfigured worker logs once, not
+ * per turn.
+ */
 const warnedUnlabelled = new Set<string>();
 
-/** Test-only: forget which unlabelled sandboxes were reported. */
+/** Test-only: forget which unlabelled or mislabelled sandboxes were reported. */
 export function resetTierWarnings(): void {
   warnedUnlabelled.clear();
 }
@@ -472,22 +475,27 @@ export function resetTierWarnings(): void {
 /**
  * Whether a presence record is in `tier`. With tiers declared an UNLABELLED record is in none: it
  * would otherwise serve whichever tier asked first, which is exactly the cross-tier hop this slice
- * removes (P6.3 spec §4 step 1). Reported once per id, naming its labels, so the operator can see
- * which worker lacks SANDBOX_TIER.
+ * removes (P6.3 spec §4 step 1). A record labelled with a tier that is not one of `declared` (a typo
+ * in SANDBOX_TIER, say `microvn`) is in none either, and is reported the same way: dropping it with
+ * no log would leave the operator a worker that is attached, healthy and never used (spec §5,
+ * "An unlabelled or mislabelled worker"). Reported once per id, naming its labels, so the operator
+ * can see which worker to fix.
  */
-function recordInTier(r: SandboxRecord, tier: string): boolean {
+function recordInTier(r: SandboxRecord, tier: string, declared: readonly string[]): boolean {
   const t = r.labels?.[TIER_LABEL];
-  if (!t) {
-    if (!warnedUnlabelled.has(r.sandboxId)) {
-      warnedUnlabelled.add(r.sandboxId);
-      console.warn(
-        `sandbox '${r.sandboxId}' advertises no ${TIER_LABEL} label (labels ${JSON.stringify(r.labels ?? {})}); ` +
-          'excluded while SH_SANDBOX_TIERS is set — set SANDBOX_TIER on its worker',
-      );
-    }
-    return false;
+  if (t && declared.includes(t)) return t === tier;
+  if (!warnedUnlabelled.has(r.sandboxId)) {
+    warnedUnlabelled.add(r.sandboxId);
+    const labels = JSON.stringify(r.labels ?? {});
+    console.warn(
+      t
+        ? `sandbox '${r.sandboxId}' advertises ${TIER_LABEL}='${t}', which is not one of SH_SANDBOX_TIERS ` +
+            `(${declared.join(', ')}) (labels ${labels}); excluded — fix SANDBOX_TIER on its worker`
+        : `sandbox '${r.sandboxId}' advertises no ${TIER_LABEL} label (labels ${labels}); ` +
+            'excluded while SH_SANDBOX_TIERS is set — set SANDBOX_TIER on its worker',
+    );
   }
-  return t === tier;
+  return false;
 }
 
 /**
@@ -599,7 +607,13 @@ async function select(
     grpcRecs = injected ? await injected.list() : await sharedRecords(env.REDIS_URL).list();
   }
   const allRecs = grpcRecs;
-  if (tiers) grpcRecs = grpcRecs.filter((r) => recordInTier(r, tier));
+  // A record "retiered" away from this session is one labelled with ANOTHER declared tier; see the
+  // affinity block. With no tiers declared nothing is.
+  const inOtherDeclaredTier = (r: SandboxRecord): boolean => {
+    const t = r.labels?.[TIER_LABEL];
+    return !!tiers && !!t && t !== tier && tiers.names.includes(t);
+  };
+  if (tiers) grpcRecs = grpcRecs.filter((r) => recordInTier(r, tier, tiers.names));
   const grpcById = new Map(grpcRecs.map((r) => [r.sandboxId, r]));
 
   const candidates = [...pods, ...grpcRecs.map((r) => r.sandboxId)];
@@ -676,7 +690,12 @@ async function select(
   const now = (deps.now ?? Date.now)();
   const prior = await affinity.get(sessionId);
   let reset: WorkspaceReset | undefined;
-  if (prior && prior.tier === tier) {
+  // ANY entry is honoured, whatever tier it was recorded under (spec §4 step 2). Ignoring an entry
+  // from another tier would drop every session PR 1 recorded under '' the moment tiers are switched
+  // on (or a '' session's default changes), and lose its workspace with no frame, field or log. This
+  // cannot cross tiers: `candidates` is already the session's tier, so the entry is only ever
+  // followed to a sandbox in it.
+  if (prior) {
     if (candidates.includes(prior.sandboxId)) {
       const got = await take(prior.sandboxId);
       // Saturated means alive and holding the workspace, just busy: wait, never move (spec §0).
@@ -686,26 +705,32 @@ async function select(
           `this session's sandbox '${prior.sandboxId}' is at capacity`,
         );
       }
-      await remember(
-        () => affinity.claim(sessionId, { sandboxId: prior.sandboxId, tier }, affinityTtlMs),
+      const entry = { sandboxId: prior.sandboxId, tier };
+      // Same tier: refresh. Another tier: re-record under the session's tier with a REPLACE, since a
+      // claim would keep the old entry in force. The workspace is intact either way: no reset.
+      await remember<unknown>(
+        () =>
+          prior.tier === tier
+            ? affinity.claim(sessionId, entry, affinityTtlMs)
+            : affinity.replace(sessionId, entry, affinityTtlMs),
         sessionId,
         prior.sandboxId,
       );
       return got;
     }
-    if (allRecs.some((r) => r.sandboxId === prior.sandboxId && !!r.labels?.[TIER_LABEL])) {
-      // Present, but advertising another tier: an operator re-tiered the worker. It will not come
-      // back to this tier by waiting, so the grace would only delay the same outcome (Review Focus 3).
-      // An UNLABELLED record is not "another tier" (spec §4 step 4): it is a worker that lost its
-      // SANDBOX_TIER, most likely by mistake, so it takes the grace path below like an absent one.
-      // Resetting at once would cost every affine session its workspace before the operator could
-      // read the unlabelled warning and fix the worker.
+    if (allRecs.some((r) => r.sandboxId === prior.sandboxId && inOtherDeclaredTier(r))) {
+      // Present, but advertising another DECLARED tier: an operator re-tiered the worker. It will not
+      // come back to this tier by waiting, so the grace would only delay the same outcome (Review
+      // Focus 3). An UNLABELLED record, or one labelled with an undeclared tier, is not "another tier"
+      // (spec §4 step 4): it is a worker whose SANDBOX_TIER is missing or mistyped, most likely by
+      // mistake, so it takes the grace path below like an absent one. Resetting at once would cost
+      // every affine session its workspace before the operator could read the warning and fix it.
       reset = { from: prior.sandboxId, reason: 'retiered' };
     } else {
       const since = await affinity.detachedSince(prior.sandboxId, now, affinityTtlMs);
-      // A mark in the future (relay clock ahead) gives left > graceMs: still pending, never
-      // negative-time logic. The REPORTED wait is clamped to the grace, though: the skew is not time
-      // the client should be told to wait, and the next turn re-evaluates anyway.
+      // The store replaces a mark in the future (relay clock ahead) with `now`, so the grace runs
+      // from this turn. The REPORTED wait stays clamped to the grace regardless, so a store that
+      // returned a future mark anyway could never tell the client to wait longer than the grace.
       const left = graceMs - (now - since);
       if (left > 0) {
         const retryInMs = Math.min(left, graceMs);
@@ -732,7 +757,7 @@ async function select(
     if (!got) continue;
     const entry = { sandboxId: name, tier };
     if (prior) {
-      // A fallback, or an entry from another tier: deliberately overwrite.
+      // A fallback (detached or retiered): deliberately overwrite the abandoned sandbox.
       await remember(() => affinity.replace(sessionId, entry, affinityTtlMs), sessionId, name);
       if (reset) {
         console.warn(

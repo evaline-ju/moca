@@ -133,4 +133,22 @@ describe('RedisAffinityStore (real Redis)', () => {
     await raw.set(detachedKey(id3), 'inf', { PX: 60_000 });
     expect(await store.detachedSince(id3, 3_000, 60_000)).toBe(3_000);
   });
+
+  // Final review item 3: a mark ahead of the harness clock (relay skew, or a huge integer that still
+  // matches ^%d+$) must not keep the session pending until the key's TTL.
+  it('detachedSince replaces a future mark, or a huge integer one, with now', async () => {
+    if (!raw.isOpen) await raw.connect();
+    const now = 1_000_000;
+    for (const mark of [String(now + 10_000), '99999999999999999999']) {
+      const id = `sbx-${randomUUID()}`;
+      await raw.set(detachedKey(id), mark, { PX: 60_000 });
+      expect(await store.detachedSince(id, now, 60_000)).toBe(now);
+      expect(await raw.get(detachedKey(id))).toBe(String(now));
+      expect(await raw.pTTL(detachedKey(id))).toBeGreaterThan(0);
+    }
+    // A mark at or before now still stands.
+    const past = `sbx-${randomUUID()}`;
+    await raw.set(detachedKey(past), String(now), { PX: 60_000 });
+    expect(await store.detachedSince(past, now + 5_000, 60_000)).toBe(now);
+  });
 });

@@ -65,8 +65,9 @@ export function fakeAffinity(
     },
     detachedSince: async (id, now) => {
       calls.push(`detachedSince:${id}`);
+      // Mirrors DETACHED_SINCE_LUA: only a finite mark at or before now stands.
       const m = detached.get(id);
-      if (m !== undefined && Number.isFinite(m)) return m;
+      if (m !== undefined && Number.isFinite(m) && m <= now) return m;
       detached.set(id, now);
       return now;
     },
@@ -166,6 +167,27 @@ describe('selectPoolSandbox: tier filter (P6.3 spec §4 step 1)', () => {
     const lines = warn.mock.calls.filter((c) => String(c[0]).includes("'bare-1'"));
     expect(lines).toHaveLength(1);
     expect(String(lines[0][0])).toContain('moca.dev/tier');
+    warn.mockRestore();
+  });
+
+  // Final review item 2: spec §5 promises the log for a MISLABELLED worker too.
+  it('a record labelled with an undeclared tier is excluded, with ONE log line naming it and the label', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const recs = [rec('typo-1', 'microvn'), rec('m-1', 'microvm')];
+    for (let i = 0; i < 3; i++) {
+      const { lease } = fakeLease();
+      const sel = await selectPoolSandbox(
+        env(TIERS),
+        '/h',
+        `s-${i}`,
+        opts({ tier: 'microvm' }),
+        deps(recs, lease),
+      );
+      expect(sel?.sandboxId).toBe('m-1');
+    }
+    const lines = warn.mock.calls.filter((c) => String(c[0]).includes("'typo-1'"));
+    expect(lines).toHaveLength(1);
+    expect(String(lines[0][0])).toContain('microvn');
     warn.mockRestore();
   });
 
@@ -344,7 +366,7 @@ describe('selectPoolSandbox: affinity (P6.3 spec §4 steps 2–6, §5)', () => {
     expect(sel?.workspaceReset?.reason).toBe('detached');
   });
 
-  // Review Focus 4.
+  // Review Focus 4; final review item 3: the store replaces a future mark with now.
   it('a detach mark in the future (clock skew) is treated as just detached: pending', async () => {
     const { lease } = fakeLease();
     const aff = fakeAffinity({ s: { sandboxId: 'm-0', tier: 'microvm' } }, { 'm-0': NOW + 10_000 });
@@ -358,6 +380,8 @@ describe('selectPoolSandbox: affinity (P6.3 spec §4 steps 2–6, §5)', () => {
     expect(err).toBeInstanceOf(SandboxAffinityPendingError);
     // The skew is not time the client should be told to wait: the reported wait is the grace.
     expect((err as SandboxAffinityPendingError).retryInMs).toBe(60_000);
+    // And the grace runs from now, not from the skewed mark.
+    expect(aff.detached.get('m-0')).toBe(NOW);
   });
 
   // Review Focus 3.
@@ -376,7 +400,31 @@ describe('selectPoolSandbox: affinity (P6.3 spec §4 steps 2–6, §5)', () => {
     expect(aff.calls.some((c) => c.startsWith('detachedSince'))).toBe(false);
   });
 
-  it('an entry recorded under a different tier is ignored, and replaced (not claimed)', async () => {
+  // Final review item 1: an entry recorded under another tier is honoured, never dropped silently.
+  // Every entry PR 1 writes has tier '' (tiers unset); switching tiers on must not cost those
+  // sessions their workspace.
+  it('an entry recorded under another tier, whose sandbox IS in the session tier, is honoured and re-recorded', async () => {
+    const { lease } = fakeLease({ 'c-0': 1 }); // c-1 is the idler
+    const aff = fakeAffinity({ s: { sandboxId: 'c-0', tier: '' } });
+    const sel = await selectPoolSandbox(
+      tiered,
+      '/h',
+      's',
+      opts({ tier: 'container' }),
+      deps([rec('c-0', 'container'), rec('c-1', 'container')], lease, {
+        affinity: aff.store,
+        ...at,
+      }),
+    );
+    expect(sel?.sandboxId).toBe('c-0');
+    expect(sel?.workspaceReset).toBeUndefined();
+    expect(aff.entries.get('s')).toEqual({ sandboxId: 'c-0', tier: 'container' });
+    // A replace, not a claim: a claim would keep the old '' entry in force.
+    expect(aff.calls).toContain('replace:s:c-0');
+    expect(aff.calls.some((c) => c.startsWith('claim'))).toBe(false);
+  });
+
+  it('an entry recorded under another tier, whose sandbox is in another DECLARED tier, is retiered', async () => {
     const { lease } = fakeLease();
     const aff = fakeAffinity({ s: { sandboxId: 'c-0', tier: 'container' } });
     const sel = await selectPoolSandbox(
@@ -387,8 +435,24 @@ describe('selectPoolSandbox: affinity (P6.3 spec §4 steps 2–6, §5)', () => {
       deps([rec('c-0', 'container'), m('m-1')], lease, { affinity: aff.store, ...at }),
     );
     expect(sel?.sandboxId).toBe('m-1');
-    expect(sel?.workspaceReset).toBeUndefined();
+    expect(sel?.workspaceReset).toEqual({ from: 'c-0', reason: 'retiered' });
+    expect(aff.calls.some((c) => c.startsWith('detachedSince'))).toBe(false);
     expect(aff.entries.get('s')).toEqual({ sandboxId: 'm-1', tier: 'microvm' });
+  });
+
+  it('an entry recorded under another tier, whose sandbox is absent, takes the grace path', async () => {
+    const { lease, acquired } = fakeLease();
+    const aff = fakeAffinity({ s: { sandboxId: 'm-gone', tier: '' } });
+    const p = selectPoolSandbox(
+      tiered,
+      '/h',
+      's',
+      opts({ tier: 'microvm' }),
+      deps([m('m-1')], lease, { affinity: aff.store, ...at }),
+    );
+    await expect(p).rejects.toBeInstanceOf(SandboxAffinityPendingError);
+    expect(aff.detached.get('m-gone')).toBe(NOW);
+    expect(acquired).toEqual([]);
   });
 
   it('a first turn that loses the claim race releases its lease and joins the winner', async () => {
@@ -516,6 +580,22 @@ describe('selectPoolSandbox: affinity (P6.3 spec §4 steps 2–6, §5)', () => {
     await expect(p).rejects.toBeInstanceOf(SandboxAffinityPendingError);
     expect(aff.calls).toContain('detachedSince:x-0');
     expect(aff.detached.get('x-0')).toBe(NOW);
+    expect(acquired).toEqual([]);
+  });
+
+  // Final review item 2: a label that is not a DECLARED tier is a typo, not a re-tiering.
+  it('a present affine record labelled with an UNDECLARED tier takes the grace path, not retiered', async () => {
+    const { lease, acquired } = fakeLease();
+    const aff = fakeAffinity({ s: { sandboxId: 'x-0', tier: 'microvm' } });
+    const p = selectPoolSandbox(
+      tiered,
+      '/h',
+      's',
+      opts({ tier: 'microvm' }),
+      deps([rec('x-0', 'microvn'), m('m-1')], lease, { affinity: aff.store, ...at }),
+    );
+    await expect(p).rejects.toBeInstanceOf(SandboxAffinityPendingError);
+    expect(aff.calls).toContain('detachedSince:x-0');
     expect(acquired).toEqual([]);
   });
 

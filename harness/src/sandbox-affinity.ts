@@ -97,8 +97,9 @@ export interface AffinityStore {
   /** Overwrite: used after a fallback, when the old sandbox is deliberately abandoned. */
   replace(sessionId: string, entry: AffinityEntry, ttlMs: number): Promise<void>;
   /**
-   * When `sandboxId` was first seen gone: the relay's mark, or -- when there is none, or it is not a
-   * number -- `nowMs`, written so the grace clock starts at the first turn that noticed (§4 step 4).
+   * When `sandboxId` was first seen gone: the relay's mark, or -- when there is none, it is not an
+   * integer, or it is after `nowMs` -- `nowMs`, written so the grace clock starts at the first turn
+   * that noticed (§4 step 4).
    */
   detachedSince(sandboxId: string, nowMs: number, ttlMs: number): Promise<number>;
 }
@@ -133,10 +134,15 @@ end
 redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
 return ARGV[1]`;
 
-/** KEYS[1]=detachedKey ARGV=[nowMs, ttlMs]. Keeps an integer mark, else writes now; returns the mark. */
+/**
+ * KEYS[1]=detachedKey ARGV=[nowMs, ttlMs]. Keeps an integer mark at or before now, else writes now;
+ * returns the mark. A mark AHEAD of now (relay clock skew, or a huge integer such as
+ * 99999999999999999999, which still matches ^%d+$) is replaced too: kept, it would hold the session
+ * pending until the key's TTL instead of for the grace. Replaced, the grace runs from now.
+ */
 export const DETACHED_SINCE_LUA = `
 local v = redis.call('GET', KEYS[1])
-if v and string.match(v, '^%d+$') then return v end
+if v and string.match(v, '^%d+$') and tonumber(v) <= tonumber(ARGV[1]) then return v end
 redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
 return ARGV[1]`;
 
