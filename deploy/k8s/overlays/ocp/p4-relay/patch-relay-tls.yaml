@@ -3,6 +3,9 @@ kind: Deployment
 metadata: { name: sandbox-relay, namespace: moca }
 spec:
   template:
+    metadata:
+      # The sidecar below is listed first; without this, plain `kubectl logs`/`exec` land on it.
+      annotations: { kubectl.kubernetes.io/default-container: sandbox-relay }
     spec:
       containers:
         # Byte-for-byte TCP: TLS ends here and each external worker connection becomes one connection

@@ -554,10 +554,14 @@ expect_out "'moca-microvm-0' must match"
 expect_out "lists 'a' twice"
 (export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS='*'; expect_fail --target ocp)
 expect_out "'*' must match"
+# The relay refuses the ID DIR before any lookup (spec §2.1): such a host could never attach.
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS=moca_microvm_0,DIR; expect_fail --target ocp)
+expect_out "'DIR' is reserved"
+expect_out 'SH_RELAY_TOKEN_DIR'
 (export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS=a; expect_fail --target kind --skip-build)
 expect_out 'needs --target ocp'
 ! grep -q '^kubectl' "$MOCK_LOG" || fail 'a refused ID list still reached the cluster'
-pass 'refused: an ID with a dash, a duplicate, glob char, P4 IDs on kind -- before anything touches a cluster'
+pass 'refused: an ID with a dash, a duplicate, glob char, the reserved DIR, P4 IDs on kind -- before anything touches a cluster'
 
 # The live switch from a slice-1 stack: moca-setup already holds SH_SANDBOX_COUNT=2.
 reset_state
@@ -731,7 +735,11 @@ gen | grep -qx '  - ../../overlays/ocp/p4-relay' || fail 'the p4-relay component
 gen | grep -q 'name: moca-relay }' || fail 'the relay Route is not patched'
 gen | grep -q 'value: moca-relay-moca.apps.example.test' || fail 'the relay Route host is wrong'
 expect_out "$REPO/deploy/k8s/.generated/ocp/p4/moca_microvm_0"
+# scp -r into an existing target nests the copy, so an earlier copy is removed first, then copied.
+expect_out 'ssh <kvm-host> rm -r moca-p4-moca_microvm_0   (an earlier copy, if any: scp -r would nest into it)'
 expect_out "scp -r $REPO/deploy/k8s/.generated/ocp/p4/moca_microvm_0 <kvm-host>:moca-p4-moca_microvm_0"
+[[ "$(grep -n 'rm -r moca-p4-moca_microvm_0' "$TMP/out" | cut -d: -f1)" -lt "$(grep -n '^ *scp -r ' "$TMP/out" | cut -d: -f1)" ]] ||
+  fail 'the earlier copy is not removed before the scp'
 expect_out 'sudo deploy/microvm/setup-microvm.sh --remote ~/moca-p4-moca_microvm_0'
 pass 'P4 IDs render the p4-relay component and the relay Route host, and print each host command; none render nothing'
 

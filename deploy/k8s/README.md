@@ -724,25 +724,35 @@ SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS=moca_microvm_0 deploy/k8s/setup.sh --target
 
 - IDs match `^[A-Za-z_][A-Za-z0-9_]*$` (no dashes: the relay looks each up by name), comma-separated,
   each listed once.
-- The list is sticky like every other input; `SH_P4_SANDBOX_IDS=` (empty) clears it.
+- `DIR` is reserved and refused: `SH_RELAY_TOKEN_DIR` is the relay's token-directory setting, so
+  the relay refuses that ID before any lookup.
+- The list is sticky like every other input; `SH_P4_SANDBOX_IDS=` (empty) clears it (see 11.4 for
+  the objects that clearing leaves behind).
 - `--relay-tls-cert FILE --relay-tls-key FILE` installs an operator certificate for
   `moca-relay-moca.<apps domain>`. Without them a self-signed one is generated once and kept.
 - Every bundle carries the relay certificate as `relay-ca.crt` whenever it is **self-issued**
   (`setup.sh`'s own, or a self-signed one you supplied). A certificate issued by another CA is not
   shipped: that CA must be one the hosts already trust system-wide.
 
-`setup.sh` ends by printing, per ID, the bundle path and the two commands to install it:
+`setup.sh` ends by printing, per ID, the bundle path and the commands to install it:
 
 ```
 P4 hosts attach to https://moca-relay-moca.<apps domain> (the relay, TLS passthrough). One bundle each -- it holds
 that host's relay token, so copy it straight to the host, install it, then delete the copy:
   moca_microvm_0:  <checkout>/deploy/k8s/.generated/ocp/p4/moca_microvm_0
+    ssh <kvm-host> rm -r moca-p4-moca_microvm_0   (an earlier copy, if any: scp -r would nest into it)
     scp -r <checkout>/deploy/k8s/.generated/ocp/p4/moca_microvm_0 <kvm-host>:moca-p4-moca_microvm_0
     on <kvm-host>, from a moca checkout:  sudo deploy/microvm/setup-microvm.sh --remote ~/moca-p4-moca_microvm_0
 ```
 
 The bundle (`worker.env` and `relay-ca.crt`, mode 0600, in a 0700 directory) holds that host's relay
 token. Copy it straight to its host and delete the copy once installed.
+
+**Re-copying a bundle** (after a new certificate, or an ID removed and added again): first remove
+`~/moca-p4-<id>` on the host, as the printed `ssh <kvm-host> rm -r moca-p4-<id>` does.
+`scp -r <dir> <kvm-host>:moca-p4-<id>` into an existing directory nests the copy as
+`moca-p4-<id>/<id>`, and `--remote` would then install the stale bundle left at the top. On a first
+copy the `rm` only reports that nothing is there.
 
 ### 11.2 Install a host
 
@@ -759,11 +769,12 @@ token (the cluster's token replaces any local one), installs `relay-ca.crt` as
 `50-moca-remote.conf`. It touches nothing of a local P6.
 
 It finishes only once the worker's **current** process has logged `attached, serving execs` and the
-attach has then held for `MICROVM_ATTACH_SETTLE` seconds (default 5) with no reconnect, all within
-`MICROVM_ATTACH_TIMEOUT` (default 60). The hold matters because the worker logs `attached` when its
-stream opens, before the relay checks the token; a refused token ends the stream milliseconds later.
-Otherwise it dies naming that process's journal
-(`journalctl -u microvm-worker _SYSTEMD_INVOCATION_ID=…`), which carries the TLS or token error.
+attach has then held for `MICROVM_ATTACH_SETTLE` seconds (default 5, at least 1) with no reconnect,
+all within `MICROVM_ATTACH_TIMEOUT` (default 60; a hold that starts before then may finish). The
+hold matters because the worker logs `attached` when its stream opens, before the relay checks the
+token; a refused token ends the stream milliseconds later. Otherwise it dies naming that process's
+journal (`journalctl -u microvm-worker _SYSTEMD_INVOCATION_ID=…`), which carries the TLS or token
+error.
 
 Running `setup-microvm.sh` again **without** `--remote` switches the host back to its local P6
 relay, restoring its local token.
@@ -786,15 +797,31 @@ restart. Claims 7–11 do not run on this tier.
 - **Add** an ID to the list and re-run `setup.sh`: the new token reaches the relay's directory
   within the kubelet's Secret sync (about a minute; P7 prints the measured time), and the host's
   next attach succeeds. Attached hosts stay attached.
-- **Revoke** by removing the ID: its token and bundle are deleted, and once the removal reaches the
-  relay's directory (the same kubelet Secret sync, about a minute) its **next** attach is refused. A host already attached stays attached until its stream drops; to cut it off at once,
+- **Revoke** by removing the ID: its token and bundle are deleted, and once the removal reaches
+  the relay's directory (the same kubelet Secret sync, about a minute) its **next** attach is
+  refused. A host already attached stays attached until its stream drops; to cut it off at once,
   restart the relay (`kubectl -n moca rollout restart deployment/sandbox-relay`), which drops every
   attached sandbox.
+- **Clear** every ID (`SH_P4_SANDBOX_IDS=`, with `SH_SANDBOX_COUNT` back above 0 to return to
+  container sandboxes): the relay pod loses its TLS sidecar, so nothing listens on 8444 any more.
+  `setup.sh` applies with a non-pruning `kubectl apply -k`, though, so four objects of the p4-relay
+  component stay behind. Delete them by hand:
+
+  ```bash
+  kubectl -n moca delete route/moca-relay service/sandbox-relay-tls \
+    networkpolicy/sandbox-relay-from-router secret/moca-relay-tls
+  ```
+
+  Secret `moca-relay-sandbox-tokens` stays, emptied, on purpose: an emptied Secret revokes every
+  host deterministically. Deleting `moca-relay-tls` means a later switch back to P4 generates a new
+  self-signed certificate (unless `--relay-tls-cert` is given), so every bundle is then re-copied.
 
 ### 11.5 Troubleshooting
 
-The relay pod has two containers here, and the `tls` sidecar is listed first, so name the relay's:
-`kubectl -n moca logs deployment/sandbox-relay -c sandbox-relay`.
+The relay pod has two containers here, and the `tls` sidecar is listed first. The pod's
+`kubectl.kubernetes.io/default-container: sandbox-relay` annotation sends plain `kubectl logs` and
+`kubectl exec` to the relay; name the sidecar to read it:
+`kubectl -n moca logs deployment/sandbox-relay -c tls`.
 
 **`setup-microvm.sh --remote` dies with `did not stay attached`.** The message names the worker
 journal to read. A wrong or revoked token shows there as `attached, serving execs` followed at once

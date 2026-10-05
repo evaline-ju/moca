@@ -180,7 +180,8 @@ cm_value() { printf '%s' "$1" | jq -r --arg k "$2" '.data[$k] // empty'; }
 
 # normalize_p4_ids "a, b,," -> "a b": comma-separated; each entry trimmed, empty entries dropped. An
 # ID must match the relay's token-directory rule (spec §2.1: the relay reads <dir>/<id>) and appear
-# once -- two hosts with one ID would share a token and a workspace.
+# once -- two hosts with one ID would share a token and a workspace. DIR is reserved: the relay
+# refuses it before any lookup, since SH_RELAY_TOKEN_DIR is its token-directory setting.
 normalize_p4_ids() {
   [[ -n "$1" ]] || return 0
   [[ "$1" != *$'\n'* ]] || die "SH_P4_SANDBOX_IDS must be one line"
@@ -193,6 +194,8 @@ normalize_p4_ids() {
     [[ -n "$id" ]] || continue
     [[ "$id" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] ||
       die "SH_P4_SANDBOX_IDS: '$id' must match ^[A-Za-z_][A-Za-z0-9_]*\$ (the relay looks its token up by this name)"
+    [[ "$id" != DIR ]] ||
+      die "SH_P4_SANDBOX_IDS: 'DIR' is reserved: SH_RELAY_TOKEN_DIR is the relay's token-directory setting, so the relay refuses that ID"
     case " $out " in *" $id "*) die "SH_P4_SANDBOX_IDS lists '$id' twice" ;; esac
     out="${out:+$out }$id"
   done
@@ -729,6 +732,7 @@ EOF
       for id in $P4_IDS; do
         dir="$P4_BUNDLES/$id"
         printf '  %s:  %s\n' "$id" "$dir" >&2
+        printf '    ssh <kvm-host> rm -r moca-p4-%s   (an earlier copy, if any: scp -r would nest into it)\n' "$id" >&2
         printf '    scp -r %s <kvm-host>:moca-p4-%s\n' "$dir" "$id" >&2
         printf '    on <kvm-host>, from a moca checkout:  sudo deploy/microvm/setup-microvm.sh --remote ~/moca-p4-%s\n' "$id" >&2
       done

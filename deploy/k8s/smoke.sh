@@ -252,6 +252,8 @@ const { exec, ca } = JSON.parse(readFileSync(0, 'utf8'));
 const addr = process.env.P4_RELAY_ADDR;
 const cert = new X509Certificate(ca);
 // setup.sh's self-signed certificate is its own CA; an operator's chains to the system roots.
+// createSsl(null) trusts Node's bundled roots, while the Go worker trusts the host's system pool:
+// an operator certificate from an internal CA can pass on the host but fail P6, or the reverse.
 const creds = credentials.createSsl(cert.checkIssued(cert) ? Buffer.from(ca) : null);
 const bearer = (t) => { const md = new Metadata(); md.set('authorization', `Bearer ${t}`); return md; };
 const codeOf = (call) => new Promise((resolve) => {

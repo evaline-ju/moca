@@ -53,6 +53,10 @@ describe.skipIf(NO_KUBECTL)('overlays/ocp/p4-relay (P6.2 §2.4)', () => {
     expect(vol.secret).toEqual({ secretName: 'moca-relay-tls', defaultMode: 288 });
     // The relay itself is untouched: still one replica, Recreate, its own container intact.
     expect(relay().spec.strategy).toEqual({ type: 'Recreate' });
+    // The sidecar is listed first, so plain `kubectl logs`/`exec` must be pointed at the relay.
+    expect(
+      relay().spec.template.metadata.annotations?.['kubectl.kubernetes.io/default-container'],
+    ).toBe('sandbox-relay');
     expect(container(relay(), 'sandbox-relay').command).toEqual([
       'node',
       '--import',

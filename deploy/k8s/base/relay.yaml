@@ -103,7 +103,8 @@ spec:
   podSelector: { matchLabels: { app: sandbox-relay } }
   policyTypes: [Ingress, Egress]
   ingress:
-    # Attach: sandboxes only (slice 2 adds the P4 hosts' CIDR here).
+    # Attach: in-cluster sandboxes only. P4 hosts outside the cluster never reach 9443 directly: the
+    # p4-relay component's own NetworkPolicy admits the router to its TLS sidecar on 8444 instead.
     - from:
         - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: moca-sandbox } }
           podSelector: { matchLabels: { app: moca-sandbox } }
