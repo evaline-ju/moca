@@ -133,10 +133,10 @@ end
 redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
 return ARGV[1]`;
 
-/** KEYS[1]=detachedKey ARGV=[nowMs, ttlMs]. Keeps a numeric mark, else writes now; returns the mark. */
+/** KEYS[1]=detachedKey ARGV=[nowMs, ttlMs]. Keeps an integer mark, else writes now; returns the mark. */
 export const DETACHED_SINCE_LUA = `
 local v = redis.call('GET', KEYS[1])
-if v and tonumber(v) then return v end
+if v and string.match(v, '^%d+$') then return v end
 redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
 return ARGV[1]`;
 
@@ -148,8 +148,13 @@ return ARGV[1]`;
 export class RedisAffinityStore implements AffinityStore {
   private client: RedisClientType;
   private ready: Promise<void>;
-  constructor(url = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379', maxReconnectAttempts?: number) {
-    this.client = createClient(resilientClientOptions(url, maxReconnectAttempts)) as RedisClientType;
+  constructor(
+    url = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379',
+    maxReconnectAttempts?: number,
+  ) {
+    this.client = createClient(
+      resilientClientOptions(url, maxReconnectAttempts),
+    ) as RedisClientType;
     swallowRedisErrors(this.client, 'sandbox affinity store');
     this.ready = this.client.connect().then(() => undefined);
   }
@@ -181,7 +186,8 @@ export class RedisAffinityStore implements AffinityStore {
       keys: [detachedKey(sandboxId)],
       arguments: [String(nowMs), String(ttlMs)],
     });
-    return Number(res);
+    const n = Number(res);
+    return Number.isFinite(n) ? n : nowMs;
   }
   /** Same contract as RedisLeaseStore.close(): never re-throws a failed connect. */
   async close(): Promise<void> {

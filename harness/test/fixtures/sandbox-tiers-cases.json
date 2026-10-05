@@ -9,7 +9,10 @@
   },
   {
     "name": "trimmed, empty entries dropped",
-    "env": { "SH_SANDBOX_TIERS": " container , microvm,,", "SH_SANDBOX_DEFAULT_TIER": " container " },
+    "env": {
+      "SH_SANDBOX_TIERS": " container , microvm,,",
+      "SH_SANDBOX_DEFAULT_TIER": " container "
+    },
     "expect": { "names": ["container", "microvm"], "default": "container" }
   },
   {

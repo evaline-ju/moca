@@ -51,7 +51,10 @@ describe('affinityTimings', () => {
       }),
     ).toEqual({ ttlMs: 3_600_000, graceMs: 5_000 });
     expect(
-      affinityTimings({ SH_SANDBOX_AFFINITY_TTL_SECONDS: '', SH_SANDBOX_AFFINITY_GRACE_SECONDS: 'x' }),
+      affinityTimings({
+        SH_SANDBOX_AFFINITY_TTL_SECONDS: '',
+        SH_SANDBOX_AFFINITY_GRACE_SECONDS: 'x',
+      }),
     ).toEqual({ ttlMs: 86_400_000, graceMs: 60_000 });
   });
   it('allows a zero grace (fall back at once) but not a zero TTL', () => {
@@ -99,15 +102,19 @@ describe('RedisAffinityStore (real Redis)', () => {
     if (!raw.isOpen) await raw.connect();
     await raw.set(affinityKey(s), 'not json', { PX: 60_000 });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    expect(await store.get(s)).toBeNull();
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining(affinityKey(s)));
-    warn.mockRestore();
-    expect(await store.claim(s, { sandboxId: 'c', tier: 't' }, 60_000)).toEqual({
-      sandboxId: 'c',
-      tier: 't',
-    });
-    await raw.set(affinityKey(s), JSON.stringify({ tier: 't' }), { PX: 60_000 }); // no sandboxId
-    expect(await store.get(s)).toBeNull();
+    try {
+      expect(await store.get(s)).toBeNull();
+      expect(await store.claim(s, { sandboxId: 'c', tier: 't' }, 60_000)).toEqual({
+        sandboxId: 'c',
+        tier: 't',
+      });
+      await raw.set(affinityKey(s), JSON.stringify({ tier: 't' }), { PX: 60_000 }); // no sandboxId
+      expect(await store.get(s)).toBeNull();
+      expect(warn).toHaveBeenCalledTimes(2);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(affinityKey(s)));
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('detachedSince keeps the first mark, and replaces a garbage one with now', async () => {
@@ -117,5 +124,13 @@ describe('RedisAffinityStore (real Redis)', () => {
     if (!raw.isOpen) await raw.connect();
     await raw.set(detachedKey(id), 'garbage', { PX: 60_000 }); // Review Focus 4
     expect(await store.detachedSince(id, 9_000, 60_000)).toBe(9_000);
+    // Lua tonumber accepts 'nan', 'inf', '-inf', etc. so they become NaN/Infinity, but the grace clock must end.
+    // Verify that non-integer marks are replaced with the given now.
+    const id2 = `sbx-${randomUUID()}`;
+    await raw.set(detachedKey(id2), 'nan', { PX: 60_000 });
+    expect(await store.detachedSince(id2, 2_000, 60_000)).toBe(2_000);
+    const id3 = `sbx-${randomUUID()}`;
+    await raw.set(detachedKey(id3), 'inf', { PX: 60_000 });
+    expect(await store.detachedSince(id3, 3_000, 60_000)).toBe(3_000);
   });
 });
