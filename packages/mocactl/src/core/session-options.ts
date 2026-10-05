@@ -75,7 +75,9 @@ export const sandboxTierField: SessionOptionField = {
       if (err instanceof ApiError && err.status === 404) return [];
       throw err;
     }
-    if (!tiers) return [];
+    // A remote body: anything but { names: string[], default: string } counts as no tiers, so a
+    // malformed discovery skips the field rather than breaking session creation with a TypeError.
+    if (!isSandboxTiers(tiers)) return [];
     return tiers.names.map((n) => ({
       value: n,
       label: sanitizeRemote(n),
@@ -84,6 +86,14 @@ export const sandboxTierField: SessionOptionField = {
   },
   toRequest: (value, req) => ({ ...req, sandbox: { ...req.sandbox, tier: value } }),
 };
+
+function isSandboxTiers(v: unknown): v is NonNullable<Discovery['sandboxTiers']> {
+  if (typeof v !== 'object' || v === null) return false;
+  const { names, default: def } = v as Record<string, unknown>;
+  return (
+    Array.isArray(names) && names.every((n) => typeof n === 'string') && typeof def === 'string'
+  );
+}
 
 export const SESSION_OPTION_FIELDS: readonly SessionOptionField[] = [
   inferenceCredentialField,

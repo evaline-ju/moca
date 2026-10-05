@@ -267,6 +267,16 @@ describe('runtime hash', () => {
     expect(f.hashes.get(runtimeKey('sid-1'))).toEqual(placement);
     expect(await index.getRuntime('sid-1')).toEqual(placement);
   });
+
+  it("stores an empty sandboxTier, so an untiered turn clears the last turn's tier", async () => {
+    // hSet merges: were '' dropped on write, a turn after tiers are switched off would leave the
+    // old tier next to its new sandboxId.
+    const f = fakeRedis();
+    const index = new OwnershipIndex(f.redis);
+    await index.putRuntime('sid-1', { sandboxId: 'm-1', sandboxTier: 'microvm' });
+    await index.putRuntime('sid-1', { sandboxId: 'c-0', sandboxTier: '' });
+    expect(await index.getRuntime('sid-1')).toEqual({ sandboxId: 'c-0', sandboxTier: '' });
+  });
 });
 
 describe('audit', () => {

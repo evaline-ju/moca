@@ -195,6 +195,24 @@ describe('sandboxTierField (P6.3)', () => {
     });
   });
 
+  it('treats a malformed sandboxTiers in discovery as no tiers, not a TypeError', async () => {
+    // Discovery is a remote body: anything but { names: string[], default: string } offers nothing.
+    for (const bad of [
+      {},
+      { names: 'container', default: 'container' },
+      { names: ['container', 7], default: 'container' },
+      { names: ['container'] },
+      'container',
+    ]) {
+      const cp = fakeControlPlane({
+        discovery: async () => ({ harnessUrl: null, sandboxTiers: bad as never }),
+      });
+      expect(await sandboxTierField.source(cp)).toEqual([]);
+      const r = await resolveSessionOptions(cp, [sandboxTierField], {}, {});
+      expect(r).toEqual({ status: 'ready', values: {}, request: {} });
+    }
+  });
+
   it('a given tier on a deployment with none is blocked, saying so', async () => {
     const r = await resolveSessionOptions(
       api(null),

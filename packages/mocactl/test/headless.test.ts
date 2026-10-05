@@ -78,6 +78,24 @@ describe('cmdRun', () => {
     expect(o.stderr.join('\n')).toContain('--option inferenceCredential=<value>: a, b');
   });
 
+  it('names a rejected --option credential, terminal-safe, listing the declared ones', async () => {
+    const o = io();
+    const cp = fakeControlPlane({
+      listCredentials: async () => [credential('a'), credential('b')],
+    });
+    expect(
+      await cmdRun(runtime({ cp }), o, {
+        prompt: 'hi',
+        options: { inferenceCredential: 'zz\u001b[2J' },
+        json: false,
+      }),
+    ).toBe(2);
+    const err = o.stderr.join('\n');
+    expect(err).toContain("unknown inference credential 'zz'; declared: a, b");
+    expect(err).not.toContain('\u001b');
+    expect(cp.calls).not.toContain('createSession');
+  });
+
   it('uses the credential named with --option', async () => {
     let asked: unknown;
     const rt = runtime({
@@ -159,9 +177,11 @@ describe('cmdRun', () => {
         json: false,
       }),
     ).toBe(2);
+    // It says the given value was rejected, rather than asking as though none had been given.
     expect(o.stderr.join('\n')).toContain(
-      'choose the sandbox tier with --option sandboxTier=<value>: container, microvm',
+      "unknown sandbox tier 'gpu'; declared: container, microvm",
     );
+    expect(o.stderr.join('\n')).not.toContain('choose the');
     expect(cp.calls).not.toContain('createSession');
   });
 

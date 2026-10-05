@@ -673,9 +673,11 @@ describe('runtimeFieldsForTurn', () => {
       workspaceResetFrom: 'm-0',
     });
     expect(Number(end.workspaceResetAt)).toBeGreaterThan(0);
+    // An untiered turn still writes the tier, as '': the runtime hash write merges, so leaving it
+    // out would keep a previous turn's tier beside this turn's sandboxId.
     const plain = runtimeFieldsForTurn({}, 'end', { id: 'c-0', tier: '' });
     expect(plain.sandboxId).toBe('c-0');
-    expect(plain.sandboxTier).toBeUndefined();
+    expect(plain.sandboxTier).toBe('');
     expect(plain.workspaceResetFrom).toBeUndefined();
   });
 });
