@@ -110,14 +110,19 @@ describe('tiers and affinity end to end (P6.3 spec §8)', () => {
     sid: `s-${run}-${i}`,
     tier: i % 2 ? MV : CT,
   }));
-  // The pending and moved paths warn by design (and a foreign unlabelled record on this shared Redis
-  // would too); silenced so the run's output stays clean, and asserted where the warning is the point.
+  // The pending and moved paths warn by design ('sandbox affinity: ...'); those are silenced so the
+  // run's output stays clean, and asserted where the warning is the point. Any other warning is passed
+  // through, so an unexpected one still shows.
   let warn: ReturnType<typeof vi.spyOn>;
   // A raw client, separate from the relay's store, so the detach mark's TTL is read from Redis itself.
   const raw = createClient({ url: baseEnv.REDIS_URL });
 
   beforeAll(async () => {
-    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const original = console.warn.bind(console);
+    warn = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      if (typeof args[0] === 'string' && args[0].startsWith('sandbox affinity:')) return;
+      original(...args);
+    });
     await raw.connect();
   });
 
@@ -141,10 +146,16 @@ describe('tiers and affinity end to end (P6.3 spec §8)', () => {
     }
     await Promise.all(held.map((h) => h.release()));
     for (const tier of [CT, MV]) {
-      const used = new Set(sessions.filter((s) => s.tier === tier).map((s) => first.get(s.sid)));
-      expect(used.size).toBe(2);
+      // Least-loaded over HELD leases, with orderByLoad's stable tie-break, alternates the tier's two
+      // sandboxes: an exact 5/5 split. First-fit would fill one to the cap (8) and spill 2 to the other.
+      const inTier = sessions.filter((s) => s.tier === tier);
+      for (const id of IDS[tier]) {
+        expect(inTier.filter((s) => first.get(s.sid) === id)).toHaveLength(inTier.length / 2);
+      }
     }
-    // Turns 2 and 3: each session returns to its sandbox, whatever the load now is.
+    // Turns 2 and 3, every lease now released so every load is zero: without affinity the stable
+    // tie-break would send each session to c0/m0, so a session first placed on c1/m1 returning there
+    // is affinity's doing, not load's.
     for (let turn = 0; turn < 2; turn++) {
       for (const { sid, tier } of sessions) {
         const sel = (await select(sid, tier))!;
