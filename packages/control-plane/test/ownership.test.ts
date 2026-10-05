@@ -115,7 +115,7 @@ describe('create and get', () => {
 
   it('reads a record written before P6.3 (no sandboxTier field) as undefined, not ""', async () => {
     const fake = fakeRedis();
-    const index = new OwnershipIndex(fake.redis);
+    const oldIndex = new OwnershipIndex(fake.redis);
     await fake.redis.hSet(sessionKey('old'), {
       owner: 'github:1',
       tenant: 'github:1',
@@ -125,7 +125,7 @@ describe('create and get', () => {
       credentialName: '',
       tombstone: '0',
     });
-    expect((await index.get('old'))?.sandboxTier).toBeUndefined();
+    expect((await oldIndex.get('old'))?.sandboxTier).toBeUndefined();
   });
 });
 

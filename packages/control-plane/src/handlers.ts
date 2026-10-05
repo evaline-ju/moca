@@ -6,7 +6,7 @@ import {
   type CredentialStore,
   type InferenceAuthHeader,
 } from './credential-store.js';
-import { exchangeCredential, OPERATOR_FALLBACK_NAME } from './exchange.js';
+import { exchangeCredential, OPERATOR_FALLBACK_NAME, sessionTier } from './exchange.js';
 import type { RunKubectl } from './kubectl.js';
 import { DEFAULT_PAGE_SIZE, type OwnershipIndex, type SessionRecord } from './ownership.js';
 import type { IdentityProvider } from './identity.js';
@@ -179,6 +179,10 @@ async function auditBestEffort(
 /** Public view of a session record. `turns` comes from the display-only runtime hash. */
 async function sessionView(rec: SessionRecord, deps: CpDeps) {
   const runtime = await deps.index.getRuntime(rec.sessionId);
+  // The session's actual tier: either what it was created with, or today's default if it predates P6.3.
+  // An '' tier (created while no tiers were declared) shows as null; a new session with today's default
+  // shows that default, so the view matches what the exchange will hand the data plane.
+  const tier = sessionTier(rec, deps.config.sandboxTiers) || null;
   return {
     sessionId: rec.sessionId,
     owner: rec.owner,
@@ -187,7 +191,7 @@ async function sessionView(rec: SessionRecord, deps: CpDeps) {
     state: rec.state,
     lastTurnAt: runtime.lastTurnAt ? Number(runtime.lastTurnAt) : null,
     turns: runtime.turns ? Number(runtime.turns) : 0,
-    sandboxTier: rec.sandboxTier || null,
+    sandboxTier: tier,
   };
 }
 
@@ -267,7 +271,14 @@ export const HANDLERS: Record<string, Handler> = {
 
     // The sandbox tier (P6.3 spec §3.3), resolved and RECORDED here like the credential: a later change
     // to the deployment default must not move an existing session between tiers.
-    const requestedTier = asRecord(body.sandbox).tier;
+    const sandbox = body.sandbox;
+    if (
+      sandbox !== undefined &&
+      (typeof sandbox !== 'object' || sandbox === null || Array.isArray(sandbox))
+    ) {
+      throw new CpError('invalid_request', 'sandbox must be an object');
+    }
+    const requestedTier = asRecord(sandbox).tier;
     if (requestedTier !== undefined && typeof requestedTier !== 'string') {
       throw new CpError('invalid_request', 'sandbox.tier must be a string');
     }

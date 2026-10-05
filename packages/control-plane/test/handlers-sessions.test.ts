@@ -175,13 +175,13 @@ describe('POST /v1/sessions', () => {
     it('400s an undeclared tier, naming the declared ones, and creates nothing', async () => {
       const t = tiered();
       await seedCredential(t);
-      const err = await HANDLERS.createSession!(
+      const err = (await HANDLERS.createSession!(
         ctx({ principal: alice, body: { sandbox: { tier: 'gpu' } } }),
         t,
-      ).catch((e: unknown) => e as { code?: string; message?: string });
-      expect((err as { code: string }).code).toBe('invalid_request');
-      expect((err as { message: string }).message).toContain("'gpu'");
-      expect((err as { message: string }).message).toContain('container, microvm');
+      ).catch((e: unknown) => e)) as { code: string; message: string };
+      expect(err.code).toBe('invalid_request');
+      expect(err.message).toContain("'gpu'");
+      expect(err.message).toContain('container, microvm');
       expect(await t.index.get('sid-fixed')).toBeNull();
     });
 
@@ -195,14 +195,29 @@ describe('POST /v1/sessions', () => {
       ).toBe('invalid_request');
     });
 
+    it('400s a non-object sandbox (string or array)', async () => {
+      const t = tiered();
+      await seedCredential(t);
+      expect(
+        await codeOf(() =>
+          HANDLERS.createSession!(ctx({ principal: alice, body: { sandbox: 'microvm' } }), t),
+        ),
+      ).toBe('invalid_request');
+      expect(
+        await codeOf(() =>
+          HANDLERS.createSession!(ctx({ principal: alice, body: { sandbox: ['microvm'] } }), t),
+        ),
+      ).toBe('invalid_request');
+    });
+
     it('400s any tier on a deployment that declares none, and stores "" otherwise', async () => {
       await seedCredential(d);
-      const err = await HANDLERS.createSession!(
+      const err = (await HANDLERS.createSession!(
         ctx({ principal: alice, body: { sandbox: { tier: 'microvm' } } }),
         d,
-      ).catch((e: unknown) => e as { code?: string; message?: string });
-      expect((err as { code: string }).code).toBe('invalid_request');
-      expect((err as { message: string }).message).toContain('declares no sandbox tiers');
+      ).catch((e: unknown) => e)) as { code: string; message: string };
+      expect(err.code).toBe('invalid_request');
+      expect(err.message).toContain('declares no sandbox tiers');
       await HANDLERS.createSession!(ctx({ principal: alice, body: {} }), d);
       expect((await d.index.get('sid-fixed'))?.sandboxTier).toBe('');
     });
@@ -217,6 +232,37 @@ describe('POST /v1/sessions', () => {
       const page = await HANDLERS.listSessions!(ctx({ principal: alice }), t);
       const [s] = (page.body as { sessions: { sandboxTier: string | null }[] }).sessions;
       expect(s.sandboxTier).toBe('microvm');
+    });
+
+    it("a pre-P6.3 record (no sandboxTier field) shows today's default in the view", async () => {
+      const t = tiered();
+      await seedCredential(t);
+      // Create a session normally, then remove its sandboxTier field to simulate pre-P6.3
+      await HANDLERS.createSession!(ctx({ principal: alice, body: {} }), t);
+      // Overwrite the hash without sandboxTier to simulate a pre-P6.3 record
+      const rec = (await t.index.get('sid-fixed'))!;
+      await (t.index as any).redis.hSet('sh:cp:session:sid-fixed', {
+        owner: rec.owner,
+        tenant: rec.tenant,
+        createdAt: String(rec.createdAt),
+        state: rec.state,
+        poolSelector: rec.poolSelector ?? '',
+        credentialName: rec.credentialName,
+        tombstone: rec.tombstone ? '1' : '0',
+        // Note: no sandboxTier field
+      });
+      const page = await HANDLERS.listSessions!(ctx({ principal: alice }), t);
+      const [s] = (page.body as { sessions: { sandboxTier: string | null }[] }).sessions;
+      // Should show today's default, not null
+      expect(s.sandboxTier).toBe('container');
+    });
+
+    it('a session created while no tiers were declared shows null in the view', async () => {
+      await seedCredential(d);
+      await HANDLERS.createSession!(ctx({ principal: alice, body: {} }), d);
+      const page = await HANDLERS.listSessions!(ctx({ principal: alice }), d);
+      const [s] = (page.body as { sessions: { sandboxTier: string | null }[] }).sessions;
+      expect(s.sandboxTier).toBeNull();
     });
   });
 });
