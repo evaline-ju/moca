@@ -169,6 +169,16 @@ pass 'p4 tier: a container record fails P2; an attach that never reached the rel
   expect_out 'PASS=')
 pass 'p4 tier: a failed read of moca-setup is a read failure in P2, not an empty SH_P4_SANDBOX_IDS'
 
+# moca-setup's value comes from the cluster, not from setup.sh's validated input (#437 review): a
+# tampered entry is reported as an invalid id, never glob-expanded against the smoke's cwd.
+(export SMOKE_MODEL_URL=https://model.example.test SMOKE_MODEL_TOKEN=model-token-not-real \
+  MOCK_REDIS_OUT=moca_microvm_0 MOCK_P4_IDS='moca_microvm_0,*'
+  run_smoke --target ocp --tier p4
+  grep -qF "  FAIL moca-setup SH_P4_SANDBOX_IDS holds invalid id(s): '*'" "$TMP/out" ||
+    fail "a '*' in moca-setup was not reported as an invalid id: $(grep -A1 'Claim P2' "$TMP/out" | tail -1)"
+  ! grep -qE '^  FAIL not in sh:sandbox:records' "$TMP/out" || fail "a '*' in moca-setup was glob-expanded into ids")
+pass 'p4 tier: P2 splits the cluster-held id list without globbing, and refuses an invalid id'
+
 # A real model's tool_result preview is a JSON envelope, not plain text (live run, #424): P3 must
 # read the kernel out of .content[].text, not compare the whole envelope against the nodes'.
 # p4_sse FILE TEXT: an SSE turn whose bash result is TEXT, wrapped as the live run saw it.

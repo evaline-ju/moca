@@ -120,12 +120,28 @@ if [[ "$TIER" == p4 ]]; then
     { setup_read=0; ids=''; }
   keys="$(kc -n "$NS" exec redis-0 -- sh -c 'redis-cli HKEYS sh:sandbox:records' 2>/dev/null || true)"
   missing=''
-  for id in ${ids//,/ }; do grep -qx "$id" <<<"$keys" || missing="$missing $id"; done
+  bad=''
+  # The list comes from the cluster, not from setup.sh's validated input: split it without globbing
+  # and re-check each id against the relay's rule, so a tampered value is a FAIL, never a pathname
+  # expansion. ${a[@]+...}: an empty array is "unbound" under set -u in bash < 4.4.
+  if [[ -n "$ids" ]]; then
+    idre='^[A-Za-z_][A-Za-z0-9_]*$'
+    IFS=',' read -ra p4_ids <<<"$ids"
+    for id in ${p4_ids[@]+"${p4_ids[@]}"}; do
+      if [[ "$id" =~ $idre ]]; then
+        grep -qx "$id" <<<"$keys" || missing="$missing $id"
+      else
+        bad="$bad '$id'"
+      fi
+    done
+  fi
   containers="$(grep -E '^moca-sandbox-[0-9]+$' <<<"$keys" | tr '\n' ' ' || true)"
   if [[ "$setup_read" == 0 ]]; then
     ko "could not read configmap moca-setup: $(head -c 300 "$OUT/p2-setup.err" 2>/dev/null)"
   elif [[ -z "$ids" ]]; then
     ko "moca-setup holds no SH_P4_SANDBOX_IDS: this stack has no P4 tier (README \"P4 on Kubernetes\")"
+  elif [[ -n "$bad" ]]; then
+    ko "moca-setup SH_P4_SANDBOX_IDS holds invalid id(s):$bad (setup.sh writes only ids matching $idre)"
   elif [[ -n "$missing" ]]; then
     ko "not in sh:sandbox:records:$missing (have: $(tr '\n' ' ' <<<"$keys"))"
   elif [[ -n "${containers// /}" ]]; then
