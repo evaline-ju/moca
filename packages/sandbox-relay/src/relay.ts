@@ -16,9 +16,21 @@ export interface RelayTimers {
   clearTimeout: (handle: unknown) => void;
 }
 
+/**
+ * The detach mark (P6.3 spec §3.2): when a sandbox left, so the harness can measure an absent affine
+ * sandbox's grace period from the real departure. Optional: a relay without it behaves exactly as
+ * before, and the harness then starts the clock itself at the first turn that notices.
+ */
+export interface DetachMarks {
+  mark(sandboxId: string): Promise<void>;
+  clear(sandboxId: string): Promise<void>;
+}
+
 export interface RelayDeps {
   records: RecordStore;
   validateToken: (token: string | undefined, sandboxId: string) => boolean;
+  /** Detach marks; main.ts wires them to the record store's client. */
+  detach?: DetachMarks;
   /** Defaults to the global timers. */
   timers?: RelayTimers;
 }
@@ -157,6 +169,9 @@ export function createRelay(deps: RelayDeps): Relay {
           capacityMax: frame.hello.capacityMax,
           transport: 'grpc',
         };
+        // Cleared BEFORE the presence put: both go through the record store's one client, whose queue
+        // is FIFO, so the DEL reaches Redis first and no reader sees a present sandbox with a stale mark.
+        void deps.detach?.clear(id).catch((e) => console.error('detach mark clear failed', e));
         putPresence(id, session, rec);
         return;
       }
@@ -185,6 +200,9 @@ export function createRelay(deps: RelayDeps): Relay {
       }
       sessions.delete(sandboxId);
       void deps.records.remove(sandboxId).catch((e) => console.error('presence remove failed', e));
+      // After the remove, through the same client: a reader that sees the record gone and no mark
+      // yet writes its own (SET-if-absent), which this overwrite then corrects to the true time.
+      void deps.detach?.mark(sandboxId).catch((e) => console.error('detach mark write failed', e));
     };
     stream.on('end', teardown);
     stream.on('error', teardown);
