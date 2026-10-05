@@ -211,6 +211,13 @@ describe('projectResources', () => {
       { podName: null, phase: 'unknown', tenant: 't' },
     ) as Record<string, Record<string, unknown>>;
     expect(plain.placement).toEqual({ sandboxId: 'c-0', tier: null, workspaceReset: null });
+    // Self-reported, so untrusted: a garbage time is no reset we can show, never `at: NaN`.
+    const garbage = projectResources(
+      rec,
+      { sandboxId: 'c-1', workspaceResetAt: 'not-a-time', workspaceResetFrom: 'c-0' },
+      { podName: null, phase: 'unknown', tenant: 't' },
+    ) as Record<string, Record<string, unknown>>;
+    expect(garbage.placement).toEqual({ sandboxId: 'c-1', tier: null, workspaceReset: null });
   });
 
   it("shows today's default tier for a session recorded before P6.3, like the session view", () => {

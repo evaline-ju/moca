@@ -235,25 +235,24 @@ describe('POST /v1/sessions', () => {
     });
 
     it("a pre-P6.3 record (no sandboxTier field) shows today's default in the view", async () => {
-      const t = tiered();
-      await seedCredential(t);
-      // Create a session normally, then remove its sandboxTier field to simulate pre-P6.3
-      await HANDLERS.createSession!(ctx({ principal: alice, body: {} }), t);
-      // Overwrite the hash without sandboxTier to simulate a pre-P6.3 record
-      const rec = (await t.index.get('sid-fixed'))!;
-      await (t.index as any).redis.hSet('sh:cp:session:sid-fixed', {
-        owner: rec.owner,
-        tenant: rec.tenant,
-        createdAt: String(rec.createdAt),
-        state: rec.state,
-        poolSelector: rec.poolSelector ?? '',
-        credentialName: rec.credentialName,
-        tombstone: rec.tombstone ? '1' : '0',
-        // Note: no sandboxTier field
+      // Created as 'microvm', so the stored value DIFFERS from today's default: the view can show
+      // 'container' only through sessionTier's fallback for a missing field, never by echoing the
+      // record. The field is deleted from the store outright -- hSet merges, so overwriting the hash
+      // without it would leave the stored tier in place.
+      const f = fakeRedis();
+      const t = makeDeps({
+        index: new OwnershipIndex(f.redis),
+        config: { sandboxTiers: { names: ['container', 'microvm'], default: 'container' } },
       });
+      await seedCredential(t);
+      await HANDLERS.createSession!(
+        ctx({ principal: alice, body: { sandbox: { tier: 'microvm' } } }),
+        t,
+      );
+      delete f.hashes.get('sh:cp:session:sid-fixed')!.sandboxTier;
+      expect((await t.index.get('sid-fixed'))!.sandboxTier).toBeUndefined();
       const page = await HANDLERS.listSessions!(ctx({ principal: alice }), t);
       const [s] = (page.body as { sessions: { sandboxTier: string | null }[] }).sessions;
-      // Should show today's default, not null
       expect(s.sandboxTier).toBe('container');
     });
 

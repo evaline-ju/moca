@@ -51,6 +51,18 @@ export async function resolveSandbox(
 const num = (v: string | undefined): number | null =>
   v !== undefined && Number.isFinite(Number(v)) ? Number(v) : null;
 
+/**
+ * When and from where the session last lost its workspace, or null. Through `num()`, because the hash
+ * is self-reported: an unparseable time is "no reset we can show", not a NaN timestamp.
+ */
+function workspaceReset(runtime: Record<string, string>): { at: number; from: string } | null {
+  // `num('')` is 0, a real-looking epoch, so an empty value is absent, as it was before num().
+  const at = runtime.workspaceResetAt ? num(runtime.workspaceResetAt) : null;
+  return at !== null && runtime.workspaceResetFrom
+    ? { at, from: runtime.workspaceResetFrom }
+    : null;
+}
+
 export function projectResources(
   rec: SessionRecord,
   runtime: Record<string, string>,
@@ -87,10 +99,7 @@ export function projectResources(
       ? {
           sandboxId: runtime.sandboxId,
           tier: runtime.sandboxTier || null,
-          workspaceReset:
-            runtime.workspaceResetAt && runtime.workspaceResetFrom
-              ? { at: Number(runtime.workspaceResetAt), from: runtime.workspaceResetFrom }
-              : null,
+          workspaceReset: workspaceReset(runtime),
         }
       : null,
     // null, not a fabricated zero: MU1's /turn path takes no pool lease and has no queue position

@@ -71,13 +71,17 @@ const { executeTurn } = await import('../src/run-turn.js');
 describe('executeTurn onPlacement', () => {
   it('reports the placement of a leased turn whose core then throws, and still releases', async () => {
     const placements: unknown[] = [];
-    const frames: string[] = [];
+    // ONE ordered log of both callbacks, so the order between them is asserted, not just each one.
+    const log: string[] = [];
     const err = await executeTurn({
       prompt: 'hi',
       sessionId: 'sess-1',
       createIfAbsent: false,
-      onPlacement: (p) => placements.push(p),
-      onEvent: (f) => frames.push(f.type),
+      onPlacement: (p) => {
+        placements.push(p);
+        log.push('placement');
+      },
+      onEvent: (f) => log.push(f.type),
     }).catch((e: unknown) => e);
 
     expect((err as Error).message).toMatch(/^boom/);
@@ -85,8 +89,8 @@ describe('executeTurn onPlacement', () => {
     expect(placements).toEqual([
       { id: 'm-1', tier: 'microvm', workspaceReset: { from: 'm-0', reason: 'detached' } },
     ]);
-    // Reported before the workspace_reset frame went out, i.e. before anything could fail.
-    expect(frames).toEqual(['workspace_reset']);
+    // Reported before the workspace_reset frame goes out -- the first thing after the lease is taken.
+    expect(log).toEqual(['placement', 'workspace_reset']);
     expect(release).toHaveBeenCalledTimes(1);
   });
 
