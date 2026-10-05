@@ -1,6 +1,6 @@
 # P6 on Kubernetes, slice 3: sandbox tiers and session-to-sandbox affinity — Design
 
-Version: 1.0 — October 4, 2026
+Version: 1.1 — October 2026 (v1.1: corrections from the implementation plan)
 Status: Proposed
 Milestone: **P6.3**, registered in [the milestone registry](README.md). This is slice 3 of epic
 rossoctl/moca#426, issue rossoctl/moca#425.
@@ -22,6 +22,16 @@ mocactl change; the deployment paths only set configuration.
 ---
 
 ## 0. Decisions taken during design
+
+### 0.1 v1.1 corrections
+
+1. **Durations are integer seconds:** `SH_SANDBOX_AFFINITY_TTL_SECONDS` and `SH_SANDBOX_AFFINITY_GRACE_SECONDS`. The TypeScript side has no Go-duration parser, and the repo's knobs are `*_SECONDS` / `*_MS` integers read through `intEnv`.
+2. **The relay overwrites the detach mark** (plain `SET` with TTL); only the harness uses `SET NX`. Otherwise a stale mark can survive and cause early grace-period expiry.
+3. **Affinity applies only on the records path** (`remoteOn`). The pods-only path stays byte-for-byte unchanged. Pods listed alongside records (`both`) take part in affinity like records.
+4. **Placement is reported at turn end**, from the result, not at turn start: the sandbox is not known when `server.ts` reports `start`.
+5. **§10's first risk is resolved:** mocactl already parses an unknown SSE `event:` as an `UnknownFrame`. Older clients ignore `workspace_reset`. The mocactl contract test requires `KNOWN_FRAME_TYPES` to change in the same PR as the harness union.
+6. **Retiered sandboxes:** an affine sandbox present under another tier falls back immediately (reason `'retiered'`). §4 step 4 covered only "absent".
+7. **`SandboxAffinityPendingError` extends `SandboxPoolSaturatedError`,** so the three leaf paths' existing `instanceof SandboxPoolSaturatedError` checks classify it `saturated` (retryable) with no edit. Its own `name` joins knative-server's `NO_CAPACITY` set.
 
 | Question                          | Decision                                                                                                                                                                                                                                                                                                                                       |
 | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -89,11 +99,11 @@ send copies.
 
 - `sh:sandbox:records` keeps its shape; `labels` are now populated.
 - **New key `sh:sandbox:detached:<sandboxId>`** = epoch milliseconds, with a TTL equal to
-  `SH_SANDBOX_AFFINITY_TTL` (§3.5). `teardown` writes it, **only if absent** (`SET NX`), after the
+  `SH_SANDBOX_AFFINITY_TTL_SECONDS` (§3.5). `teardown` writes it with a plain `SET` and TTL, after the
   record is removed. A successful Hello deletes it, before the presence put.
 - The detach write and delete are best effort, like the presence remove: a failure is logged and
   changes nothing else. A missing key is handled by the selector (§4, step 4).
-- The relay reads `SH_SANDBOX_AFFINITY_TTL` for the TTL. It has no other tier logic: it stays a
+- The relay reads `SH_SANDBOX_AFFINITY_TTL_SECONDS` for the TTL. It has no other tier logic: it stays a
   bridge keyed by `sandboxId`.
 
 ### 3.3 Control plane (`packages/control-plane`)
@@ -127,7 +137,7 @@ tiers`), and `''` is stored.
 ### 3.5 Affinity (new, harness)
 
 - **Key `sh:sandbox:affinity:<sessionId>`** = JSON `{ "sandboxId": string, "tier": string }`, with
-  TTL `SH_SANDBOX_AFFINITY_TTL` (Go-style duration, default `24h`), refreshed on every lease.
+  TTL `SH_SANDBOX_AFFINITY_TTL_SECONDS` (integer seconds, default `86400`), refreshed on every lease.
 - **The TTL must be at least `SH_WORKSPACE_IDLE`** (P4's idle reclaim, default 30 min). Affinity
   outliving the workspace is harmless: the session returns to its sandbox and finds an empty
   workspace, which is what a fallback gives it anyway. Affinity expiring first loses a workspace
@@ -154,7 +164,9 @@ The inputs gain `opts.tier?: string`. The no-selector path, the pods path, the l
    - **Missing:** write it now with `SET NX` (`setDetachedIfAbsent`). This starts the grace clock at
      the first turn that noticed the absence. It covers a relay that restarted, and so never wrote
      the key, while the host was gone for good. Then treat the sandbox as just detached.
-   - **Detached for less than `SH_SANDBOX_AFFINITY_GRACE`** (Go-style duration, default `60s`): throw
+   - **Present under a different tier** (reason `'retiered'`): continue to step 5 immediately, carrying
+     `workspaceReset = { from: <id>, reason: 'retiered' }`.
+   - **Detached for less than `SH_SANDBOX_AFFINITY_GRACE_SECONDS`** (integer seconds, default `60`): throw
      the new **`SandboxAffinityPendingError`** (503, retryable), naming the sandbox and the time left.
    - **Detached for longer:** continue to step 5, carrying
      `workspaceReset = { from: <id>, reason: 'detached' }`.
@@ -198,25 +210,25 @@ stays retryable in `classifyOutcome`, beside `SandboxPoolSaturatedError` and `Sa
     the default preselected.
   - Session listings and session info show the tier.
 - **Placement.** The data plane's runtime report (`runtimeFieldsForTurn`, `reportRuntime`) gains
-  `sandboxId` and `sandboxTier` at turn start, from the lease actually taken, and
-  `workspaceResetAt` / `workspaceResetFrom` after a fallback. `projectResources` exposes them under
+  `sandboxId` and `sandboxTier` at turn end, from the lease actually taken, and
+  `workspaceResetAt` / `workspaceResetFrom` and `workspaceResetReason` after a fallback. `projectResources` exposes them under
   `sandbox`, so the resources view shows where the session runs and when it last lost its workspace.
 - **The turn itself.** After a fallback, a streamed turn emits a new frame before any other:
-  `{ type: 'workspace_reset'; sessionId; from; tier }` (`harness/src/turn-stream.ts`,
-  `TurnStreamFrame`). A JSON turn result gains `workspaceReset?: { from, tier }`. mocactl prints it as
+  `{ type: 'workspace_reset'; sessionId; from; tier; reason }` (`harness/src/turn-stream.ts`,
+  `TurnStreamFrame`). A JSON turn result gains `workspaceReset?: { from, tier, reason }`. mocactl prints it as
   a notice. Clients that do not know the frame type must ignore it (§10).
 - **Logs.** One structured line for each non-trivial decision: affinity pending, fallback, an
   unlabelled record excluded, an affinity write failed. No new metrics in this slice.
 
 ## 7. Configuration and deployment paths
 
-| Variable                    | Read by                    | Default                 | Meaning                                                              |
-| --------------------------- | -------------------------- | ----------------------- | -------------------------------------------------------------------- |
-| `SH_SANDBOX_TIERS`          | control plane, supervisor  | unset                   | Comma-separated tier names. Unset: no tiers, no filtering.           |
-| `SH_SANDBOX_DEFAULT_TIER`   | control plane, supervisor  | unset                   | Required with more than one tier; must be one of them.               |
-| `SH_SANDBOX_AFFINITY_TTL`   | supervisor, relay          | `24h`                   | Affinity and detach-key TTL. Keep ≥ `SH_WORKSPACE_IDLE`.             |
-| `SH_SANDBOX_AFFINITY_GRACE` | supervisor                 | `60s`                   | How long an absent affine sandbox is waited for before the fallback. |
-| `SANDBOX_TIER`              | `worker`, `microvm-worker` | `container` / `microvm` | The worker's `moca.dev/tier` label. Empty: no label.                 |
+| Variable                            | Read by                    | Default                 | Meaning                                                                      |
+| ----------------------------------- | -------------------------- | ----------------------- | ---------------------------------------------------------------------------- |
+| `SH_SANDBOX_TIERS`                  | control plane, supervisor  | unset                   | Comma-separated tier names. Unset: no tiers, no filtering.                   |
+| `SH_SANDBOX_DEFAULT_TIER`           | control plane, supervisor  | unset                   | Required with more than one tier; must be one of them.                       |
+| `SH_SANDBOX_AFFINITY_TTL_SECONDS`   | supervisor, relay          | `86400`                 | Affinity and detach-key TTL in seconds. Keep ≥ `SH_WORKSPACE_IDLE`.          |
+| `SH_SANDBOX_AFFINITY_GRACE_SECONDS` | supervisor                 | `60`                    | How long an absent affine sandbox is waited for before fallback, in seconds. |
+| `SANDBOX_TIER`                      | `worker`, `microvm-worker` | `container` / `microvm` | The worker's `moca.dev/tier` label. Empty: no label.                         |
 
 - **`deploy/vm`, `deploy/compose`:** the env templates gain the variables, unset by default. A
   stack that sets nothing behaves as before, plus affinity.
@@ -270,9 +282,8 @@ store would make the grace period and the fallback lossless, and nothing else.
 
 ## 10. Risks and things to verify early
 
-- **Unknown SSE frame types in older clients.** Verify that the shipped mocactl ignores an unknown
-  `event:` type. If it does not, send the reset only as a runtime field and in the JSON result, and
-  gate the frame on a client capability.
+- ~~**Unknown SSE frame types in older clients.** Verify that the shipped mocactl ignores an unknown
+  `event:` type.~~ **Resolved (v1.1):** mocactl already parses an unknown `event:` as `UnknownFrame` and ignores it. Older clients will ignore `workspace_reset`.
 - **Pods in `both` discovery.** The pods path is the Knative-era inventory; treating pods as the
   default tier is a compatibility choice. Confirm no live deployment mixes pods with tiered records.
 - **The grace default.** 60 s must exceed the worker's reattach backoff after a relay restart.
