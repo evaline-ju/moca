@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Live smoke for P6 on Kubernetes (#423, spec §9.4), against a stack deploy/k8s/setup.sh brought up.
+# Live smoke for P6 on Kubernetes (#423, spec §9.4; P4 tier #424), against a stack deploy/k8s/setup.sh
+# brought up.
 #
-#   K8S_LIVE_SMOKE=1 deploy/k8s/smoke.sh [--target kind-ci|kind|ocp]
+#   K8S_LIVE_SMOKE=1 deploy/k8s/smoke.sh [--target kind-ci|kind|ocp] [--tier container|p4]
 #
 # kind-ci (the default) drives turns through the in-pod mock model. Any other target needs a real
 # model credential to store as the smoke user's:
@@ -10,7 +11,13 @@
 #   SMOKE_MODEL_KIND   bearer (default; a gateway token) or api-key (a raw Anthropic key)
 # The prompts spell their commands out in words, so a real model runs the same claims; the mock
 # keys on the K8S-SMOKE-* markers alone. Reaches everything by port-forward, on every target: the
-# OCP Route path is exercised by the demo run (README "Demo on OpenShift"), not here.
+# OCP Route path is exercised by the demo run (README "Demo on OpenShift"), not here -- except the
+# relay Route, which --tier p4 probes directly (claim P6).
+#
+# --tier p4 (ocp only; docs/specs/2026-10-04-p6-on-kubernetes-slice2-design.md §6): a stack whose
+# sandboxes are P4 microVM hosts outside the cluster (SH_P4_SANDBOX_IDS). Claims 1, 5 and 6 are the
+# container tier's; P2-P4 replace 2-4; P6 probes the relay Route; P7 (only with SMOKE_P4_ADD_ID=<a
+# scratch id>) re-runs setup.sh to add that id and back, and proves the relay was not restarted.
 set -euo pipefail
 
 if [[ "${K8S_LIVE_SMOKE:-}" != 1 ]]; then
@@ -19,16 +26,24 @@ if [[ "${K8S_LIVE_SMOKE:-}" != 1 ]]; then
 fi
 
 TARGET=kind-ci
+TIER=container
 # A value flag given last would make `shift 2` fail under set -e with no message (setup.sh's
 # need_value guards the same case).
 need_value() { [[ $# -ge 2 ]] || { echo "smoke.sh: $1 needs a value" >&2; exit 2; }; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
   --target) need_value "$@"; TARGET="$2"; shift 2 ;;
+  --tier) need_value "$@"; TIER="$2"; shift 2 ;;
   *) echo "smoke.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done
 case "$TARGET" in kind | kind-ci | ocp) ;; *) echo "smoke.sh: --target must be kind, kind-ci or ocp" >&2; exit 2 ;; esac
+case "$TIER" in container | p4) ;; *) echo "smoke.sh: --tier must be container or p4" >&2; exit 2 ;; esac
+if [[ "$TIER" == p4 ]]; then
+  [[ "$TARGET" == ocp ]] || { echo "smoke.sh: --tier p4 needs --target ocp (P4 hosts reach the relay through an OpenShift Route)" >&2; exit 2; }
+  [[ -z "${SMOKE_P4_ADD_ID:-}" || "$SMOKE_P4_ADD_ID" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] ||
+    { echo "smoke.sh: SMOKE_P4_ADD_ID='$SMOKE_P4_ADD_ID' must match ^[A-Za-z_][A-Za-z0-9_]*\$ (a P4 sandbox id)" >&2; exit 2; }
+fi
 kc() { if [[ "$TARGET" == kind* ]]; then kubectl --context kind-moca "$@"; else kubectl "$@"; fi; }
 
 NS=moca
@@ -57,6 +72,7 @@ ko() { FAIL=$((FAIL + 1)); echo "  FAIL ${1:-}"; }
 claim() { printf '\n--- Claim %s: %s ---\n' "$1" "$2"; }
 wait_for() { local n="$1"; shift; for _ in $(seq "$n"); do "$@" && return 0; sleep 1; done; return 1; }
 note() { echo "  note $1"; }
+summary() { printf '\nPASS=%s FAIL=%s\n' "$PASS" "$FAIL"; [[ "$FAIL" == 0 ]]; }
 
 if [[ "$TARGET" == kind-ci ]]; then
   : "${SMOKE_MODEL_URL:=http://127.0.0.1:18099}" "${SMOKE_MODEL_TOKEN:=mock-not-a-secret}"
@@ -69,6 +85,12 @@ HARNESS=http://127.0.0.1:18080
 ADMIN=http://127.0.0.1:18081
 CP=http://127.0.0.1:18090
 tool_out() { sed -n 's/^data: //p' "$1" | jq -r 'select(.type == "tool_result" and (.isError | not)) | .preview' 2>/dev/null; }
+# tool_text: a real model's preview is a JSON envelope, {"content":[{"type":"text","text":"..."}]},
+# whose text tool_out leaves JSON-escaped on one line; decode it. A plain preview passes as is.
+tool_text() { jq -Rr '(fromjson? | objects | .content[]? | select(.type? == "text") | .text) // .' 2>/dev/null; }
+# first_line: the first non-blank line, trimmed. awk reads to the end: an early exit (head, sed q)
+# would SIGPIPE the jq feeding it, and pipefail would turn that into a failure.
+first_line() { awk '!done && NF { sub(/^[ \t\r]+/, ""); sub(/[ \t\r]+$/, ""); print; done = 1 }'; }
 # `kc ... &` would background a subshell running kc, so $! -- and the kill -- would hit the
 # subshell and orphan kubectl, which then kept the ports bound across forward() and after exit.
 # exec makes the background job kubectl itself.
@@ -90,13 +112,52 @@ claim 1 "the supervisor is ready with every worker healthy"
 body="$(curl -s "$ADMIN/readyz" || true)"
 if jq -e '.ready == true and .workers > 0 and .healthy == .workers' >/dev/null 2>&1 <<<"$body"; then ok "$body"; else ko "readyz: $body"; fi
 
-claim 2 "every sandbox replica is attached through the relay"
-replicas="$(kc -n "$SBX" get statefulset moca-sandbox -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
-[[ -n "$replicas" ]] || { ko "could not read moca-sandbox statefulset replicas"; replicas=0; }
-keys="$(kc -n "$NS" exec redis-0 -- sh -c 'redis-cli HKEYS sh:sandbox:records' 2>/dev/null || true)"
-missing=''
-for i in $(seq 0 $((replicas - 1))); do grep -qx "moca-sandbox-$i" <<<"$keys" || missing="$missing moca-sandbox-$i"; done
-if [[ -z "$missing" ]]; then ok "$replicas attached"; else ko "not in sh:sandbox:records:$missing (have: $(tr '\n' ' ' <<<"$keys"))"; fi
+if [[ "$TIER" == p4 ]]; then
+  claim P2 "every P4 sandbox in SH_P4_SANDBOX_IDS is attached through the relay, and no container sandbox is"
+  # A failed read is not an empty value: only a readable moca-setup can say "no P4 tier".
+  setup_read=1
+  ids="$(kc -n "$NS" get configmap moca-setup -o jsonpath='{.data.SH_P4_SANDBOX_IDS}' 2>"$OUT/p2-setup.err")" ||
+    { setup_read=0; ids=''; }
+  keys="$(kc -n "$NS" exec redis-0 -- sh -c 'redis-cli HKEYS sh:sandbox:records' 2>/dev/null || true)"
+  missing=''
+  bad=''
+  # The list comes from the cluster, not from setup.sh's validated input: split it without globbing
+  # and re-check each id against the relay's rule, so a tampered value is a FAIL, never a pathname
+  # expansion. ${a[@]+...}: an empty array is "unbound" under set -u in bash < 4.4.
+  if [[ -n "$ids" ]]; then
+    idre='^[A-Za-z_][A-Za-z0-9_]*$'
+    IFS=',' read -ra p4_ids <<<"$ids"
+    for id in ${p4_ids[@]+"${p4_ids[@]}"}; do
+      if [[ "$id" =~ $idre ]]; then
+        grep -qx "$id" <<<"$keys" || missing="$missing $id"
+      else
+        bad="$bad '$id'"
+      fi
+    done
+  fi
+  containers="$(grep -E '^moca-sandbox-[0-9]+$' <<<"$keys" | tr '\n' ' ' || true)"
+  if [[ "$setup_read" == 0 ]]; then
+    ko "could not read configmap moca-setup: $(head -c 300 "$OUT/p2-setup.err" 2>/dev/null)"
+  elif [[ -z "$ids" ]]; then
+    ko "moca-setup holds no SH_P4_SANDBOX_IDS: this stack has no P4 tier (README \"P4 on Kubernetes\")"
+  elif [[ -n "$bad" ]]; then
+    ko "moca-setup SH_P4_SANDBOX_IDS holds invalid id(s):$bad (setup.sh writes only ids matching $idre)"
+  elif [[ -n "$missing" ]]; then
+    ko "not in sh:sandbox:records:$missing (have: $(tr '\n' ' ' <<<"$keys"))"
+  elif [[ -n "${containers// /}" ]]; then
+    ko "container sandboxes attached alongside P4: $containers"
+  else
+    ok "attached: $ids"
+  fi
+else
+  claim 2 "every sandbox replica is attached through the relay"
+  replicas="$(kc -n "$SBX" get statefulset moca-sandbox -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+  [[ -n "$replicas" ]] || { ko "could not read moca-sandbox statefulset replicas"; replicas=0; }
+  keys="$(kc -n "$NS" exec redis-0 -- sh -c 'redis-cli HKEYS sh:sandbox:records' 2>/dev/null || true)"
+  missing=''
+  for i in $(seq 0 $((replicas - 1))); do grep -qx "moca-sandbox-$i" <<<"$keys" || missing="$missing moca-sandbox-$i"; done
+  if [[ -z "$missing" ]]; then ok "$replicas attached"; else ko "not in sh:sandbox:records:$missing (have: $(tr '\n' ' ' <<<"$keys"))"; fi
+fi
 
 claim 5 "the control plane is ready and advertises the configured harness URL"
 want="$(kc -n "$NS" get configmap moca-settings -o jsonpath='{.data.SH_PUBLIC_HARNESS_URL}' 2>/dev/null || true)"
@@ -151,22 +212,155 @@ has_session() {
 }
 ask() { printf 'Use the bash tool to run exactly this command, then reply with its output: %s  [%s]' "$2" "$1"; }
 
-claim 3 "an authenticated /v1/turn runs a command in a sandbox and streams over SSE"
-SID=''
-if new_session && turn write "$SID" "$(ask K8S-SMOKE-WRITE 'uname -s; echo k8s-proof | tee proof.txt; pwd')" &&
-  grep -q 'k8s-proof' <(tool_out "$OUT/write.sse") && grep -q 'Linux' <(tool_out "$OUT/write.sse"); then
-  ok "session $SID"
-else
-  ko "write turn: $(head -c 600 "$OUT/write.sse" 2>/dev/null)"
-fi
-FIRST_SID="$SID"
+if [[ "$TIER" == p4 ]]; then
+  claim P3 "an authenticated turn runs in a P4 microVM: a kernel that is no node's, and a file written"
+  SID=''
+  if new_session && turn p4write "$SID" "$(ask K8S-SMOKE-P4-WRITE 'uname -r; echo p4-proof | tee proof.txt')" &&
+    grep -q p4-proof <(tool_out "$OUT/p4write.sse"); then
+    guest="$(tool_out "$OUT/p4write.sse" | tool_text | first_line || true)"
+    raw="$(tool_out "$OUT/p4write.sse" | tr '\n' ' ' || true)"
+    nodes="$(kc get nodes -o jsonpath='{.items[*].status.nodeInfo.kernelVersion}' 2>/dev/null || true)"
+    kre='^[0-9]+\.[0-9]+'
+    if [[ -z "$nodes" ]]; then
+      ko "could not read the nodes' kernels (kubectl get nodes)"
+    elif ! [[ "$guest" =~ $kre ]]; then
+      ko "the turn's output '$guest' is not a kernel release (preview: ${raw:0:300})"
+    elif [[ " $nodes " == *" $guest "* ]]; then
+      ko "the turn's kernel '$guest' is a node's ($nodes): it did not run in a microVM"
+    else
+      ok "session $SID ran on kernel $guest (nodes run $nodes)"
+    fi
+  else
+    ko "p4 write turn: $(head -c 600 "$OUT/p4write.sse" 2>/dev/null)"
+  fi
+  FIRST_SID="$SID"
 
-claim 4 "the session persists in Redis and takes a second turn"
-if [[ -n "$FIRST_SID" ]] && turn again "$FIRST_SID" "$(ask K8S-SMOKE-AGAIN 'echo second-turn')" && grep -q second-turn <(tool_out "$OUT/again.sse") &&
-  has_session "$FIRST_SID"; then
-  ok
+  claim P4 "a second turn in the same session reads the file back: the microVM workspace persisted"
+  if [[ -n "$FIRST_SID" ]] && turn p4read "$FIRST_SID" "$(ask K8S-SMOKE-P4-READ 'cat proof.txt')" &&
+    grep -q p4-proof <(tool_out "$OUT/p4read.sse"); then
+    ok
+  else
+    ko "p4 read turn: $(head -c 600 "$OUT/p4read.sse" 2>/dev/null)"
+  fi
 else
-  ko "second turn or session:$FIRST_SID key missing"
+  claim 3 "an authenticated /v1/turn runs a command in a sandbox and streams over SSE"
+  SID=''
+  if new_session && turn write "$SID" "$(ask K8S-SMOKE-WRITE 'uname -s; echo k8s-proof | tee proof.txt; pwd')" &&
+    grep -q 'k8s-proof' <(tool_out "$OUT/write.sse") && grep -q 'Linux' <(tool_out "$OUT/write.sse"); then
+    ok "session $SID"
+  else
+    ko "write turn: $(head -c 600 "$OUT/write.sse" 2>/dev/null)"
+  fi
+  FIRST_SID="$SID"
+
+  claim 4 "the session persists in Redis and takes a second turn"
+  if [[ -n "$FIRST_SID" ]] && turn again "$FIRST_SID" "$(ask K8S-SMOKE-AGAIN 'echo second-turn')" && grep -q second-turn <(tool_out "$OUT/again.sse") &&
+    has_session "$FIRST_SID"; then
+    ok
+  else
+    ko "second turn or session:$FIRST_SID key missing"
+  fi
+fi
+
+if [[ "$TIER" == p4 ]]; then
+  # Runs in the control-plane pod (its egress allows 443 anywhere), from the relay package's directory:
+  # that is where the image's tsx, @grpc/grpc-js and @moca/k8s-sandbox resolve. The exec token and
+  # the relay certificate arrive on stdin. A refused attach is ENDED by the relay (relay.ts: status
+  # OK, nothing parked), so 0 proves the Route reached the attach handler; a TLS/ALPN/dial failure is
+  # 14, an accepted attach stays open (-1).
+  ROUTE_PROBE="$(cat <<'JS'
+import { readFileSync } from 'node:fs';
+import { X509Certificate, randomBytes } from 'node:crypto';
+import { credentials, makeGenericClientConstructor, Metadata } from '@grpc/grpc-js';
+import { SandboxWorkerService, SandboxExecClient, WorkerFrame, ExecRequest } from '@moca/k8s-sandbox';
+const { exec, ca } = JSON.parse(readFileSync(0, 'utf8'));
+const addr = process.env.P4_RELAY_ADDR;
+const cert = new X509Certificate(ca);
+// setup.sh's self-signed certificate is its own CA; an operator's chains to the system roots.
+// createSsl(null) trusts Node's bundled roots, while the Go worker trusts the host's system pool:
+// an operator certificate from an internal CA can pass on the host but fail P6, or the reverse.
+const creds = credentials.createSsl(cert.checkIssued(cert) ? Buffer.from(ca) : null);
+const bearer = (t) => { const md = new Metadata(); md.set('authorization', `Bearer ${t}`); return md; };
+const codeOf = (call) => new Promise((resolve) => {
+  const timer = setTimeout(() => resolve(-1), 15000);
+  const done = (c) => { clearTimeout(timer); resolve(c); };
+  call.on('data', () => {});
+  call.on('error', (e) => done(e.code));
+  call.on('status', (s) => done(s.code));
+});
+const Worker = makeGenericClientConstructor(SandboxWorkerService, 'SandboxWorker');
+const w = new Worker(addr, creds);
+const a = w.attach(bearer(`smoke-wrong-${randomBytes(16).toString('hex')}`));
+a.write(WorkerFrame.fromPartial({ hello: { sandboxId: 'smoke_probe', capacityMax: 1 } }));
+const attach = await codeOf(a);
+a.cancel(); w.close();
+const x = new SandboxExecClient(addr, creds);
+const e = x.exec(ExecRequest.fromPartial({}), bearer(exec));
+const execCode = await codeOf(e);
+e.cancel(); x.close();
+process.stdout.write(`attach=${attach} exec=${execCode}\n`);
+process.exit(0);
+JS
+)"
+  claim P6 "through the relay Route: a wrong attach token is refused at the relay, and SandboxExec is not served even with the exec token"
+  relay_host="$(kc -n "$NS" get route moca-relay -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+  if [[ -z "$relay_host" ]]; then
+    ko "no Route moca-relay (setup.sh renders it only with SH_P4_SANDBOX_IDS)"
+  else
+    probe_out="$({ kc -n "$NS" get secret moca-relay -o json && kc -n "$NS" get secret moca-relay-tls -o json; } |
+      jq -cs '{exec: (.[0].data.MOCA_RELAY_EXEC_TOKEN | @base64d), ca: (.[1].data["tls.crt"] | @base64d)}' |
+      kc -n "$NS" exec -i deploy/moca-control-plane -c control-plane -- sh -c \
+        'cd /app/packages/sandbox-relay && P4_RELAY_ADDR="$1" exec node --import tsx --input-type=module -e "$0"' \
+        "$ROUTE_PROBE" "$relay_host:443" 2>"$OUT/probe.err" || true)"
+    if [[ "$probe_out" =~ ^attach=0\ exec=(12|14)$ ]]; then
+      ok "$relay_host:443 $probe_out (attach refused at the relay; exec UNIMPLEMENTED/UNAVAILABLE)"
+    else
+      ko "probe: '$probe_out' (want attach=0 and exec 12 or 14): $(head -c 400 "$OUT/probe.err" 2>/dev/null)"
+    fi
+  fi
+
+  claim P7 "adding a P4 host reloads no relay: same pod, same start time, no restart"
+  if [[ -z "${SMOKE_P4_ADD_ID:-}" ]]; then
+    note "skipped: set SMOKE_P4_ADD_ID=<a scratch id> to run it (it re-runs setup.sh to add the id, then to remove it)"
+  else
+    relay_state() {
+      kc -n "$NS" get pods -l app=sandbox-relay -o json | jq -r '[.items[] | select(.metadata.deletionTimestamp == null) |
+        "\(.metadata.name) \(.status.startTime) \([.status.containerStatuses[]?.restartCount] | add // 0)"] | join(",")'
+    }
+    token_seen() { kc -n "$NS" exec deploy/sandbox-relay -c sandbox-relay -- sh -c "test -s /run/relay-tokens/$1" >/dev/null 2>&1; }
+    setup_sh="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd || true)/setup.sh"
+    ids="$(kc -n "$NS" get configmap moca-setup -o jsonpath='{.data.SH_P4_SANDBOX_IDS}' 2>/dev/null || true)"
+    before="$(relay_state 2>/dev/null || true)"
+    if [[ -z "$ids" || -z "$before" ]]; then
+      ko "could not read SH_P4_SANDBOX_IDS ('$ids') or the relay pod ('$before')"
+    elif [[ ",$ids," == *",$SMOKE_P4_ADD_ID,"* ]]; then
+      ko "SMOKE_P4_ADD_ID=$SMOKE_P4_ADD_ID is already a P4 host: pick a scratch id"
+    else
+      # setup.sh writes the sticky moca-setup early, so even a failed add can leave the scratch id
+      # behind (sticky, with a token and a bundle): the restore runs whenever the add was attempted.
+      if ! SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS="$ids,$SMOKE_P4_ADD_ID" bash "$setup_sh" --target ocp >"$OUT/p7-add.log" 2>&1; then
+        ko "setup.sh adding $SMOKE_P4_ADD_ID failed (log kept: $OUT/p7-add.log)"
+      else
+        t0="$SECONDS"
+        if wait_for 180 token_seen "$SMOKE_P4_ADD_ID"; then
+          seen=$((SECONDS - t0))
+          after="$(relay_state 2>/dev/null || true)"
+          if [[ "$after" == "$before" ]]; then
+            ok "$SMOKE_P4_ADD_ID's token reached the relay's directory in ${seen}s; relay pod unchanged ($after)"
+          else
+            ko "the relay pod changed: before '$before', after '$after'"
+          fi
+        else
+          ko "$SMOKE_P4_ADD_ID's token never appeared in the relay's /run/relay-tokens within 180s"
+        fi
+      fi
+      # Put the list back: revokes the scratch id and deletes its bundle.
+      SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS="$ids" bash "$setup_sh" --target ocp >"$OUT/p7-restore.log" 2>&1 ||
+        ko "setup.sh restoring SH_P4_SANDBOX_IDS=$ids failed (log kept: $OUT/p7-restore.log): re-run it by hand"
+    fi
+  fi
+  summary
+  exit
 fi
 
 claim 7 "a sandbox reaches the relay's attach port and nothing else in the cluster"
@@ -238,5 +432,4 @@ if ! restarts="$(kc get pods -n "$NS" -o json | jq '[.items[].status | (.contain
   ko "could not read pod restart counts"
 elif [[ "$restarts" == 0 && "$restarts_sbx" == 0 ]]; then ok; else ko "restartCount moca=$restarts moca-sandbox=$restarts_sbx (kubectl describe pod for OOMKilled)"; fi
 
-printf '\nPASS=%s FAIL=%s\n' "$PASS" "$FAIL"
-[[ "$FAIL" == 0 ]]
+summary

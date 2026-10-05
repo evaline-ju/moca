@@ -91,7 +91,12 @@ case "${1-} ${2-}" in
   if [[ " $* " == *" -o name "* ]]; then echo "$2/$3"; else cat "$f"; fi ;;
 "apply --server-side")
   obj="$(cat)"
-  obj="$(jq 'if .stringData then .data = ((.data // {}) + (.stringData | map_values(@base64))) | del(.stringData) else . end' <<<"$obj")"
+  # With MOCK_SSA_PRUNE=1, simulate server-side apply pruning: data becomes exactly the applied stringData keys
+  if [[ -n "${MOCK_SSA_PRUNE-}" && "$(jq -r '.kind' <<<"$obj")" == Secret && -n "$(jq -r '.stringData // empty' <<<"$obj")" ]]; then
+    obj="$(jq '.data = (.stringData | map_values(@base64)) | del(.stringData)' <<<"$obj")"
+  else
+    obj="$(jq 'if .stringData then .data = ((.data // {}) + (.stringData | map_values(@base64))) | del(.stringData) else . end' <<<"$obj")"
+  fi
   printf '%s\n' "$obj" >"$(store "$(jq -r .metadata.namespace <<<"$obj")" "$(jq -r .kind <<<"$obj")" "$(jq -r .metadata.name <<<"$obj")")" ;;
 "apply -f") : ;; # a file path (namespaces.yaml); stdin applies all go through --server-side
 "apply -k")
@@ -101,7 +106,21 @@ case "${1-} ${2-}" in
   jq -n --arg n "$3" --arg ns "$ns" '{apiVersion: "v1", kind: "ConfigMap", metadata: {name: $n, namespace: $ns}, data: {"mock-anthropic.mjs": "x"}}' ;;
 "create secret")
   if [[ -n "${MOCK_TLS_CREATE_FAIL-}" ]]; then echo 'error: failed to load key pair' >&2; exit 1; fi
-  jq -n --arg n "$4" --arg ns "$ns" '{apiVersion: "v1", kind: "Secret", type: "kubernetes.io/tls", metadata: {name: $n, namespace: $ns}, data: {"tls.crt": "Y3J0", "tls.key": "a2V5"}}' ;;
+  crt=''
+  for a in "$@"; do [[ "$a" != --cert=* ]] || crt="$(base64 <"${a#--cert=}" | tr -d '\n')"; done
+  jq -n --arg n "$4" --arg ns "$ns" --arg c "${crt:-Y3J0}" '{apiVersion: "v1", kind: "Secret", type: "kubernetes.io/tls", metadata: {name: $n, namespace: $ns}, data: {"tls.crt": $c, "tls.key": "a2V5"}}' ;;
+"patch secret")
+  f="$(store "$ns" Secret "$3")"
+  [[ -f "$f" ]] || { echo "Error from server (NotFound): secrets \"$3\" not found" >&2; exit 1; }
+  p=''
+  while [[ $# -gt 0 ]]; do [[ "$1" == -p ]] && { p="$2"; break; }; shift; done
+  # Reject JSON Patch (array) bodies; only merge patch (object with data) is allowed.
+  if jq -e '. | type == "array"' <<<"$p" >/dev/null 2>&1; then
+    echo "error: the server does not support JSON Patch on this Secret; use merge patch" >&2
+    exit 1
+  fi
+  jq --argjson p "$p" '.data = ((.data // {}) + ($p.data // {}) | with_entries(select(.value != null)))' "$f" >"$f.new"
+  mv "$f.new" "$f" ;;
 "run moca-genkeys")
   hex() { od -An -tx1 -N"$1" /dev/urandom | tr -d ' \n'; }
   if [[ -n "${MOCK_GENKEYS_BAD-}" ]]; then
@@ -513,5 +532,215 @@ reset_state
 expect_out 'could not list StorageClasses'
 ! grep -q 'no default StorageClass' "$TMP/out" || fail 'an unreadable StorageClass list was reported as no default'
 pass 'an unreadable StorageClass list is reported as such, and the advisory check does not abort'
+
+echo "== P6.2 Task 5: P4 inputs"
+p4_stored() { jq -r '.data.SH_P4_SANDBOX_IDS // empty' "$MOCK_STATE/moca__ConfigMap__moca-setup.json"; }
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS=' moca_microvm_0 , moca_microvm_1,'; expect_ok --target ocp)
+[[ "$(p4_stored)" == moca_microvm_0,moca_microvm_1 ]] || fail "spaces and a trailing comma were not normalised: '$(p4_stored)'"
+pass 'SH_P4_SANDBOX_IDS: spaces trimmed, empty entries dropped, stored comma-joined (Review Focus 1)'
+
+(unset SH_P4_SANDBOX_IDS; export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp)
+[[ "$(p4_stored)" == moca_microvm_0,moca_microvm_1 ]] || fail 'a re-run without SH_P4_SANDBOX_IDS dropped the stored IDs'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_P4_SANDBOX_IDS=; expect_ok --target ocp)
+[[ -z "$(p4_stored)" ]] || fail 'SH_P4_SANDBOX_IDS= (explicitly empty) did not clear the IDs'
+pass 'SH_P4_SANDBOX_IDS is sticky, and an explicitly empty value clears it'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS=moca-microvm-0; expect_fail --target ocp)
+expect_out "'moca-microvm-0' must match"
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS=a,b,a; expect_fail --target ocp)
+expect_out "lists 'a' twice"
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS='*'; expect_fail --target ocp)
+expect_out "'*' must match"
+# The relay refuses the ID DIR before any lookup (spec §2.1): such a host could never attach.
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS=moca_microvm_0,DIR; expect_fail --target ocp)
+expect_out "'DIR' is reserved"
+expect_out 'SH_RELAY_TOKEN_DIR'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS=a; expect_fail --target kind --skip-build)
+expect_out 'needs --target ocp'
+! grep -q '^kubectl' "$MOCK_LOG" || fail 'a refused ID list still reached the cluster'
+pass 'refused: an ID with a dash, a duplicate, glob char, the reserved DIR, P4 IDs on kind -- before anything touches a cluster'
+
+# The live switch from a slice-1 stack: moca-setup already holds SH_SANDBOX_COUNT=2.
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp)
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_P4_SANDBOX_IDS=moca_microvm_0; expect_fail --target ocp)
+expect_out 'SH_SANDBOX_COUNT=2'
+expect_out 'Re-run with SH_SANDBOX_COUNT=0'
+[[ -z "$(p4_stored)" ]] || fail 'a refused run still stored the P4 IDs'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS=moca_microvm_0; expect_ok --target ocp)
+[[ "$(p4_stored)" == moca_microvm_0 ]] || fail 'the switch with SH_SANDBOX_COUNT=0 did not store the ID'
+pass 'one tier per stack: the stored count of 2 refuses P4 IDs, names the fix, and stores nothing (Review Focus 2)'
+
+reset_state
+expect_fail --target kind --relay-tls-cert "$TMP/c.pem" --relay-tls-key "$TMP/k.pem"
+expect_out 'apply to --target ocp only'
+expect_fail --target ocp --relay-tls-cert "$TMP/c.pem"
+expect_out 'go together'
+expect_fail --target ocp --relay-tls-cert
+expect_out '--relay-tls-cert needs a value'
+expect_ok --help
+expect_out 'SH_P4_SANDBOX_IDS'
+expect_out '--relay-tls-cert FILE --relay-tls-key FILE'
+pass '--relay-tls-cert/--relay-tls-key: ocp only, a pair, a value each; --help lists them'
+
+# Bash 3.2 compatibility: normalize_p4_ids must work on bash < 4.4 with set -u
+# The bug: unset empty array with "set -u" causes "parts[@]: unbound variable".
+# Tests the exact call paths: empty input, all-comma input, mixed spaces/commas, and real parse_args path.
+if [[ -x /bin/bash ]]; then
+  bash3_version="$(/bin/bash --version 2>&1 | head -1)"
+  if [[ "$bash3_version" == *"version 3."* ]]; then
+    test_output=$(/bin/bash -euo pipefail -c "
+      SH_SOURCE_ONLY=1
+      . '$SETUP'
+      # Test each problematic input path under bash 3.2 with set -u
+      normalize_p4_ids '' || exit 1
+      normalize_p4_ids ',' || exit 1
+      normalize_p4_ids ' , ' || exit 1
+      result=\$(normalize_p4_ids 'a,b')
+      [[ \"\$result\" == 'a b' ]] || exit 1
+      unset SH_P4_SANDBOX_IDS
+      parse_args --target kind || exit 1
+      echo 'all tests passed'
+    " 2>&1)
+    [[ "$test_output" == *"all tests passed"* ]] || fail "normalize_p4_ids failed on bash 3.2 with set -u: $test_output"
+    pass "normalize_p4_ids works on bash 3.2 with set -u (empty arrays safe); all edge cases tested"
+  else
+    echo "skip - bash 3.2 not available (version is: $bash3_version)"
+  fi
+else
+  echo "skip - bash 3.2 not available at /bin/bash"
+fi
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS=$'a,b\nc,d'; expect_fail --target ocp)
+expect_out 'must be one line'
+pass 'multiline SH_P4_SANDBOX_IDS is refused'
+
+echo "== P6.2 Task 6: P4 tokens, relay certificate, bundles"
+P4B="$REPO/deploy/k8s/.generated/ocp/p4"
+RCA="$REPO/deploy/k8s/.generated/ocp/moca-relay-ca.crt"
+p4_ok() { (export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS="$1"; shift; expect_ok --target ocp "$@"); }
+tok() { sv moca moca-relay-sandbox-tokens "$1"; }
+tok_keys() { jq -r '.data // {} | keys | join(",")' "$MOCK_STATE/moca__Secret__moca-relay-sandbox-tokens.json"; }
+mode_of() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
+
+reset_state
+p4_ok moca_microvm_0,moca_microvm_1
+[[ "$(tok_keys)" == moca_microvm_0,moca_microvm_1 ]] || fail "expected one token key per ID, got '$(tok_keys)'"
+[[ "$(tok moca_microvm_0)" =~ ^[0-9a-f]{64}$ && "$(tok moca_microvm_1)" =~ ^[0-9a-f]{64}$ ]] || fail 'a P4 token is not 64 hex'
+[[ "$(tok moca_microvm_0)" != "$(tok moca_microvm_1)" ]] || fail 'two P4 IDs share a token'
+[[ "$(tok moca_microvm_0)" != "$(sv moca moca-relay MOCA_RELAY_EXEC_TOKEN)" ]] || fail 'a P4 token equals the exec token'
+[[ ! -e "$MOCK_STATE/moca-sandbox__Secret__moca-relay-sandbox-tokens.json" ]] || fail 'P4 tokens reached moca-sandbox'
+assert_no_secret_in_argv
+pass 'one 64-hex token per P4 ID in moca-relay-sandbox-tokens, distinct, never the exec token, never in moca-sandbox'
+
+t0="$(tok moca_microvm_0)"
+p4_ok moca_microvm_0,moca_microvm_1
+[[ "$(tok moca_microvm_0)" == "$t0" ]] || fail 'a re-run rotated a P4 token'
+: >"$MOCK_LOG"
+p4_ok moca_microvm_0
+[[ "$(tok_keys)" == moca_microvm_0 ]] || fail "the dropped ID's token was not revoked: '$(tok_keys)'"
+[[ "$(tok moca_microvm_0)" == "$t0" ]] || fail 'revoking one ID rotated another'
+grep -q '^kubectl patch secret moca-relay-sandbox-tokens' "$MOCK_LOG" || fail 'revocation did not patch the Secret'
+[[ ! -e "$P4B/moca_microvm_1" ]] || fail "the dropped ID's bundle was kept"
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_P4_SANDBOX_IDS=; expect_ok --target ocp)
+[[ -z "$(tok_keys)" ]] || fail "clearing the IDs left tokens: '$(tok_keys)'"
+[[ ! -e "$P4B/moca_microvm_0" ]] || fail 'clearing the IDs left a bundle'
+pass 'tokens are kept on a re-run; a dropped ID loses its token and bundle; clearing the list empties the Secret'
+
+# Revocation uses an idempotent merge patch: the patch succeeds even when the stale key is already
+# absent (e.g., the API server pruned it during server-side apply). When MOCK_SSA_PRUNE=1, the
+# mock simulates server-side apply pruning keys it no longer applies, so the stale key is gone
+# before the patch runs.
+p4_ok moca_microvm_0,moca_microvm_1
+t_mv0="$(tok moca_microvm_0)"
+# Now run with only moca_microvm_0, with API server pruning enabled. The apply will remove
+# moca_microvm_1 from the Secret, making it truly absent before revocation tries to patch it.
+: >"$MOCK_LOG"
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS=moca_microvm_0 MOCK_SSA_PRUNE=1; expect_ok --target ocp)
+# Revocation should have tried to patch and succeeded despite moca_microvm_1 already being absent.
+grep -q '^kubectl patch secret moca-relay-sandbox-tokens' "$MOCK_LOG" || fail 'revocation patch was not called'
+[[ "$(tok moca_microvm_0)" == "$t_mv0" ]] || fail 'moca_microvm_0 token was rotated'
+[[ "$(tok_keys)" == moca_microvm_0 ]] || fail 'moca_microvm_1 token was not revoked or another key remained'
+[[ ! -e "$P4B/moca_microvm_1" ]] || fail "moca_microvm_1 bundle was not deleted"
+pass 'revocation is idempotent: the merge patch succeeds when the stale key is absent (server-side apply pruned it)'
+
+# A stored token equal to the exec token (the relay would refuse it, spec §2.2) is regenerated.
+reset_state
+p4_ok moca_microvm_0
+exec_b64="$(jq -r '.data.MOCA_RELAY_EXEC_TOKEN' "$MOCK_STATE/moca__Secret__moca-relay.json")"
+jq --arg v "$exec_b64" '.data.moca_microvm_0 = $v' "$MOCK_STATE/moca__Secret__moca-relay-sandbox-tokens.json" >"$TMP/t.json"
+mv "$TMP/t.json" "$MOCK_STATE/moca__Secret__moca-relay-sandbox-tokens.json"
+p4_ok moca_microvm_0
+[[ "$(tok moca_microvm_0)" != "$(sv moca moca-relay MOCA_RELAY_EXEC_TOKEN)" ]] || fail 'a P4 token equal to the exec token was kept'
+pass 'a P4 token equal to the exec token is regenerated'
+
+t0="$(tok moca_microvm_0)"
+: >"$MOCK_LOG"
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_P4_SANDBOX_IDS=moca_microvm_0 MOCK_GET_FAIL=moca-relay-sandbox-tokens; expect_fail --target ocp)
+expect_out 'etcd timeout'
+[[ "$(tok moca_microvm_0)" == "$t0" ]] || fail 'a failed GET of the token Secret rotated a token'
+pass 'a failed GET of moca-relay-sandbox-tokens aborts the run and rotates nothing'
+
+reset_state
+p4_ok moca_microvm_0
+grep -q '^openssl req -x509 .*CN=moca-relay-moca.apps.example.test' "$MOCK_LOG" || fail 'no self-signed relay certificate for the relay Route host'
+[[ -f "$MOCK_STATE/moca__Secret__moca-relay-tls.json" ]] || fail 'no moca-relay-tls Secret'
+[[ -s "$RCA" ]] || fail 'the relay CA file is missing'
+: >"$MOCK_LOG"
+p4_ok moca_microvm_0
+! grep -q 'create secret tls moca-relay-tls' "$MOCK_LOG" || fail 'an existing relay certificate was replaced'
+[[ -s "$RCA" ]] || fail 'a re-run lost the relay CA file'
+: >"$MOCK_LOG"
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_P4_SANDBOX_IDS=moca_microvm_0 MOCK_GET_FAIL=moca-relay-tls; expect_fail --target ocp)
+expect_out 'etcd timeout'
+! grep -q 'create secret tls moca-relay-tls' "$MOCK_LOG" || fail 'a failed GET of moca-relay-tls replaced it with a self-signed one'
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp)
+[[ ! -e "$MOCK_STATE/moca__Secret__moca-relay-tls.json" ]] || fail 'a stack with no P4 IDs got a relay certificate'
+pass 'relay certificate: self-signed for the Route host once, kept, fail-closed on GET, absent with no P4 IDs'
+
+# The bundle (spec §4.5) is what setup-microvm.sh --remote installs (Task 8).
+reset_state
+p4_ok moca_microvm_0
+b="$P4B/moca_microvm_0"
+printf 'RELAY_ADDR=moca-relay-moca.apps.example.test:443\nRELAY_TLS=true\nSANDBOX_ID=moca_microvm_0\nSANDBOX_TOKEN=%s\n' "$(tok moca_microvm_0)" >"$TMP/want.env"
+cmp -s "$b/worker.env" "$TMP/want.env" || fail "worker.env is wrong: $(cat "$b/worker.env")"
+cmp -s "$b/relay-ca.crt" "$RCA" || fail 'the bundle does not carry the self-signed relay CA'
+[[ "$(mode_of "$P4B")" == 700 && "$(mode_of "$b")" == 700 ]] || fail 'bundle directories are not 0700'
+[[ "$(mode_of "$b/worker.env")" == 600 && "$(mode_of "$b/relay-ca.crt")" == 600 ]] || fail 'bundle files are not 0600'
+assert_no_secret_in_argv
+pass 'bundle: worker.env with the Route host, TLS, ID and token; the relay CA; 0700/0600; the token never on argv'
+
+# An operator certificate: a leaf signed by a CA (so not self-issued). The bundle carries no CA.
+openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=test-ca -keyout "$TMP/ca.key" -out "$TMP/ca.crt" 2>/dev/null
+openssl req -newkey rsa:2048 -nodes -subj /CN=moca-relay-moca.apps.example.test -keyout "$TMP/leaf.key" -out "$TMP/leaf.csr" 2>/dev/null
+openssl x509 -req -in "$TMP/leaf.csr" -CA "$TMP/ca.crt" -CAkey "$TMP/ca.key" -CAcreateserial -days 2 -out "$TMP/leaf.crt" 2>/dev/null
+reset_state
+p4_ok moca_microvm_0 --relay-tls-cert "$TMP/leaf.crt" --relay-tls-key "$TMP/leaf.key"
+grep -qF -- "--cert=$TMP/leaf.crt" "$MOCK_LOG" || fail '--relay-tls-cert was not installed'
+[[ ! -e "$RCA" && ! -e "$P4B/moca_microvm_0/relay-ca.crt" ]] || fail 'an operator certificate still produced a relay CA file'
+pass 'an operator relay certificate is installed, and the bundle carries no CA (the host trusts its issuer)'
+
+echo "== P6.2 Task 7: rendering and printing"
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp)
+! gen | grep -q 'p4-relay\|moca-relay' || fail 'a stack with no P4 IDs rendered the p4-relay component'
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS=moca_microvm_0; expect_ok --target ocp)
+gen | grep -qx '  - ../../overlays/ocp/p4-relay' || fail 'the p4-relay component is not listed'
+gen | grep -q 'name: moca-relay }' || fail 'the relay Route is not patched'
+gen | grep -q 'value: moca-relay-moca.apps.example.test' || fail 'the relay Route host is wrong'
+expect_out "$REPO/deploy/k8s/.generated/ocp/p4/moca_microvm_0"
+# scp -r into an existing target nests the copy, so an earlier copy is removed first, then copied.
+expect_out 'ssh <kvm-host> rm -r moca-p4-moca_microvm_0   (an earlier copy, if any: scp -r would nest into it)'
+expect_out "scp -r $REPO/deploy/k8s/.generated/ocp/p4/moca_microvm_0 <kvm-host>:moca-p4-moca_microvm_0"
+[[ "$(grep -n 'rm -r moca-p4-moca_microvm_0' "$TMP/out" | cut -d: -f1)" -lt "$(grep -n '^ *scp -r ' "$TMP/out" | cut -d: -f1)" ]] ||
+  fail 'the earlier copy is not removed before the scp'
+expect_out 'sudo deploy/microvm/setup-microvm.sh --remote ~/moca-p4-moca_microvm_0'
+pass 'P4 IDs render the p4-relay component and the relay Route host, and print each host command; none render nothing'
 
 echo "setup.test.sh: all passed"

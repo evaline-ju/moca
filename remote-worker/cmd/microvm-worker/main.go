@@ -14,7 +14,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,8 +31,6 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 
 	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
@@ -673,11 +670,11 @@ func main() {
 		defer func() { _ = statsSrv.Close() }()
 	}
 
-	var creds credentials.TransportCredentials
-	if useTLS {
-		creds = credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12})
-	} else {
-		creds = insecure.NewCredentials()
+	creds, err := session.TransportCredentials(useTLS, env(get, "RELAY_CA_FILE", ""))
+	if err != nil {
+		// Same posture as RELAY_TLS: a trust setting the operator clearly meant, and that cannot be
+		// honoured, stops the unit rather than dialing with the wrong trust.
+		log.Fatalf("microvm-worker: %v", err)
 	}
 	conn, err := grpc.NewClient(relayAddr, session.DialOptions(creds)...)
 	if err != nil {

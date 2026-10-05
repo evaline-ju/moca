@@ -42,6 +42,11 @@ spec:
               valueFrom: { secretKeyRef: { name: moca-relay, key: SH_RELAY_TOKEN } }
             - name: MOCA_RELAY_EXEC_TOKEN
               valueFrom: { secretKeyRef: { name: moca-relay, key: MOCA_RELAY_EXEC_TOKEN } }
+            # Per-sandbox tokens for external P4 hosts (P6.2): one file per sandbox id, read on
+            # each attach, so a host added by setup.sh is admitted without restarting the relay.
+            # The Secret is optional -- a stack with no P4 host has none, and every id falls
+            # back to SH_RELAY_TOKEN as before.
+            - { name: SH_RELAY_TOKEN_DIR, value: /run/relay-tokens }
           ports:
             - { name: attach, containerPort: 9443 }
             - { name: exec, containerPort: 9444 }
@@ -66,8 +71,14 @@ spec:
             limits: { memory: 512Mi }
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
+            - { name: relay-tokens, mountPath: /run/relay-tokens, readOnly: true }
       volumes:
         - { name: tmp, emptyDir: {} }
+        - name: relay-tokens
+          secret:
+            secretName: moca-relay-sandbox-tokens
+            optional: true
+            defaultMode: 256 # 0400
 ---
 apiVersion: v1
 kind: Service
@@ -92,7 +103,8 @@ spec:
   podSelector: { matchLabels: { app: sandbox-relay } }
   policyTypes: [Ingress, Egress]
   ingress:
-    # Attach: sandboxes only (slice 2 adds the P4 hosts' CIDR here).
+    # Attach: in-cluster sandboxes only. P4 hosts outside the cluster never reach 9443 directly: the
+    # p4-relay component's own NetworkPolicy admits the router to its TLS sidecar on 8444 instead.
     - from:
         - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: moca-sandbox } }
           podSelector: { matchLabels: { app: moca-sandbox } }

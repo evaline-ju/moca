@@ -14,7 +14,12 @@ export const K8S_DIR = resolve(REPO_ROOT, 'deploy/k8s');
 export type K8sObject = {
   apiVersion: string;
   kind: string;
-  metadata: { name: string; namespace?: string; labels?: Record<string, string> };
+  metadata: {
+    name: string;
+    namespace?: string;
+    labels?: Record<string, string>;
+    annotations?: Record<string, string>;
+  };
   [k: string]: any;
 };
 export type Target = 'base' | 'overlays/kind' | 'overlays/kind-ci' | 'overlays/ocp';

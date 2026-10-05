@@ -3,15 +3,19 @@
 #
 #   deploy/k8s/setup.sh --target kind|kind-ci|ocp [--image IMG] [--sandbox-image IMG]
 #                       [--build|--skip-build] [--tls-cert FILE --tls-key FILE]
+#                       [--relay-tls-cert FILE --relay-tls-key FILE]
 #
 # Environment: SH_GITHUB_CLIENT_ID, SH_ADMIN_SUBJECTS, SH_ALLOW_OPERATOR_FALLBACK (default false),
 # SH_SANDBOX_COUNT (default 2; 0 runs no container sandboxes), SH_WAIT_SECONDS (default 120),
-# SH_SOURCE_ONLY=1 (define the functions and stop, for tests).
+# SH_P4_SANDBOX_IDS (ocp only: comma-separated IDs of P4 microVM hosts outside the cluster, each
+# attaching to the relay over TLS; needs SH_SANDBOX_COUNT=0 -- see
+# docs/specs/2026-10-04-p6-on-kubernetes-slice2-design.md), SH_SOURCE_ONLY=1 (define the functions
+# and stop, for tests).
 #
 # Idempotent: a re-run converges and never rotates a secret. Inputs are sticky: a re-run keeps every
-# setting, --image, --sandbox-image (ocp) and SH_SANDBOX_COUNT it is not given; an explicitly empty
-# setting variable (SH_ADMIN_SUBJECTS=) clears it. No secret value is ever put on a command line --
-# values travel through pipes and through the environment of the one jq that writes each Secret.
+# setting, --image, --sandbox-image (ocp), SH_SANDBOX_COUNT and SH_P4_SANDBOX_IDS it is not given; an
+# explicitly empty variable (SH_ADMIN_SUBJECTS=) clears it. No secret value is ever put on a command
+# line -- values travel through pipes and through the environment of the one jq that writes each Secret.
 set -euo pipefail
 
 K8S_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,13 +34,18 @@ SANDBOX_IMAGE=''
 BUILD=auto
 TLS_CERT=''
 TLS_KEY=''
+RELAY_TLS_CERT=''
+RELAY_TLS_KEY=''
+# P4 sandbox IDs (P6.2), space-separated once normalised; resolved against moca-setup in load_setup_inputs.
+P4_IDS=''
+P4_IDS_GIVEN=''
 
 log() { printf '==> %s\n' "$*" >&2; }
 die() {
   printf 'setup.sh: %s\n' "$*" >&2
   exit 1
 }
-usage() { sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { awk 'NR > 1 && /^set -euo/ { exit } NR > 1' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # need_value FLAG ARGC [VALUE]: die unless FLAG was given a non-empty value. `shift 2` with one
 # argument left fails without a word, and under set -e that is a silent exit.
@@ -52,6 +61,8 @@ parse_args() {
     --skip-build) BUILD=never; shift ;;
     --tls-cert) need_value "$1" $# "${2-}"; TLS_CERT="$2"; shift 2 ;;
     --tls-key) need_value "$1" $# "${2-}"; TLS_KEY="$2"; shift 2 ;;
+    --relay-tls-cert) need_value "$1" $# "${2-}"; RELAY_TLS_CERT="$2"; shift 2 ;;
+    --relay-tls-key) need_value "$1" $# "${2-}"; RELAY_TLS_KEY="$2"; shift 2 ;;
     -h | --help) usage; exit 0 ;;
     *) die "unknown argument: $1 (see --help)" ;;
     esac
@@ -66,6 +77,17 @@ parse_args() {
     [[ -n "$TLS_CERT" && -n "$TLS_KEY" ]] || die '--tls-cert and --tls-key go together'
     [[ -r "$TLS_CERT" && -r "$TLS_KEY" ]] || die "cannot read $TLS_CERT or $TLS_KEY"
   fi
+  if [[ -n "$RELAY_TLS_CERT$RELAY_TLS_KEY" ]]; then
+    [[ "$TARGET" == ocp ]] || die '--relay-tls-cert/--relay-tls-key apply to --target ocp only'
+    [[ -n "$RELAY_TLS_CERT" && -n "$RELAY_TLS_KEY" ]] || die '--relay-tls-cert and --relay-tls-key go together'
+    [[ -r "$RELAY_TLS_CERT" && -r "$RELAY_TLS_KEY" ]] || die "cannot read $RELAY_TLS_CERT or $RELAY_TLS_KEY"
+  fi
+  # Normalised and validated here, before anything touches a cluster. Unset means "the earlier run's
+  # IDs" (load_setup_inputs); set-but-empty means none.
+  P4_IDS_GIVEN="${SH_P4_SANDBOX_IDS+x}"
+  P4_IDS="$(normalize_p4_ids "${SH_P4_SANDBOX_IDS-}")"
+  [[ -z "$P4_IDS" ]] || [[ "$TARGET" == ocp ]] ||
+    die "SH_P4_SANDBOX_IDS ($P4_IDS) needs --target ocp: a P4 host outside the cluster reaches the relay through an OpenShift Route, and $TARGET has none"
   # Validated here, before anything touches a cluster; an unset or empty count is resolved later,
   # from the earlier run's value (load_setup_inputs).
   SH_SANDBOX_COUNT="${SH_SANDBOX_COUNT:-}"
@@ -156,30 +178,67 @@ configmap_json() { kc get configmap "$1" -n "$NS" --ignore-not-found -o json; }
 # cm_value JSON KEY: KEY's value from configmap_json's output (possibly empty), or nothing.
 cm_value() { printf '%s' "$1" | jq -r --arg k "$2" '.data[$k] // empty'; }
 
+# normalize_p4_ids "a, b,," -> "a b": comma-separated; each entry trimmed, empty entries dropped. An
+# ID must match the relay's token-directory rule (spec §2.1: the relay reads <dir>/<id>) and appear
+# once -- two hosts with one ID would share a token and a workspace. DIR is reserved: the relay
+# refuses it before any lookup, since SH_RELAY_TOKEN_DIR is its token-directory setting.
+normalize_p4_ids() {
+  [[ -n "$1" ]] || return 0
+  [[ "$1" != *$'\n'* ]] || die "SH_P4_SANDBOX_IDS must be one line"
+  local -a parts
+  local id out=''
+  IFS=',' read -ra parts <<<"$1"
+  for id in ${parts[@]+"${parts[@]}"}; do
+    id="${id#"${id%%[![:space:]]*}"}"
+    id="${id%"${id##*[![:space:]]}"}"
+    [[ -n "$id" ]] || continue
+    [[ "$id" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] ||
+      die "SH_P4_SANDBOX_IDS: '$id' must match ^[A-Za-z_][A-Za-z0-9_]*\$ (the relay looks its token up by this name)"
+    [[ "$id" != DIR ]] ||
+      die "SH_P4_SANDBOX_IDS: 'DIR' is reserved: SH_RELAY_TOKEN_DIR is the relay's token-directory setting, so the relay refuses that ID"
+    case " $out " in *" $id "*) die "SH_P4_SANDBOX_IDS lists '$id' twice" ;; esac
+    out="${out:+$out }$id"
+  done
+  printf '%s' "$out"
+}
+
+# One sandbox tier per stack until slice 3 (#425), spec §4.2: the supervisor re-selects a sandbox on
+# every turn, so a session would hop between a container workspace and a microVM one.
+check_tiers() {
+  [[ -n "$P4_IDS" ]] || return 0
+  [[ "$SH_SANDBOX_COUNT" == 0 ]] ||
+    die "SH_P4_SANDBOX_IDS ($P4_IDS) with SH_SANDBOX_COUNT=$SH_SANDBOX_COUNT: one sandbox tier per stack until slice 3 (#425) -- the supervisor re-selects a sandbox every turn, so sessions would hop between container and microVM workspaces. Re-run with SH_SANDBOX_COUNT=0"
+}
+
 # --- Sticky inputs (moca-setup) -------------------------------------------------------------------
 # A re-run is how an operator changes ONE input (README "Re-running"), so it must not reset the ones
 # it is not given: without this, a rotation recipe that sets one variable rolled an OCP stack back to
-# :latest, scaled the sandboxes back to 2 and the control plane to 0. --image, --sandbox-image and the
-# resolved SH_SANDBOX_COUNT are kept in the non-secret ConfigMap moca-setup and reused when not given.
-# Kind ignores the stored images: it always runs the locally loaded dev.local tags, and --image there
-# only picks what to pull, so only the sandbox count is stored for it.
+# :latest, scaled the sandboxes back to 2 and the control plane to 0. --image, --sandbox-image,
+# SH_SANDBOX_COUNT and SH_P4_SANDBOX_IDS are kept in the non-secret ConfigMap moca-setup and reused
+# when not given. Kind ignores the stored images: it always runs the locally loaded dev.local tags, and
+# --image there only picks what to pull, so only the sandbox count is stored for it.
 load_setup_inputs() {
-  local json
+  local json stored
   json="$(configmap_json moca-setup)"
   if ! is_kind; then
     [[ -n "$IMAGE" ]] || IMAGE="$(cm_value "$json" IMAGE)"
     [[ -n "$SANDBOX_IMAGE" ]] || SANDBOX_IMAGE="$(cm_value "$json" SANDBOX_IMAGE)"
+    [[ -n "$P4_IDS_GIVEN" ]] || {
+      stored="$(cm_value "$json" SH_P4_SANDBOX_IDS)"
+      P4_IDS="$(normalize_p4_ids "$stored")"
+    }
   fi
   [[ -n "$SH_SANDBOX_COUNT" ]] || SH_SANDBOX_COUNT="$(cm_value "$json" SH_SANDBOX_COUNT)"
   [[ -n "$SH_SANDBOX_COUNT" ]] || SH_SANDBOX_COUNT=2
   [[ "$SH_SANDBOX_COUNT" =~ ^[0-9]+$ ]] ||
     die "moca-setup holds SH_SANDBOX_COUNT='$SH_SANDBOX_COUNT': re-run with SH_SANDBOX_COUNT set to a whole number"
+  check_tiers
   local data
   if is_kind; then
     data="$(jq -nc --arg n "$SH_SANDBOX_COUNT" '{SH_SANDBOX_COUNT: $n}')"
   else
-    data="$(jq -nc --arg n "$SH_SANDBOX_COUNT" --arg i "$IMAGE" --arg s "$SANDBOX_IMAGE" \
-      '{SH_SANDBOX_COUNT: $n, IMAGE: $i, SANDBOX_IMAGE: $s} | with_entries(select(.value != ""))')"
+    data="$(jq -nc --arg n "$SH_SANDBOX_COUNT" --arg i "$IMAGE" --arg s "$SANDBOX_IMAGE" --arg p "${P4_IDS// /,}" \
+      '{SH_SANDBOX_COUNT: $n, IMAGE: $i, SANDBOX_IMAGE: $s, SH_P4_SANDBOX_IDS: $p} | with_entries(select(.value != ""))')"
   fi
   jq -n --arg ns "$NS" --argjson data "$data" \
     '{apiVersion: "v1", kind: "ConfigMap", metadata: {name: "moca-setup", namespace: $ns}, data: $data}' |
@@ -232,6 +291,47 @@ ensure_relay_secrets() {
     export S_0="$relay"
     apply_secret moca-relay-attach "$SBX_NS" SH_RELAY_TOKEN
   )
+}
+
+# P4 hosts' attach tokens (spec §4.3): one key per P4 ID in moca-relay-sandbox-tokens, which the relay
+# reads on every attach from its SH_RELAY_TOKEN_DIR mount (base/relay.yaml). Generated once and
+# kept; a key whose ID is no longer listed is removed -- that is revocation. Removal uses an
+# idempotent merge patch (nulling absent keys is a no-op), so it does not depend on whether the
+# API server's server-side apply pruned the dropped stringData key itself. With no IDs the Secret
+# stays, empty: the relay's mount of it is optional, but an emptied Secret revokes deterministically
+# where a deleted one may not. Never in moca-sandbox: no P4 host runs there.
+P4_TOKENS_SECRET=moca-relay-sandbox-tokens
+ensure_p4_tokens() {
+  [[ "$TARGET" == ocp ]] || return 0
+  local json relay_json exec_token stale
+  json="$(secret_json "$P4_TOKENS_SECRET" "$NS")"
+  if [[ -n "$P4_IDS" ]]; then
+    relay_json="$(secret_json moca-relay "$NS")"
+    exec_token="$(json_value "$relay_json" MOCA_RELAY_EXEC_TOKEN)"
+    (
+      i=0
+      for id in $P4_IDS; do
+        tok="$(json_value "$json" "$id")"
+        [[ -n "$tok" ]] || { log "generating the relay token for P4 sandbox $id"; tok="$(rand_hex)"; }
+        # The relay refuses a directory token equal to the exec token (spec §2.2); never hand one out.
+        while [[ "$tok" == "$exec_token" ]]; do
+          log "the relay token for $id equals MOCA_RELAY_EXEC_TOKEN; regenerating it"
+          tok="$(rand_hex)"
+        done
+        export "S_$i=$tok"
+        i=$((i + 1))
+      done
+      # shellcheck disable=SC2086 # one argument per ID; IDs are validated identifiers
+      apply_secret "$P4_TOKENS_SECRET" "$NS" $P4_IDS
+    )
+  fi
+  [[ -n "$json" ]] || return 0
+  stale="$(printf '%s' "$json" | jq -r --arg keep "$P4_IDS" \
+    '($keep | split(" ")) as $k | .data // {} | keys[] | select(. as $x | ($k | index($x)) == null)')"
+  [[ -n "$stale" ]] || return 0
+  log "revoking the relay token of P4 sandbox(es) no longer listed: $(printf '%s' "$stale" | tr '\n' ' ')"
+  kc patch secret "$P4_TOKENS_SECRET" -n "$NS" --type=merge \
+    -p "$(printf '%s\n' "$stale" | jq -Rnc '{data: ([inputs | {key: ., value: null}] | from_entries)}')" >/dev/null
 }
 
 ensure_redis_secret() {
@@ -315,6 +415,7 @@ ensure_mu1_secret() {
 
 ensure_secrets() {
   ensure_relay_secrets
+  ensure_p4_tokens
   ensure_redis_secret
   ensure_mu1_secret
 }
@@ -322,8 +423,12 @@ ensure_secrets() {
 # --- Settings, TLS, SCC, the generated overlay, apply, wait (spec §4.1 steps 5-7) -----------------
 SUP_HOST=''
 CP_HOST=''
+RELAY_HOST=''
 SETTINGS_HASH=''
 GEN_DIR=''
+RELAY_CA="$K8S_DIR/.generated/ocp/moca-relay-ca.crt"
+P4_BUNDLES="$K8S_DIR/.generated/ocp/p4"
+ROUTE_CERT_MADE=''
 
 route_hosts() {
   local domain
@@ -331,6 +436,7 @@ route_hosts() {
   [[ -n "$domain" ]] || die 'could not read the cluster apps domain (ingresses.config/cluster .spec.domain)'
   SUP_HOST="moca-$NS.$domain"
   CP_HOST="moca-control-plane-$NS.$domain"
+  RELAY_HOST="moca-relay-$NS.$domain"
 }
 
 # The client id as resolved by write_settings (sticky: the earlier run's value when
@@ -382,19 +488,24 @@ ensure_mock_model() {
     kc apply --server-side --force-conflicts --field-manager=moca-setup -f - >/dev/null
 }
 
-# The passthrough Route needs a certificate valid for the Route host, which service-ca cannot issue.
-ensure_tls() {
-  [[ "$TARGET" == ocp ]] || return 0
-  if [[ -n "$TLS_CERT" ]]; then
-    log "installing the supervisor TLS certificate from $TLS_CERT"
-    kc create secret tls moca-supervisor-tls -n "$NS" --cert="$TLS_CERT" --key="$TLS_KEY" --dry-run=client -o json |
+# route_cert SECRET HOST CERT KEY CA: a passthrough Route needs a certificate valid for HOST, which
+# service-ca cannot issue. With CERT/KEY (an operator certificate), install them into SECRET.
+# Otherwise -- only when SECRET does not exist yet -- generate a self-signed one for HOST, valid
+# 825 days, and write its certificate to CA. Sets ROUTE_CERT_MADE=self-signed when it generated one.
+# Never call this inside $(...): a command substitution drops set -e, and a failed GET there would
+# read as "absent" and replace an operator certificate.
+route_cert() {
+  local secret="$1" host="$2" cert="$3" key="$4" ca="$5" existing dir
+  ROUTE_CERT_MADE=''
+  if [[ -n "$cert" ]]; then
+    log "installing the $secret certificate from $cert"
+    kc create secret tls "$secret" -n "$NS" --cert="$cert" --key="$key" --dry-run=client -o json |
       kc apply --server-side --force-conflicts --field-manager=moca-setup -f - >/dev/null
     return 0
   fi
   # Absent reads as empty; any other API error aborts (set -e, outside any conditional), so an
   # unreadable operator certificate is never replaced by a self-signed one.
-  local existing dir ca="$K8S_DIR/.generated/ocp/moca-supervisor-ca.crt"
-  existing="$(kc get secret moca-supervisor-tls -n "$NS" --ignore-not-found -o name)"
+  existing="$(kc get secret "$secret" -n "$NS" --ignore-not-found -o name)"
   [[ -z "$existing" ]] || return 0
   mkdir -p "$(dirname "$ca")"
   dir="$(mktemp -d)"
@@ -404,16 +515,88 @@ ensure_tls() {
     trap 'rm -rf "$dir"' EXIT
     chmod 700 "$dir"
     # openssl's stderr is progress noise on success; on failure it is the reason, so show it.
-    if ! openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=$SUP_HOST" \
-      -addext "subjectAltName=DNS:$SUP_HOST" -keyout "$dir/tls.key" -out "$ca" 2>"$dir/openssl.err"; then
+    if ! openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=$host" \
+      -addext "subjectAltName=DNS:$host" -keyout "$dir/tls.key" -out "$ca" 2>"$dir/openssl.err"; then
       cat "$dir/openssl.err" >&2
-      die "openssl could not create the self-signed certificate for $SUP_HOST"
+      die "openssl could not create the self-signed certificate for $host"
     fi
-    kc create secret tls moca-supervisor-tls -n "$NS" --cert="$ca" --key="$dir/tls.key" --dry-run=client -o json |
+    kc create secret tls "$secret" -n "$NS" --cert="$ca" --key="$dir/tls.key" --dry-run=client -o json |
       kc apply --server-side --force-conflicts --field-manager=moca-setup -f - >/dev/null
   )
-  log "WARNING: no --tls-cert given, so the supervisor uses a SELF-SIGNED certificate for $SUP_HOST."
-  log "  Every mocactl user must trust it: export NODE_EXTRA_CA_CERTS=$ca"
+  ROUTE_CERT_MADE=self-signed
+}
+
+ensure_tls() {
+  [[ "$TARGET" == ocp ]] || return 0
+  local ca="$K8S_DIR/.generated/ocp/moca-supervisor-ca.crt"
+  route_cert moca-supervisor-tls "$SUP_HOST" "$TLS_CERT" "$TLS_KEY" "$ca"
+  if [[ "$ROUTE_CERT_MADE" == self-signed ]]; then
+    log "WARNING: no --tls-cert given, so the supervisor uses a SELF-SIGNED certificate for $SUP_HOST."
+    log "  Every mocactl user must trust it: export NODE_EXTRA_CA_CERTS=$ca"
+  fi
+  [[ -n "$P4_IDS" ]] || return 0
+  route_cert moca-relay-tls "$RELAY_HOST" "$RELAY_TLS_CERT" "$RELAY_TLS_KEY" "$RELAY_CA"
+  [[ "$ROUTE_CERT_MADE" != self-signed ]] ||
+    log "no --relay-tls-cert given: the relay Route uses a SELF-SIGNED certificate for $RELAY_HOST; every P4 bundle carries it as relay-ca.crt"
+  refresh_relay_ca
+}
+
+# The CA a P4 host must trust (spec §4.4), read back from moca-relay-tls on every run so it is right
+# whichever checkout created the certificate: the certificate itself when it is self-issued (the
+# self-signed one route_cert made), nothing when it is an operator's -- that chains to an issuer
+# the host trusts system-wide, and the worker keeps the system pool (RELAY_CA_FILE only adds).
+refresh_relay_ca() {
+  local json crt subject issuer
+  json="$(secret_json moca-relay-tls "$NS")"
+  crt="$(json_value "$json" tls.crt)"
+  [[ -n "$crt" ]] || die 'moca-relay-tls has no tls.crt: delete the Secret and re-run, or pass --relay-tls-cert'
+  subject="$(printf '%s\n' "$crt" | openssl x509 -noout -subject_hash)" || die 'moca-relay-tls holds no readable certificate'
+  issuer="$(printf '%s\n' "$crt" | openssl x509 -noout -issuer_hash)" || die 'moca-relay-tls holds no readable certificate'
+  mkdir -p "$(dirname "$RELAY_CA")"
+  if [[ "$subject" == "$issuer" ]]; then
+    printf '%s\n' "$crt" >"$RELAY_CA"
+    chmod 644 "$RELAY_CA"
+  else
+    rm -f "$RELAY_CA"
+  fi
+}
+
+# One bundle per P4 ID (spec §4.5): what `setup-microvm.sh --remote` installs on that host. The
+# token reaches worker.env through the builtin printf, never argv. A bundle whose ID is no longer
+# listed is deleted, like its token.
+write_p4_bundles() {
+  [[ "$TARGET" == ocp ]] || return 0
+  local json id tok dir d
+  if [[ -d "$P4_BUNDLES" ]]; then
+    for d in "$P4_BUNDLES"/*/; do
+      [[ -d "$d" ]] || continue
+      id="$(basename "$d")"
+      case " $P4_IDS " in
+      *" $id "*) ;;
+      *) log "deleting the bundle of $id (no longer in SH_P4_SANDBOX_IDS)"; rm -rf "$d" ;;
+      esac
+    done
+  fi
+  [[ -n "$P4_IDS" ]] || return 0
+  json="$(secret_json "$P4_TOKENS_SECRET" "$NS")"
+  for id in $P4_IDS; do
+    tok="$(json_value "$json" "$id")"
+    [[ -n "$tok" ]] || die "$P4_TOKENS_SECRET has no token for $id"
+    dir="$P4_BUNDLES/$id"
+    (
+      umask 077
+      mkdir -p "$dir"
+      chmod 700 "$P4_BUNDLES" "$dir"
+      printf 'RELAY_ADDR=%s:443\nRELAY_TLS=true\nSANDBOX_ID=%s\nSANDBOX_TOKEN=%s\n' "$RELAY_HOST" "$id" "$tok" >"$dir/worker.env"
+      chmod 600 "$dir/worker.env"
+      if [[ -f "$RELAY_CA" ]]; then
+        cp "$RELAY_CA" "$dir/relay-ca.crt"
+        chmod 600 "$dir/relay-ca.crt"
+      else
+        rm -f "$dir/relay-ca.crt"
+      fi
+    )
+  done
 }
 
 # Explicit non-root UIDs need nonroot-v2 (restricted-v2 does not reliably admit them; see
@@ -458,6 +641,8 @@ write_overlay() {
   {
     printf '# GENERATED by deploy/k8s/setup.sh on every run. Do not edit; gitignored.\n'
     printf 'apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - ../../overlays/%s\n' "$TARGET"
+    # P6.2 (spec §4.6): the relay's external path, only with P4 hosts; with none, slice 1's render.
+    [[ -z "$P4_IDS" ]] || printf 'components:\n  - ../../overlays/ocp/p4-relay\n'
     printf 'patches:\n'
     # base/control-plane.yaml's pod template has no annotations, so "add" creates the map.
     printf '  - target: { kind: Deployment, name: moca-control-plane }\n    patch: |-\n      - { op: replace, path: /spec/replicas, value: %s }\n' "$cp_replicas"
@@ -466,6 +651,8 @@ write_overlay() {
     if [[ "$TARGET" == ocp ]]; then
       printf '  - target: { kind: Route, name: moca }\n    patch: |-\n      - { op: replace, path: /spec/host, value: %s }\n' "$SUP_HOST"
       printf '  - target: { kind: Route, name: moca-control-plane }\n    patch: |-\n      - { op: replace, path: /spec/host, value: %s }\n' "$CP_HOST"
+      [[ -z "$P4_IDS" ]] ||
+        printf '  - target: { kind: Route, name: moca-relay }\n    patch: |-\n      - { op: replace, path: /spec/host, value: %s }\n' "$RELAY_HOST"
       if [[ -n "$IMAGE$SANDBOX_IMAGE" ]]; then
         printf 'images:\n'
         [[ -z "$IMAGE" ]] || image_entry ghcr.io/rossoctl/moca "$IMAGE"
@@ -538,6 +725,18 @@ P6 is up on OpenShift.
   control plane:  https://$CP_HOST
 then:  mocactl --control-plane-url https://$CP_HOST login
 EOF
+    if [[ -n "$P4_IDS" ]]; then
+      local id dir
+      printf 'P4 hosts attach to https://%s (the relay, TLS passthrough). One bundle each -- it holds\n' "$RELAY_HOST" >&2
+      printf "that host's relay token, so copy it straight to the host, install it, then delete the copy:\n" >&2
+      for id in $P4_IDS; do
+        dir="$P4_BUNDLES/$id"
+        printf '  %s:  %s\n' "$id" "$dir" >&2
+        printf '    ssh <kvm-host> rm -r moca-p4-%s   (an earlier copy, if any: scp -r would nest into it)\n' "$id" >&2
+        printf '    scp -r %s <kvm-host>:moca-p4-%s\n' "$dir" "$id" >&2
+        printf '    on <kvm-host>, from a moca checkout:  sudo deploy/microvm/setup-microvm.sh --remote ~/moca-p4-%s\n' "$id" >&2
+      done
+    fi
   fi
 }
 
@@ -550,6 +749,7 @@ main() {
   ensure_secrets
   [[ "$TARGET" != ocp ]] || route_hosts
   ensure_tls
+  write_p4_bundles
   write_settings
   ensure_mock_model
   grant_scc

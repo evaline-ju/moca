@@ -35,6 +35,12 @@ const SCRIPTS = {
   },
   // Well inside the supervisor's 20s SHUTDOWN_GRACE_MS, so a drain lets it finish.
   'K8S-SMOKE-DRAIN': { steps: ['sleep 8; echo drained'], done: 'done-k8s-drain' },
+  // deploy/k8s/smoke.sh --tier p4 (#424): the write and the read-back, in a microVM workspace.
+  'K8S-SMOKE-P4-WRITE': {
+    steps: ['uname -r; echo p4-proof | tee proof.txt'],
+    done: 'done-k8s-p4-write',
+  },
+  'K8S-SMOKE-P4-READ': { steps: ['cat proof.txt'], done: 'done-k8s-p4-read' },
 };
 
 const isToolResult = (m) =>

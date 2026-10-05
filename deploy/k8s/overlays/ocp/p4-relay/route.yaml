@@ -1,0 +1,17 @@
+# The host is a placeholder: setup.sh's generated overlay sets moca-relay-<ns>.<apps domain>, the host
+# the relay certificate is issued for. The timeout is the router's idle limit for the tunnel; it must
+# stay above the worker's 30 s gRPC keepalive (remote-worker/internal/session/dial.go).
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: moca-relay
+  namespace: moca
+  annotations:
+    haproxy.router.openshift.io/timeout: 5m
+spec:
+  host: moca-relay.apps.example.invalid
+  to: { kind: Service, name: sandbox-relay-tls }
+  port: { targetPort: https }
+  tls:
+    termination: passthrough
+    insecureEdgeTerminationPolicy: None
