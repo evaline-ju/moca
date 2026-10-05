@@ -165,6 +165,38 @@ describe('relay presence put retry (#423 Task 16b, defect A)', () => {
     s2.end();
   });
 
+  it('a second teardown from the old stream (end, then error) leaves a same-id reattach alone (#434)', async () => {
+    // teardown is registered for both 'end' and 'error', and a gRPC stream can emit both. If the
+    // worker reattached in between, the old stream's second teardown found the NEW session under the
+    // same id: it cancelled that session's presence retry, failed its execs, evicted it from the
+    // session map and removed its record.
+    const { store, map } = flakyRecords(2);
+    const t = manualTimers();
+    const relay = createRelay({ records: store, validateToken: () => true, timers: t.timers });
+    const s1 = fakeAttach();
+    relay.onAttach(s1 as never);
+    s1.emitData(hello('sbx-1'));
+    await vi.waitFor(() => expect(t.pending.size).toBe(1));
+    s1.emit('end');
+    await vi.waitFor(() => expect(store.remove).toHaveBeenCalledTimes(1));
+
+    // The worker reattaches; its first put fails too, so it has a retry pending.
+    const s2 = fakeAttach();
+    relay.onAttach(s2 as never);
+    s2.emitData(hello('sbx-1'));
+    await vi.waitFor(() => expect(t.pending.size).toBe(1));
+
+    s1.emit('error', new Error('stream reset')); // the old stream's late second event
+    await new Promise((r) => setImmediate(r));
+    expect(relay.parked()).toEqual(['sbx-1']);
+    expect(store.remove).toHaveBeenCalledTimes(1);
+    expect(t.pending.size).toBe(1); // the new session's retry survives
+
+    t.fire();
+    await vi.waitFor(() => expect(map.has('sbx-1')).toBe(true));
+    s2.end();
+  });
+
   it('a store that keeps rejecting never throws unhandled; the loop backs off to 10 s until teardown', async () => {
     const unhandled: unknown[] = [];
     const onUnhandled = (e: unknown) => unhandled.push(e);
