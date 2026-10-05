@@ -1,5 +1,7 @@
 import { buildFindPodBySelectorArgs, buildGetPodPhaseArgs, type RunKubectl } from './kubectl.js';
+import { sessionTier } from './exchange.js';
 import type { SessionRecord } from './ownership.js';
+import type { SandboxTiers } from './sandbox-tiers.js';
 
 /**
  * The /resources projection (spec §7.4).
@@ -53,6 +55,8 @@ export function projectResources(
   rec: SessionRecord,
   runtime: Record<string, string>,
   sandbox: SandboxView,
+  /** The deployment's tiers, so a record written before P6.3 shows the default it actually runs in. */
+  tiers: SandboxTiers | null = null,
 ): unknown {
   const harnessPod = runtime.harnessPod ?? null;
   return {
@@ -62,6 +66,9 @@ export function projectResources(
       createdAt: rec.createdAt,
       lastTurnAt: num(runtime.lastTurnAt),
       turns: num(runtime.turns) ?? 0,
+      // The tier the session runs in, by the same rule as the session view (sessionView): from the
+      // control plane's own record, never from the self-reported runtime hash.
+      sandboxTier: sessionTier(rec, tiers) || null,
     },
     harness: {
       // A leaf runs in a KEDA-spawned worker Job whose pod name starts with the ScaledJob name; a
@@ -74,6 +81,18 @@ export function projectResources(
       ready: harnessPod !== null,
     },
     sandbox,
+    // P6.3 spec §6: where the session's last leased turn ran, and when it last lost its workspace.
+    // Self-reported by the data plane at turn end (runtimeFieldsForTurn), so null until one has.
+    placement: runtime.sandboxId
+      ? {
+          sandboxId: runtime.sandboxId,
+          tier: runtime.sandboxTier || null,
+          workspaceReset:
+            runtime.workspaceResetAt && runtime.workspaceResetFrom
+              ? { at: Number(runtime.workspaceResetAt), from: runtime.workspaceResetFrom }
+              : null,
+        }
+      : null,
     // null, not a fabricated zero: MU1's /turn path takes no pool lease and has no queue position
     // (spec §8.2), so MU2 filling these in should be visibly a change.
     lease: runtime.leaseKey

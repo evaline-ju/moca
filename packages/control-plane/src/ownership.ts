@@ -82,6 +82,12 @@ const RUNTIME_FIELDS = [
   // authz, and a wrong value changes the status code, never whether the delete happened.
   'turnStartedAt',
   'turnEndedAt',
+  // P6.3 spec §6: where the last leased turn ran, and when the session last lost its workspace
+  // (knative-server runtimeFieldsForTurn). Display-only, read by the resources view's `placement`.
+  'sandboxId',
+  'sandboxTier',
+  'workspaceResetAt',
+  'workspaceResetFrom',
 ] as const;
 
 export class OwnershipIndex {

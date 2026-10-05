@@ -251,6 +251,22 @@ describe('runtime hash', () => {
     expect(f.hashes.get(runtimeKey('sid-1'))).not.toHaveProperty('owner');
     expect(await index.getRuntime('sid-1')).not.toHaveProperty('owner');
   });
+
+  it("keeps the data plane's P6.3 placement fields (spec §6), which the resources view reads", async () => {
+    // The knative-server reporter writes through this same putRuntime: a field missing from the
+    // allow-list is silently dropped on write, and the resources view's placement stays null forever.
+    const f = fakeRedis();
+    const index = new OwnershipIndex(f.redis);
+    const placement = {
+      sandboxId: 'm-1',
+      sandboxTier: 'microvm',
+      workspaceResetAt: '1757000002000',
+      workspaceResetFrom: 'm-0',
+    };
+    await index.putRuntime('sid-1', placement);
+    expect(f.hashes.get(runtimeKey('sid-1'))).toEqual(placement);
+    expect(await index.getRuntime('sid-1')).toEqual(placement);
+  });
 });
 
 describe('audit', () => {

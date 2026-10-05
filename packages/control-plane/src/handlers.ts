@@ -467,7 +467,7 @@ export const HANDLERS: Record<string, Handler> = {
       deps.runKubectl,
       rec.tenant,
     );
-    return { status: 200, body: projectResources(rec, runtime, sandbox) };
+    return { status: 200, body: projectResources(rec, runtime, sandbox, deps.config.sandboxTiers) };
   },
 
   exchangeCredential: async (ctx, deps) => {
