@@ -269,17 +269,19 @@ export function placementFrame(
   };
 }
 
+/** Where a turn ran, in the shape a result carries it (`TurnResult.sandbox`) and `onPlacement` gets. */
+function placementView(p: TurnPlacement): NonNullable<TurnResult['sandbox']> {
+  return {
+    id: p.sandboxId,
+    tier: p.tier,
+    ...(p.workspaceReset ? { workspaceReset: p.workspaceReset } : {}),
+  };
+}
+
 /** The result, plus where the turn ran -- what a JSON caller and the runtime report read. */
 export function withPlacement(result: TurnResult, p: TurnPlacement | undefined): TurnResult {
   if (!p) return result;
-  return {
-    ...result,
-    sandbox: {
-      id: p.sandboxId,
-      tier: p.tier,
-      ...(p.workspaceReset ? { workspaceReset: p.workspaceReset } : {}),
-    },
-  };
+  return { ...result, sandbox: placementView(p) };
 }
 
 /**
@@ -748,6 +750,14 @@ export interface ExecuteTurnInput {
   sandbox?: TurnSandbox; // pre-leased sandbox; absent ⇒ resolve from the environment (/turn)
   /** Resolved promoted Claude Code config; absent ⇒ the loader is built exactly as before. */
   promotedConfig?: PromotedConfig;
+  /**
+   * Where a leased turn runs (P6.3 spec §6), called once, as soon as the lease is taken and before any
+   * model work -- with exactly what the result's `sandbox` would carry. It exists because a turn that
+   * THROWS returns no result: a caller reporting placement from `result.sandbox` alone would never
+   * record that a session which fell back to a fresh sandbox, and then failed, lost its workspace.
+   * Not called when nothing was leased (an injected sandbox, the single-pod path, no pool).
+   */
+  onPlacement?: (p: NonNullable<TurnResult['sandbox']>) => void;
 }
 
 /**
@@ -810,6 +820,10 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
   }
 
   try {
+    // First, so a turn that fails anywhere after this still has its placement recorded -- see
+    // `onPlacement`. Inside the try for the same reason as the frame below: a throwing callback must
+    // still release the lease.
+    if (acquired.placement) input.onPlacement?.(placementView(acquired.placement));
     // Before any model output, so the notice precedes the turn it explains. It also flushes the SSE
     // headers: a later pre-content failure then degrades to an error frame instead of a status code,
     // which is the same regime as any failure after the first token. Inside the try, so a sink that

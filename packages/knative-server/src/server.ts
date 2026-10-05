@@ -175,6 +175,9 @@ async function handleTurn(req: IncomingMessage, res: ServerResponse): Promise<vo
       // Best-effort pod-identity reporting (spec §7.4). Never gates the turn on Redis.
       void deps.reportRuntime?.(auth.sessionId, runtimeFieldsForTurn(process.env, 'start'));
       let result: TurnResult | undefined;
+      // Where the turn ran, captured as soon as it is leased: a turn that throws has no result to read
+      // it from, and the report must still show a session that lost its workspace (P6.3 spec §6).
+      let placement: TurnResult['sandbox'];
       try {
         result = await executeTurn({
           prompt,
@@ -182,12 +185,13 @@ async function handleTurn(req: IncomingMessage, res: ServerResponse): Promise<vo
           config: buildConfig(auth),
           // A control-plane-minted session id must not 404 its first turn (plan gap #1).
           createIfAbsent: true,
+          onPlacement: (p) => (placement = p),
         });
         res.writeHead(200, JSON_HEADERS).end(JSON.stringify(result));
       } finally {
         void deps.reportRuntime?.(
           auth.sessionId,
-          runtimeFieldsForTurn(process.env, 'end', result?.sandbox),
+          runtimeFieldsForTurn(process.env, 'end', result?.sandbox ?? placement),
         );
       }
       return;
@@ -333,6 +337,8 @@ async function handleTurnStream(
   const effectiveSessionId = auth?.sessionId ?? sessionId;
   if (auth) void deps.reportRuntime?.(auth.sessionId, runtimeFieldsForTurn(process.env, 'start'));
   let result: TurnResult | undefined;
+  // As in the JSON path: a turn that throws after its lease still reports where it ran (P6.3 spec §6).
+  let placement: TurnResult['sandbox'];
   try {
     result = await executeTurn({
       prompt,
@@ -343,6 +349,7 @@ async function handleTurnStream(
       createIfAbsent: auth !== null,
       onEvent: (f) => writeFrame(f),
       signal: ac.signal,
+      onPlacement: (p) => (placement = p),
     });
     // Terminal frame derived from TurnResult — same facts a sync caller reads (§3.4). Not attempted
     // after a disconnect (socket is gone; would EPIPE).
@@ -380,7 +387,7 @@ async function handleTurnStream(
     if (auth)
       void deps.reportRuntime?.(
         auth.sessionId,
-        runtimeFieldsForTurn(process.env, 'end', result?.sandbox),
+        runtimeFieldsForTurn(process.env, 'end', result?.sandbox ?? placement),
       );
     if (!res.writableEnded) res.end();
   }
