@@ -120,6 +120,7 @@ export async function cmdRun(rt: Runtime, io: Io, opts: RunOptions): Promise<num
         SESSION_OPTION_FIELDS,
         opts.options,
         rt.config.lastUsed,
+        { interactive: false },
       );
       if (r.status === 'blocked') {
         io.err(`cannot start a session: ${r.field.emptyHint}`);

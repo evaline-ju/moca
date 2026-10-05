@@ -9,6 +9,8 @@ import { sanitizeRemote } from './sanitize.js';
 export interface Choice {
   value: string;
   label: string;
+  /** The server's own default (P6.3's sandbox tier): preselected when nothing was used last. */
+  isDefault?: boolean;
 }
 
 export interface SessionOptionField {
@@ -21,6 +23,11 @@ export interface SessionOptionField {
    * `credential_required` and is mapped to `emptyHint` by fieldRefusedByServer.
    */
   serverMayResolve?: boolean;
+  /**
+   * The server has its own default for this field (P6.3's sandbox tier): a non-interactive caller
+   * that did not choose leaves it unset instead of being refused with "choose with --option".
+   */
+  serverDefaults?: boolean;
   source(api: ControlPlaneApi): Promise<Choice[]>;
   toRequest(value: string, req: CreateSessionRequest): CreateSessionRequest;
 }
@@ -46,7 +53,28 @@ export const inferenceCredentialField: SessionOptionField = {
   toRequest: (value, req) => ({ ...req, credentials: { ...req.credentials, inference: value } }),
 };
 
-export const SESSION_OPTION_FIELDS: readonly SessionOptionField[] = [inferenceCredentialField];
+export const sandboxTierField: SessionOptionField = {
+  key: 'sandboxTier',
+  label: 'Sandbox tier',
+  emptyHint: 'this deployment declares no sandbox tiers',
+  serverMayResolve: true,
+  serverDefaults: true,
+  async source(api) {
+    const tiers = (await api.discovery()).sandboxTiers;
+    if (!tiers) return [];
+    return tiers.names.map((n) => ({
+      value: n,
+      label: sanitizeRemote(n),
+      ...(n === tiers.default ? { isDefault: true } : {}),
+    }));
+  },
+  toRequest: (value, req) => ({ ...req, sandbox: { ...req.sandbox, tier: value } }),
+};
+
+export const SESSION_OPTION_FIELDS: readonly SessionOptionField[] = [
+  inferenceCredentialField,
+  sandboxTierField,
+];
 
 export type Resolution =
   | { status: 'ready'; values: Record<string, string>; request: CreateSessionRequest }
@@ -64,6 +92,7 @@ export async function resolveSessionOptions(
   fields: readonly SessionOptionField[],
   given: Record<string, string>,
   lastUsed: Record<string, string>,
+  opts: { interactive?: boolean } = {},
 ): Promise<Resolution> {
   const values: Record<string, string> = {};
   for (const field of fields) {
@@ -81,12 +110,16 @@ export async function resolveSessionOptions(
       values[field.key] = choices[0].value;
       continue;
     }
+    // A field the server defaults (the sandbox tier) is not a question for a script: leave it unset.
+    if (opts.interactive === false && field.serverDefaults && wanted === undefined) continue;
     const last = lastUsed[field.key];
     return {
       status: 'needs-input',
       field,
       choices,
-      defaultValue: choices.some((c) => c.value === last) ? last : undefined,
+      defaultValue: choices.some((c) => c.value === last)
+        ? last
+        : choices.find((c) => c.isDefault)?.value,
       values,
     };
   }

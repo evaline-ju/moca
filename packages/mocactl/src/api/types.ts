@@ -31,6 +31,8 @@ export interface SessionSummary {
   state: 'active' | 'deleting';
   lastTurnAt: number | null;
   turns: number;
+  /** The sandbox tier the session runs in (P6.3); null when untiered, absent before P6.3. */
+  sandboxTier?: string | null;
 }
 
 export interface SessionPage {
@@ -40,6 +42,7 @@ export interface SessionPage {
 
 export interface CreateSessionRequest {
   credentials?: { inference?: string };
+  sandbox?: { tier?: string };
 }
 
 export interface SessionToken {
@@ -74,6 +77,8 @@ export interface PutCredentialRequest {
 /** GET /v1/discovery: where the rest of the deployment is, readable before login. */
 export interface Discovery {
   harnessUrl: string | null;
+  /** P6.3. Optional so a pre-P6.3 control plane, which omits it, still parses. */
+  sandboxTiers?: { names: string[]; default: string } | null;
 }
 
 export interface ControlPlaneApi {

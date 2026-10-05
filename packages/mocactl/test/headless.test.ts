@@ -124,6 +124,25 @@ describe('cmdRun', () => {
     expect(requests).toEqual([{}]);
   });
 
+  it('leaves the sandbox tier to the server default when none was chosen (P6.3)', async () => {
+    const o = io();
+    const requests: unknown[] = [];
+    const cp = fakeControlPlane({
+      discovery: async () => ({
+        harnessUrl: 'http://h',
+        sandboxTiers: { names: ['container', 'microvm'], default: 'container' },
+      }),
+      listCredentials: async () => [credential('anthropic')],
+      createSession: async (req) => {
+        requests.push(req);
+        return { sessionId: 's-new', token: 'st', expiresAt: 4_000_000_000 };
+      },
+    });
+    expect(await cmdRun(runtime({ cp }), o, { prompt: 'hi', options: {}, json: false })).toBe(0);
+    expect(requests).toEqual([{ credentials: { inference: 'anthropic' } }]);
+    expect(requests[0]).not.toHaveProperty('sandbox');
+  });
+
   it('refuses to run without a valid login', async () => {
     const o = io();
     expect(
