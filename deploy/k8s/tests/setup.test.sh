@@ -563,25 +563,32 @@ expect_out 'SH_P4_SANDBOX_IDS'
 expect_out '--relay-tls-cert FILE --relay-tls-key FILE'
 pass '--relay-tls-cert/--relay-tls-key: ocp only, a pair, a value each; --help lists them'
 
-
 # Bash 3.2 compatibility: normalize_p4_ids must work on bash < 4.4 with set -u
+# The bug: unset empty array with "set -u" causes "parts[@]: unbound variable".
+# Tests the exact call paths: empty input, all-comma input, mixed spaces/commas, and real parse_args path.
 if [[ -x /bin/bash ]]; then
   bash3_version="$(/bin/bash --version 2>&1 | head -1)"
   if [[ "$bash3_version" == *"version 3."* ]]; then
-    # Test: normalize_p4_ids "a,b" should output "a b" under bash 3.2 with set -u
-    test_output="$(/bin/bash -euo pipefail -c "
+    test_output=$(/bin/bash -euo pipefail -c "
       SH_SOURCE_ONLY=1
       . '$SETUP'
+      # Test each problematic input path under bash 3.2 with set -u
+      normalize_p4_ids '' || exit 1
+      normalize_p4_ids ',' || exit 1
+      normalize_p4_ids ' , ' || exit 1
       result=\$(normalize_p4_ids 'a,b')
-      printf '%s' \"\$result\"
-    " 2>&1)"
-    [[ "$test_output" == "a b" ]] || fail "normalize_p4_ids failed on bash 3.x: got '$test_output' instead of 'a b'"
-    pass "normalize_p4_ids works on bash 3.2 with set -u (empty arrays safe)"
+      [[ \"\$result\" == 'a b' ]] || exit 1
+      unset SH_P4_SANDBOX_IDS
+      parse_args --target kind || exit 1
+      echo 'all tests passed'
+    " 2>&1)
+    [[ "$test_output" == *"all tests passed"* ]] || fail "normalize_p4_ids failed on bash 3.2 with set -u: $test_output"
+    pass "normalize_p4_ids works on bash 3.2 with set -u (empty arrays safe); all edge cases tested"
   else
-    pass "bash 3.2 not available; skipping set -u regression test"
+    echo "skip - bash 3.2 not available (version is: $bash3_version)"
   fi
 else
-  pass "bash 3.2 not available at /bin/bash; skipping set -u regression test"
+  echo "skip - bash 3.2 not available at /bin/bash"
 fi
 
 reset_state
