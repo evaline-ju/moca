@@ -181,7 +181,8 @@ The install is not finished until the relay has mirrored the worker into `sh:san
 record is what the supervisor leases from, so the installer waits for it (`MICROVM_ATTACH_TIMEOUT`,
 default 60s). With `--remote` there is no local record to read: the installer waits instead for the
 worker's own `attached, serving execs` line, which must then hold for `MICROVM_ATTACH_SETTLE`
-seconds (default 5) with no reconnect, all within `MICROVM_ATTACH_TIMEOUT`.
+seconds (default 5, at least 1) with no reconnect, all within `MICROVM_ATTACH_TIMEOUT` (a hold that
+starts before then may finish).
 
 **Re-running changes nothing.** On the rig, the second run printed `nothing to change` and restarted
 nothing. Edits an operator makes to `microvm-worker.env` are kept, including `SH_WORKSPACE_IDLE`

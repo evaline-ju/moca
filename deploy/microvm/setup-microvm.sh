@@ -25,7 +25,7 @@
 #
 # Env overrides: SH_UNIT_DIR, SH_ENV_DIR, SH_BIN_DIR, MICROVM_SANDBOX_ID, MICROVM_WORKSPACE_IDLE,
 # MICROVM_SNAPSHOT_DIR, MICROVM_BIN, MICROVM_ATTACH_TIMEOUT, MICROVM_ATTACH_SETTLE (--remote: seconds
-# an attach must hold before it counts) -- defaults below -- and
+# an attach must hold before it counts, at least 1) -- defaults below -- and
 # MICROVM_MAX_COMMITTED_MB (unset by default): a VM-memory budget in MiB for a host smaller than the
 # shipped unit's 24 GiB, written as a drop-in that also lowers the unit's AssertMemory to match.
 set -euo pipefail
@@ -59,9 +59,13 @@ die() { echo "setup-microvm.sh: $*" >&2; exit 1; }
 # The relay authenticates a sandbox by SH_RELAY_TOKEN_<sandboxId> (sandbox-relay/src/main.ts), and
 # systemd's EnvironmentFile= only accepts shell-valid names -- a dashed id's line is dropped with a
 # log message, and the attach then fails closed with nothing pointing at why.
+# DIR is reserved: SH_RELAY_TOKEN_DIR is the relay's token-directory setting, so the relay refuses
+# that ID before any lookup (k8s slice 2 spec §2.1) and such a worker could never attach.
 validate_sandbox_id() {
   [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] ||
     { echo "MICROVM_SANDBOX_ID='$1' must match ^[A-Za-z_][A-Za-z0-9_]*\$ (it becomes the env name SH_RELAY_TOKEN_$1)" >&2; return 1; }
+  [[ "$1" != DIR ]] ||
+    { echo "MICROVM_SANDBOX_ID='DIR' is reserved: SH_RELAY_TOKEN_DIR is the relay's token-directory setting, so the relay refuses that ID" >&2; return 1; }
 }
 
 # env_value <key> <file>: the last <key>= value, one matched pair of surrounding quotes stripped the
@@ -133,6 +137,12 @@ preflight() {
     ! { [[ "$MICROVM_MAX_COMMITTED_MB" =~ ^[1-9][0-9]*$ ]] && ((MICROVM_MAX_COMMITTED_MB > SHIPPED_RESERVE_MB)); }; then
     die "MICROVM_MAX_COMMITTED_MB='$MICROVM_MAX_COMMITTED_MB' must be a whole number of MiB above the unit's SH_MEMORY_RESERVE_MB ($SHIPPED_RESERVE_MB), or nothing is ever admitted"
   fi
+  [[ "$MICROVM_ATTACH_TIMEOUT" =~ ^[1-9][0-9]*$ ]] ||
+    die "MICROVM_ATTACH_TIMEOUT='$MICROVM_ATTACH_TIMEOUT' must be a whole number of seconds, at least 1"
+  # At least 1: the hold must outlast the worker's first reconnect backoff (at most 750ms), or a
+  # rejected token's attached -> stream ended -> attached cycle could fall outside the window.
+  [[ "$MICROVM_ATTACH_SETTLE" =~ ^[1-9][0-9]*$ ]] ||
+    die "MICROVM_ATTACH_SETTLE='$MICROVM_ATTACH_SETTLE' must be a whole number of seconds, at least 1, to outlast the worker's first reconnect backoff (at most 750ms)"
   if [[ -z "$REMOTE_BUNDLE" ]]; then
     [[ -f "$SH_ENV_DIR/relay.env" && -f "$SH_UNIT_DIR/sh-relay.service" ]] ||
       die "no installed P6 found ($SH_ENV_DIR/relay.env, $SH_UNIT_DIR/sh-relay.service); run deploy/vm/setup-vm.sh first"
@@ -394,9 +404,14 @@ attach_state() { # attach_state <journal text> -> "<count of attached/ended line
   printf '%s %s' "$n" "$last"
 }
 
+# The wait is bounded by the wall clock, not by a count of polls: a churning worker makes every poll
+# take a settle window, so counted polls could run TIMEOUT x (1 + SETTLE) seconds. Polls start until
+# MICROVM_ATTACH_TIMEOUT has passed, and a hold that starts before then may finish, so the wait ends
+# within about TIMEOUT + SETTLE + 1 seconds. The first poll always runs: SECONDS ticks on whole
+# seconds, so with a small TIMEOUT the deadline could otherwise pass before any look at the journal.
 verify_attached_remote() {
-  local i inv='' now out first
-  for ((i = 0; i < MICROVM_ATTACH_TIMEOUT; i++)); do
+  local inv='' now out first deadline=$((SECONDS + MICROVM_ATTACH_TIMEOUT))
+  while :; do
     inv="$(systemctl show -p InvocationID --value microvm-worker.service)" || inv=''
     if [[ -n "$inv" ]]; then
       out="$(journalctl -q -o cat "_SYSTEMD_INVOCATION_ID=$inv" 2>/dev/null || true)"
@@ -411,6 +426,7 @@ verify_attached_remote() {
         fi
       fi
     fi
+    ((SECONDS < deadline)) || break
     sleep 1
   done
   die "$MICROVM_SANDBOX_ID did not stay attached to $B_ADDR within ${MICROVM_ATTACH_TIMEOUT}s (a wrong or revoked token, TLS or DNS); the reason is in: journalctl -u microvm-worker _SYSTEMD_INVOCATION_ID=$inv"

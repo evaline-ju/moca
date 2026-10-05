@@ -5,6 +5,11 @@
 # and log their argv; the installer runs against a temp SH_UNIT_DIR/SH_ENV_DIR/SH_BIN_DIR seeded with
 # the two P6 files it reads. Asserts: refusals happen before anything is written, the token is
 # generated once and shared by exactly the two files that need it, and a re-run changes nothing.
+#
+# sleep is NOT mocked: --remote's attach wait is bounded by the wall clock (bash's SECONDS), which a
+# mocked sleep would turn into a busy loop. MICROVM_ATTACH_TIMEOUT=1 and MICROVM_ATTACH_SETTLE=1
+# (the least the installer accepts) keep it short: about 1 s per attached --remote run, 2-3 s for one
+# that is refused, and exactly one poll (one settle) for a worker that churns.
 set -uo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -88,7 +93,7 @@ reset_host() { # a fresh P6 install: relay.env + sh-relay.service, a snapshot, n
   : >"$MOCK_LOG"
 }
 export SH_UNIT_DIR="$TMP/units" SH_ENV_DIR="$TMP/etc" SH_BIN_DIR="$TMP/usrbin" \
-  MICROVM_SNAPSHOT_DIR="$TMP/snap" MICROVM_ATTACH_TIMEOUT=1 MICROVM_ATTACH_SETTLE=0
+  MICROVM_SNAPSHOT_DIR="$TMP/snap" MICROVM_ATTACH_TIMEOUT=1 MICROVM_ATTACH_SETTLE=1
 run() { bash "$SCRIPT" >"$TMP/run.log" 2>&1; echo $?; }
 val() { grep -E "^$1=" "$2" | tail -1 | cut -d= -f2-; }
 hash_tree() { (cd "$TMP" && find units etc usrbin -type f -exec cksum {} + | sort); }
@@ -111,6 +116,8 @@ set +e # the script's own `set -euo pipefail` must not govern the rest of this t
 check "underscore id accepted" "$(validate_sandbox_id moca_microvm_0 2>/dev/null && echo yes || echo no)" "yes"
 check "dashed id refused (systemd drops the SH_RELAY_TOKEN_<id> line)" \
   "$(validate_sandbox_id sbx-microvm-1 2>/dev/null && echo yes || echo no)" "no"
+check "DIR refused, naming why (SH_RELAY_TOKEN_DIR is the relay's token-directory setting)" \
+  "$(validate_sandbox_id DIR 2>&1 >/dev/null | grep -c 'reserved.*SH_RELAY_TOKEN_DIR')" "1"
 printf 'SH_RELAY_PORT=9443\n' >"$TMP/p1"; check "plain port" "$(relay_port "$TMP/p1")" "9443"
 printf 'SH_RELAY_PORT="9555"\n' >"$TMP/p2"; check "quoted port, as systemd strips it" "$(relay_port "$TMP/p2")" "9555"
 printf 'REDIS_URL=x\n' >"$TMP/p3"; check "missing port falls back to the relay's 8443" "$(relay_port "$TMP/p3")" "8443"
@@ -225,8 +232,18 @@ done
 reset_host; MICROVM_MAX_COMMITTED_MB=4096 run >/dev/null
 check "the refusal names the reserve it must exceed" "$(grep -c 'MICROVM_MAX_COMMITTED_MB.*SH_MEMORY_RESERVE_MB' "$TMP/run.log")" "1"
 
+echo "== MICROVM_ATTACH_TIMEOUT / MICROVM_ATTACH_SETTLE: whole seconds, the settle at least 1"
+for bad in SETTLE=0 SETTLE=x TIMEOUT=x; do
+  reset_host
+  check "MICROVM_ATTACH_$bad refused" "$(env "MICROVM_ATTACH_$bad" bash "$SCRIPT" >"$TMP/run.log" 2>&1; echo $?)" "1"
+  check "MICROVM_ATTACH_$bad: nothing written" "$(find "$TMP/etc" "$TMP/units" -name '*microvm*' | wc -l | tr -d ' ')" "0"
+  check "MICROVM_ATTACH_$bad: the refusal names the variable" "$(grep -c "MICROVM_ATTACH_${bad%%=*}='${bad#*=}' must be" "$TMP/run.log")" "1"
+done
+reset_host; MICROVM_ATTACH_SETTLE=0 run >/dev/null
+check "the settle refusal names the worker's first backoff it must outlast" "$(grep -c 'MICROVM_ATTACH_SETTLE.*750ms' "$TMP/run.log")" "1"
+
 echo "== refusals write nothing"
-for case in containers stopped-containers no-p6 no-snapshot dashed-id; do
+for case in containers stopped-containers no-p6 no-snapshot dashed-id reserved-id; do
   reset_host
   case "$case" in
     containers) export MOCK_PODMAN_PS="sh-sandbox-0 sh-sandbox-1" ;;
@@ -235,6 +252,7 @@ for case in containers stopped-containers no-p6 no-snapshot dashed-id; do
     no-p6) rm -f "$TMP/etc/relay.env" ;;
     no-snapshot) rm -f "$TMP/snap/manifest.json" ;;
     dashed-id) export MICROVM_SANDBOX_ID=sbx-microvm-1 ;;
+    reserved-id) export MICROVM_SANDBOX_ID=DIR ;; # the relay refuses it before any lookup
   esac
   check "$case: exit 1" "$(run)" "1"
   check "$case: no microvm env files" "$(find "$TMP/etc" -name '*microvm*' | wc -l | tr -d ' ')" "0"
@@ -315,6 +333,12 @@ check "the rejection names the token as a cause" "$(grep -c 'wrong or revoked to
 rm -f "$TMP/journal-calls"; : >"$MOCK_LOG"
 check "a worker reconnecting through the settle window (churn): exit 1" "$(MOCK_JOURNAL_CHURN=1 runr "$B")" "1"
 check "churn: the journal was re-read after the settle" "$(cat "$TMP/journal-calls")" "2"
+# The wait is bounded by the wall clock: TIMEOUT=3 SETTLE=2 ends within about 3 + 2 + 1 s. The old
+# count of polls took 3 x (1 + 2) = 9 s, since each churning poll spends a whole settle window.
+rm -f "$TMP/journal-calls"; t0=$SECONDS
+MICROVM_ATTACH_TIMEOUT=3 MICROVM_ATTACH_SETTLE=2 MOCK_JOURNAL_CHURN=1 runr "$B" >/dev/null
+check "churn, TIMEOUT=3 SETTLE=2: refused within TIMEOUT + SETTLE + 1 (+1 s slack), not 9 s" \
+  "$( (($SECONDS - t0 <= 7)) && echo bounded || echo "took $((SECONDS - t0))s")" "bounded"
 check "churn: the refusal names the current invocation's journal" "$(grep -c 'journalctl -u microvm-worker _SYSTEMD_INVOCATION_ID=inv-1' "$TMP/run.log")" "1"
 check "an attach after a stream that ended counts (a reconnect): exit 0" \
   "$(MOCK_JOURNAL_TAIL="$(printf 'microvm-worker: stream ended (EOF); reconnecting in 1s\nmicrovm-worker: attached, serving execs')" runr "$B")" "0"
