@@ -23,16 +23,6 @@ mocactl change; the deployment paths only set configuration.
 
 ## 0. Decisions taken during design
 
-### 0.1 v1.1 corrections
-
-1. **Durations are integer seconds:** `SH_SANDBOX_AFFINITY_TTL_SECONDS` and `SH_SANDBOX_AFFINITY_GRACE_SECONDS`. The TypeScript side has no Go-duration parser, and the repo's knobs are `*_SECONDS` / `*_MS` integers read through `intEnv`.
-2. **The relay overwrites the detach mark** (plain `SET` with TTL); only the harness uses `SET NX`. Otherwise a stale mark can survive and cause early grace-period expiry.
-3. **Affinity applies only on the records path** (`remoteOn`). The pods-only path stays byte-for-byte unchanged. Pods listed alongside records (`both`) take part in affinity like records.
-4. **Placement is reported at turn end**, from the result, not at turn start: the sandbox is not known when `server.ts` reports `start`.
-5. **§10's first risk is resolved:** mocactl already parses an unknown SSE `event:` as an `UnknownFrame`. Older clients ignore `workspace_reset`. The mocactl contract test requires `KNOWN_FRAME_TYPES` to change in the same PR as the harness union.
-6. **Retiered sandboxes:** an affine sandbox present under another tier falls back immediately (reason `'retiered'`). §4 step 4 covered only "absent".
-7. **`SandboxAffinityPendingError` extends `SandboxPoolSaturatedError`,** so the three leaf paths' existing `instanceof SandboxPoolSaturatedError` checks classify it `saturated` (retryable) with no edit. Its own `name` joins knative-server's `NO_CAPACITY` set.
-
 | Question                          | Decision                                                                                                                                                                                                                                                                                                                                       |
 | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | What is driving this slice        | **Mixed tiers behind one relay**: container sandboxes and P4 microVM workers on one stack, each session pinned to one tier. Horizontal P4 scale comes with it (affinity), but is secondary.                                                                                                                                                    |
@@ -42,6 +32,16 @@ mocactl change; the deployment paths only set configuration.
 | The previous sandbox is absent    | **503 for a grace period (default 60 s), then fall back within the tier and record a workspace reset.** Rejected: strict (a decommissioned host strands its sessions until an operator acts) and soft (today's bug, at a lower rate).                                                                                                          |
 | Where affinity lives              | **Data-plane Redis, beside the leases** (`sh:sandbox:affinity:<sessionId>`). Rejected: the control plane's `SessionRecord` (couples it to placement, needs a per-turn write-back, does nothing without a control plane); shared workspace storage per tier (§9).                                                                               |
 | How the tier reaches the selector | **On the exchange response**, which every authenticated turn already fetches from the control plane. Unauthenticated turns and leaves use the deployment default.                                                                                                                                                                              |
+
+### 0.1 v1.1 corrections
+
+1. **Durations are integer seconds:** `SH_SANDBOX_AFFINITY_TTL_SECONDS` and `SH_SANDBOX_AFFINITY_GRACE_SECONDS`. The TypeScript side has no Go-duration parser, and the repo's knobs are `*_SECONDS` / `*_MS` integers read through `intEnv`.
+2. **The relay overwrites the detach mark** (plain `SET` with TTL); only the harness uses `SET NX`. Otherwise a stale mark can survive and cause early grace-period expiry.
+3. **Affinity applies only on the records path** (`remoteOn`). The pods-only path stays byte-for-byte unchanged. Pods listed alongside records (`both`) take part in affinity like records.
+4. **Placement is reported at turn end**, from the result, not at turn start: the sandbox is not known when `server.ts` reports `start`.
+5. **§10's first risk is resolved:** mocactl already parses an unknown SSE `event:` as an `UnknownFrame`. Older clients ignore `workspace_reset`. The mocactl contract test requires `KNOWN_FRAME_TYPES` to change in the same PR as the harness union.
+6. **Retiered sandboxes:** an affine sandbox present under another tier falls back immediately (reason `'retiered'`). §4 step 4 covered only "absent".
+7. **`SandboxAffinityPendingError` extends `SandboxPoolSaturatedError`,** so the three leaf paths' existing `instanceof SandboxPoolSaturatedError` checks classify it `saturated` (retryable) with no edit. Its own `name` joins knative-server's `NO_CAPACITY` set.
 
 ## 1. Scope
 
@@ -160,12 +160,13 @@ The inputs gain `opts.tier?: string`. The no-selector path, the pods path, the l
 2. **Read affinity** for `sessionId`. An entry whose `tier` is not `opts.tier` is ignored.
 3. **The affine sandbox is in the filtered set:** `acquire` that sandbox **only**. If the cap
    refuses it, throw `SandboxPoolSaturatedError` (503). Do not try another sandbox.
-4. **The affine sandbox is absent from the filtered set:** read `sh:sandbox:detached:<id>`.
+4. **The affine sandbox is absent from the filtered set.** If it is present under **another tier**
+   (an operator re-tiered its worker): continue to step 5 immediately with
+   `workspaceReset = { from: <id>, reason: 'retiered' }` — no detach-key read, no grace. Otherwise
+   read `sh:sandbox:detached:<id>`:
    - **Missing:** write it now with `SET NX` (`setDetachedIfAbsent`). This starts the grace clock at
      the first turn that noticed the absence. It covers a relay that restarted, and so never wrote
      the key, while the host was gone for good. Then treat the sandbox as just detached.
-   - **Present under a different tier** (reason `'retiered'`): continue to step 5 immediately, carrying
-     `workspaceReset = { from: <id>, reason: 'retiered' }`.
    - **Detached for less than `SH_SANDBOX_AFFINITY_GRACE_SECONDS`** (integer seconds, default `60`): throw
      the new **`SandboxAffinityPendingError`** (503, retryable), naming the sandbox and the time left.
    - **Detached for longer:** continue to step 5, carrying
@@ -211,7 +212,7 @@ stays retryable in `classifyOutcome`, beside `SandboxPoolSaturatedError` and `Sa
   - Session listings and session info show the tier.
 - **Placement.** The data plane's runtime report (`runtimeFieldsForTurn`, `reportRuntime`) gains
   `sandboxId` and `sandboxTier` at turn end, from the lease actually taken, and
-  `workspaceResetAt` / `workspaceResetFrom` and `workspaceResetReason` after a fallback. `projectResources` exposes them under
+  `workspaceResetAt` / `workspaceResetFrom` after a fallback. `projectResources` exposes them under
   `sandbox`, so the resources view shows where the session runs and when it last lost its workspace.
 - **The turn itself.** After a fallback, a streamed turn emits a new frame before any other:
   `{ type: 'workspace_reset'; sessionId; from; tier; reason }` (`harness/src/turn-stream.ts`,
