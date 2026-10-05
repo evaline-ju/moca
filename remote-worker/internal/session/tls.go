@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"log"
 	"os"
 
 	"google.golang.org/grpc/credentials"
@@ -16,6 +17,9 @@ import (
 // certificate (setup.sh's default on OpenShift) verifies once its CA is given. The server name
 // comes from RELAY_ADDR's host -- grpc-go's default -- and is never overridden. Shared by
 // cmd/microvm-worker and cmd/worker so the two cannot diverge.
+// systemCertPool is x509.SystemCertPool, a variable so a test can make it fail.
+var systemCertPool = x509.SystemCertPool
+
 func TransportCredentials(useTLS bool, caFile string) (credentials.TransportCredentials, error) {
 	if !useTLS {
 		if caFile != "" {
@@ -29,8 +33,11 @@ func TransportCredentials(useTLS bool, caFile string) (credentials.TransportCred
 		if err != nil {
 			return nil, fmt.Errorf("RELAY_CA_FILE %s: %w", caFile, err)
 		}
-		pool, err := x509.SystemCertPool()
+		pool, err := systemCertPool()
 		if err != nil || pool == nil {
+			// Practically unreachable on Linux, but never silent: without the system roots the worker
+			// trusts ONLY caFile, which an operator certificate from a public CA would then fail.
+			log.Printf("session: WARNING the system cert pool is unavailable (%v); RELAY_CA_FILE %s is the only trusted CA", err, caFile)
 			pool = x509.NewCertPool()
 		}
 		if !pool.AppendCertsFromPEM(pemBytes) {

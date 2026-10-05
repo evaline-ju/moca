@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -9,6 +10,8 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
+	"log"
 	"math/big"
 	"net"
 	"os"
@@ -120,6 +123,23 @@ func TestTransportCredentials(t *testing.T) {
 		_ = os.WriteFile(junk, []byte("not a certificate\n"), 0o644)
 		if _, err := TransportCredentials(true, junk); err == nil || !strings.Contains(err.Error(), junk) {
 			t.Fatalf("want an error naming %s, got %v", junk, err)
+		}
+	})
+	t.Run("an unavailable system pool is logged, and the CA file alone still verifies", func(t *testing.T) {
+		orig := systemCertPool
+		systemCertPool = func() (*x509.CertPool, error) { return nil, errors.New("no system roots") }
+		var buf bytes.Buffer
+		log.SetOutput(&buf)
+		t.Cleanup(func() { systemCertPool = orig; log.SetOutput(os.Stderr) })
+		creds, err := TransportCredentials(true, caFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := buf.String(); !strings.Contains(got, "system cert pool is unavailable (no system roots)") || !strings.Contains(got, caFile) {
+			t.Fatalf("the fallback was not logged with its reason and the CA file: %q", got)
+		}
+		if err := check(t, addr, creds); err != nil {
+			t.Fatalf("dial with only the CA file failed: %v", err)
 		}
 	})
 	t.Run("plaintext without a CA file stays plaintext", func(t *testing.T) {
