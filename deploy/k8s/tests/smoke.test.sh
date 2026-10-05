@@ -30,7 +30,8 @@ exit 0
 MOCK
 
 # curl: /healthz succeeds for the first $MOCK_HEALTHZ_OK calls (default: always); /v1/sessions
-# returns a session when MOCK_SESSIONS=1; everything else is a refused connection.
+# returns a session when MOCK_SESSIONS=1; /v1/turn streams the file $MOCK_TURN_SSE when it is set;
+# everything else is a refused connection.
 cat >"$TMP/bin/curl" <<'MOCK'
 #!/usr/bin/env bash
 url=''
@@ -43,6 +44,9 @@ case "$url" in
 */v1/sessions)
   [[ "${MOCK_SESSIONS-}" == 1 ]] || exit 7
   echo '{"sessionId":"s1","token":"t1"}' ;;
+*/v1/turn)
+  [[ -n "${MOCK_TURN_SSE-}" ]] || exit 7
+  cat "$MOCK_TURN_SSE" ;;
 *) exit 7 ;;
 esac
 MOCK
@@ -164,5 +168,35 @@ pass 'p4 tier: a container record fails P2; an attach that never reached the rel
   ! grep -qF 'holds no SH_P4_SANDBOX_IDS' "$TMP/out" || fail 'a failed moca-setup read was reported as an empty SH_P4_SANDBOX_IDS'
   expect_out 'PASS=')
 pass 'p4 tier: a failed read of moca-setup is a read failure in P2, not an empty SH_P4_SANDBOX_IDS'
+
+# A real model's tool_result preview is a JSON envelope, not plain text (live run, #424): P3 must
+# read the kernel out of .content[].text, not compare the whole envelope against the nodes'.
+# p4_sse FILE TEXT: an SSE turn whose bash result is TEXT, wrapped as the live run saw it.
+p4_sse() {
+  jq -nc --arg t "$2" '{type: "tool_result", preview: ({content: [{type: "text", text: $t}]} | tojson)}' |
+    sed 's/^/data: /' >"$1"
+  echo 'data: {"type":"done","sessionId":"s1"}' >>"$1"
+}
+cat >"$TMP/guest.sse" <<'SSE'
+data: {"type":"tool_result","preview":"{\"content\":[{\"type\":\"text\",\"text\":\"6.18.44+\\np4-proof\\n\"}]}"}
+data: {"type":"done","sessionId":"s1"}
+SSE
+p4_sse "$TMP/guest-built.sse" $'6.18.44+\np4-proof\n'
+cmp -s "$TMP/guest.sse" "$TMP/guest-built.sse" || fail 'the literal envelope fixture is not the live format p4_sse builds'
+p4_sse "$TMP/node.sse" $'5.14.0-427.el9.x86_64\np4-proof\n'
+(export SMOKE_MODEL_URL=https://model.example.test SMOKE_MODEL_TOKEN=model-token-not-real MOCK_REDIS_OUT=moca_microvm_0 \
+  MOCK_SESSIONS=1 MOCK_TURN_SSE="$TMP/guest.sse"
+  run_smoke --target ocp --tier p4
+  grep -qE '^  ok session s1 ran on kernel 6\.18\.44\+ \(nodes run 5\.14\.0-427\.el9\.x86_64\)$' "$TMP/out" ||
+    fail 'P3 did not pass naming the guest kernel 6.18.44+ out of the JSON envelope')
+pass 'p4 tier: P3 reads the guest kernel out of a JSON-envelope preview and passes naming it'
+
+(export SMOKE_MODEL_URL=https://model.example.test SMOKE_MODEL_TOKEN=model-token-not-real MOCK_REDIS_OUT=moca_microvm_0 \
+  MOCK_SESSIONS=1 MOCK_TURN_SSE="$TMP/node.sse"
+  run_smoke --target ocp --tier p4
+  ! grep -qE '^  ok session s1 ran on kernel' "$TMP/out" || fail 'P3 passed on a turn that ran on a node kernel'
+  grep -qE "^  FAIL the turn's kernel '5\.14\.0-427\.el9\.x86_64'" "$TMP/out" ||
+    fail 'P3 did not FAIL naming the node kernel read out of the envelope')
+pass 'p4 tier: P3 FAILs when the envelope text is a node kernel'
 
 echo "smoke.test.sh: all passed"

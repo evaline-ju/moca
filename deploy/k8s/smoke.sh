@@ -85,6 +85,12 @@ HARNESS=http://127.0.0.1:18080
 ADMIN=http://127.0.0.1:18081
 CP=http://127.0.0.1:18090
 tool_out() { sed -n 's/^data: //p' "$1" | jq -r 'select(.type == "tool_result" and (.isError | not)) | .preview' 2>/dev/null; }
+# tool_text: a real model's preview is a JSON envelope, {"content":[{"type":"text","text":"..."}]},
+# whose text tool_out leaves JSON-escaped on one line; decode it. A plain preview passes as is.
+tool_text() { jq -Rr '(fromjson? | objects | .content[]? | select(.type? == "text") | .text) // .' 2>/dev/null; }
+# first_line: the first non-blank line, trimmed. awk reads to the end: an early exit (head, sed q)
+# would SIGPIPE the jq feeding it, and pipefail would turn that into a failure.
+first_line() { awk '!done && NF { sub(/^[ \t\r]+/, ""); sub(/[ \t\r]+$/, ""); print; done = 1 }'; }
 # `kc ... &` would background a subshell running kc, so $! -- and the kill -- would hit the
 # subshell and orphan kubectl, which then kept the ports bound across forward() and after exit.
 # exec makes the background job kubectl itself.
@@ -195,15 +201,18 @@ if [[ "$TIER" == p4 ]]; then
   SID=''
   if new_session && turn p4write "$SID" "$(ask K8S-SMOKE-P4-WRITE 'uname -r; echo p4-proof | tee proof.txt')" &&
     grep -q p4-proof <(tool_out "$OUT/p4write.sse"); then
-    # sed, not head: head's early exit would SIGPIPE jq, and pipefail would end the run here.
-    guest="$(tool_out "$OUT/p4write.sse" | sed -n 1p || true)"
+    guest="$(tool_out "$OUT/p4write.sse" | tool_text | first_line || true)"
+    raw="$(tool_out "$OUT/p4write.sse" | tr '\n' ' ' || true)"
     nodes="$(kc get nodes -o jsonpath='{.items[*].status.nodeInfo.kernelVersion}' 2>/dev/null || true)"
+    kre='^[0-9]+\.[0-9]+'
     if [[ -z "$nodes" ]]; then
       ko "could not read the nodes' kernels (kubectl get nodes)"
-    elif [[ -n "$guest" && " $nodes " != *" $guest "* ]]; then
-      ok "session $SID ran on kernel $guest (nodes run $nodes)"
-    else
+    elif ! [[ "$guest" =~ $kre ]]; then
+      ko "the turn's output '$guest' is not a kernel release (preview: ${raw:0:300})"
+    elif [[ " $nodes " == *" $guest "* ]]; then
       ko "the turn's kernel '$guest' is a node's ($nodes): it did not run in a microVM"
+    else
+      ok "session $SID ran on kernel $guest (nodes run $nodes)"
     fi
   else
     ko "p4 write turn: $(head -c 600 "$OUT/p4write.sse" 2>/dev/null)"
