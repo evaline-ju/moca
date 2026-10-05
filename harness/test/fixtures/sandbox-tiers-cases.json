@@ -1,0 +1,40 @@
+[
+  { "name": "unset", "env": {}, "expect": null },
+  { "name": "blank", "env": { "SH_SANDBOX_TIERS": "  " }, "expect": null },
+  { "name": "only commas", "env": { "SH_SANDBOX_TIERS": ",," }, "expect": null },
+  {
+    "name": "one tier is its own default",
+    "env": { "SH_SANDBOX_TIERS": "microvm" },
+    "expect": { "names": ["microvm"], "default": "microvm" }
+  },
+  {
+    "name": "trimmed, empty entries dropped",
+    "env": { "SH_SANDBOX_TIERS": " container , microvm,,", "SH_SANDBOX_DEFAULT_TIER": " container " },
+    "expect": { "names": ["container", "microvm"], "default": "container" }
+  },
+  {
+    "name": "two tiers need a default",
+    "env": { "SH_SANDBOX_TIERS": "container,microvm" },
+    "error": "SH_SANDBOX_DEFAULT_TIER is required"
+  },
+  {
+    "name": "default must be declared",
+    "env": { "SH_SANDBOX_TIERS": "container,microvm", "SH_SANDBOX_DEFAULT_TIER": "gpu" },
+    "error": "SH_SANDBOX_DEFAULT_TIER='gpu' is not one of SH_SANDBOX_TIERS"
+  },
+  {
+    "name": "matching is case-sensitive",
+    "env": { "SH_SANDBOX_TIERS": "container,microvm", "SH_SANDBOX_DEFAULT_TIER": "Container" },
+    "error": "SH_SANDBOX_DEFAULT_TIER='Container' is not one of SH_SANDBOX_TIERS"
+  },
+  {
+    "name": "duplicate",
+    "env": { "SH_SANDBOX_TIERS": "container,container", "SH_SANDBOX_DEFAULT_TIER": "container" },
+    "error": "SH_SANDBOX_TIERS names 'container' twice"
+  },
+  {
+    "name": "not a label value",
+    "env": { "SH_SANDBOX_TIERS": "con tainer" },
+    "error": "SH_SANDBOX_TIERS: 'con tainer' is not a tier name"
+  }
+]
