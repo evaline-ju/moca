@@ -1,7 +1,8 @@
 import { timingSafeEqual } from 'node:crypto';
 import { inferenceAuthHeader, type InferenceAuthHeader } from './credential-store.js';
 import { CpError } from './errors.js';
-import type { CpDeps } from './handlers.js';
+import type { CpConfig, CpDeps } from './handlers.js';
+import type { SessionRecord } from './ownership.js';
 import { verifyToken } from './token.js';
 
 /**
@@ -32,6 +33,11 @@ export interface ExchangeResponse {
    * the binding to moca-egress instead.
    */
   authHeader?: Exclude<InferenceAuthHeader, 'authorization'>;
+  /**
+   * The session's sandbox tier (P6.3 spec §3.3), which the data plane filters sandboxes on. Present
+   * only when non-empty; absent means "no tier", and the data plane then uses its own default.
+   */
+  sandboxTier?: string;
 }
 
 /**
@@ -42,6 +48,15 @@ export interface ExchangeResponse {
  */
 export function placeholderFor(subject: string): string {
   return `sh-placeholder-${subject}`;
+}
+
+/**
+ * The tier to hand the data plane. The stored one -- including '' for a session created while no
+ * tiers were declared, which stays untiered. A record written before P6.3 has no field at all and
+ * gets TODAY's default: what it would have been given had it been created now.
+ */
+export function sessionTier(rec: SessionRecord, tiers: CpConfig['sandboxTiers']): string {
+  return rec.sandboxTier ?? tiers?.default ?? '';
 }
 
 /**
@@ -252,6 +267,7 @@ export async function exchangeCredential(
     decision: usedOperatorFallback ? 'operator_fallback_used' : 'credential_issued',
   });
 
+  const tier = sessionTier(rec, deps.config.sandboxTiers);
   return {
     mode,
     anthropicAuthToken: mode === 'placeholder' ? placeholderFor(rec.owner) : secretValue,
@@ -261,5 +277,6 @@ export async function exchangeCredential(
     // Direct mode only: in placeholder mode the harness sends `Bearer <placeholder>` as it always did,
     // and the injector decides the upstream header.
     ...(mode === 'direct' && authHeader === 'x-api-key' ? { authHeader } : {}),
+    ...(tier ? { sandboxTier: tier } : {}),
   };
 }

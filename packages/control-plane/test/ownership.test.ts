@@ -18,6 +18,7 @@ const rec = (over: Partial<SessionRecord> = {}): SessionRecord => ({
   state: 'active',
   poolSelector: null,
   credentialName: 'my-anthropic',
+  sandboxTier: '',
   tombstone: false,
   ...over,
 });
@@ -110,6 +111,21 @@ describe('create and get', () => {
     expect(f.zsets.get(ownerKey('github:1234'))).toEqual([
       { score: 1_757_000_000_000, value: 'sid-1' },
     ]);
+  });
+
+  it('reads a record written before P6.3 (no sandboxTier field) as undefined, not ""', async () => {
+    const fake = fakeRedis();
+    const index = new OwnershipIndex(fake.redis);
+    await fake.redis.hSet(sessionKey('old'), {
+      owner: 'github:1',
+      tenant: 'github:1',
+      createdAt: '1',
+      state: 'active',
+      poolSelector: '',
+      credentialName: '',
+      tombstone: '0',
+    });
+    expect((await index.get('old'))?.sandboxTier).toBeUndefined();
   });
 });
 

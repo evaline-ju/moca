@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { checkExchangeAuth, exchangeCredential, placeholderFor } from '../src/exchange.js';
+import {
+  checkExchangeAuth,
+  exchangeCredential,
+  placeholderFor,
+  sessionTier,
+} from '../src/exchange.js';
 import { HANDLERS, type CpDeps } from '../src/handlers.js';
 import { OwnershipIndex, type CpRedisLike } from '../src/ownership.js';
 import { makeDeps, ctx, alice, codeOf, seedCredential } from './helpers/deps.js';
@@ -70,6 +75,30 @@ describe('placeholderFor', () => {
   });
 });
 
+describe('sessionTier (P6.3 spec §3.3)', () => {
+  const tiers = { names: ['container', 'microvm'], default: 'container' };
+  const base = {
+    sessionId: 's',
+    owner: 'o',
+    tenant: 'o',
+    createdAt: 0,
+    state: 'active' as const,
+    poolSelector: null,
+    credentialName: '',
+    tombstone: false,
+  };
+  it('is the stored tier', () => {
+    expect(sessionTier({ ...base, sandboxTier: 'microvm' }, tiers)).toBe('microvm');
+  });
+  it('is "" for a session created while no tiers were declared, even if some are now', () => {
+    expect(sessionTier({ ...base, sandboxTier: '' }, tiers)).toBe('');
+  });
+  it("is TODAY's default for a record written before P6.3", () => {
+    expect(sessionTier(base, tiers)).toBe('container');
+    expect(sessionTier(base, null)).toBe('');
+  });
+});
+
 describe('exchangeCredential', () => {
   let d: CpDeps;
   beforeEach(async () => {
@@ -88,6 +117,19 @@ describe('exchangeCredential', () => {
       sessionId: 'sid-fixed',
       subject: 'github:1234',
     });
+  });
+
+  it('returns the session tier when it has one (P6.3)', async () => {
+    const t = makeDeps({
+      config: {
+        exchangeToken: 'shared-abc', // notsecret
+        defaultInferenceEndpoint: undefined,
+        sandboxTiers: { names: ['container', 'microvm'], default: 'microvm' },
+      },
+    });
+    await seedCredential(t);
+    const token = await sessionToken(t); // creates the session: no tier requested, so the default
+    expect((await exchangeCredential(token, t)).sandboxTier).toBe('microvm');
   });
 
   it('returns a placeholder, not the real key, whenever the deployment has an injector', async () => {

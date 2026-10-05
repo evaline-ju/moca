@@ -148,6 +148,77 @@ describe('POST /v1/sessions', () => {
     ).toBe(true);
     expect(JSON.stringify(rows)).not.toContain('sk-fake'); // notsecret
   });
+
+  describe('the sandbox tier (P6.3 spec §3.3)', () => {
+    const tiered = () =>
+      makeDeps({
+        config: { sandboxTiers: { names: ['container', 'microvm'], default: 'container' } },
+      });
+
+    it('stores the requested tier', async () => {
+      const t = tiered();
+      await seedCredential(t);
+      await HANDLERS.createSession!(
+        ctx({ principal: alice, body: { sandbox: { tier: 'microvm' } } }),
+        t,
+      );
+      expect((await t.index.get('sid-fixed'))?.sandboxTier).toBe('microvm');
+    });
+
+    it('stores the default when none is requested, so a later default change does not move the session', async () => {
+      const t = tiered();
+      await seedCredential(t);
+      await HANDLERS.createSession!(ctx({ principal: alice, body: {} }), t);
+      expect((await t.index.get('sid-fixed'))?.sandboxTier).toBe('container');
+    });
+
+    it('400s an undeclared tier, naming the declared ones, and creates nothing', async () => {
+      const t = tiered();
+      await seedCredential(t);
+      const err = await HANDLERS.createSession!(
+        ctx({ principal: alice, body: { sandbox: { tier: 'gpu' } } }),
+        t,
+      ).catch((e: unknown) => e as { code?: string; message?: string });
+      expect((err as { code: string }).code).toBe('invalid_request');
+      expect((err as { message: string }).message).toContain("'gpu'");
+      expect((err as { message: string }).message).toContain('container, microvm');
+      expect(await t.index.get('sid-fixed')).toBeNull();
+    });
+
+    it('400s a non-string tier', async () => {
+      const t = tiered();
+      await seedCredential(t);
+      expect(
+        await codeOf(() =>
+          HANDLERS.createSession!(ctx({ principal: alice, body: { sandbox: { tier: 7 } } }), t),
+        ),
+      ).toBe('invalid_request');
+    });
+
+    it('400s any tier on a deployment that declares none, and stores "" otherwise', async () => {
+      await seedCredential(d);
+      const err = await HANDLERS.createSession!(
+        ctx({ principal: alice, body: { sandbox: { tier: 'microvm' } } }),
+        d,
+      ).catch((e: unknown) => e as { code?: string; message?: string });
+      expect((err as { code: string }).code).toBe('invalid_request');
+      expect((err as { message: string }).message).toContain('declares no sandbox tiers');
+      await HANDLERS.createSession!(ctx({ principal: alice, body: {} }), d);
+      expect((await d.index.get('sid-fixed'))?.sandboxTier).toBe('');
+    });
+
+    it('a session view carries the tier', async () => {
+      const t = tiered();
+      await seedCredential(t);
+      await HANDLERS.createSession!(
+        ctx({ principal: alice, body: { sandbox: { tier: 'microvm' } } }),
+        t,
+      );
+      const page = await HANDLERS.listSessions!(ctx({ principal: alice }), t);
+      const [s] = (page.body as { sessions: { sandboxTier: string | null }[] }).sessions;
+      expect(s.sandboxTier).toBe('microvm');
+    });
+  });
 });
 
 describe('GET /v1/sessions', () => {

@@ -187,6 +187,7 @@ async function sessionView(rec: SessionRecord, deps: CpDeps) {
     state: rec.state,
     lastTurnAt: runtime.lastTurnAt ? Number(runtime.lastTurnAt) : null,
     turns: runtime.turns ? Number(runtime.turns) : 0,
+    sandboxTier: rec.sandboxTier || null,
   };
 }
 
@@ -264,6 +265,24 @@ export const HANDLERS: Record<string, Handler> = {
       !descriptors.some((d) => d.consumer === 'inference');
     const credentialName = fallback ? '' : resolveInferenceName(descriptors, requested);
 
+    // The sandbox tier (P6.3 spec §3.3), resolved and RECORDED here like the credential: a later change
+    // to the deployment default must not move an existing session between tiers.
+    const requestedTier = asRecord(body.sandbox).tier;
+    if (requestedTier !== undefined && typeof requestedTier !== 'string') {
+      throw new CpError('invalid_request', 'sandbox.tier must be a string');
+    }
+    const tiers = deps.config.sandboxTiers;
+    if (requestedTier !== undefined && !tiers) {
+      throw new CpError('invalid_request', 'this deployment declares no sandbox tiers');
+    }
+    if (requestedTier !== undefined && tiers && !tiers.names.includes(requestedTier)) {
+      throw new CpError(
+        'invalid_request',
+        `unknown sandbox tier '${requestedTier}': this deployment declares ${tiers.names.join(', ')}`,
+      );
+    }
+    const sandboxTier = requestedTier ?? tiers?.default ?? '';
+
     const sessionId = deps.newId();
     const rec: SessionRecord = {
       sessionId,
@@ -273,6 +292,7 @@ export const HANDLERS: Record<string, Handler> = {
       state: 'active',
       poolSelector: null, // MU2's tenant-labelled partition fills this (spec §8.2)
       credentialName,
+      sandboxTier,
       tombstone: false,
     };
     await deps.index.create(rec);

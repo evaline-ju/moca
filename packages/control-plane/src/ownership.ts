@@ -45,6 +45,12 @@ export interface SessionRecord {
   /** Which credential this session's turns run on -- chosen once, at creation (plan gap #4). */
   credentialName: string;
   tombstone: boolean;
+  /**
+   * The session's sandbox tier, chosen once at creation (P6.3 spec §3.3). '' when the deployment
+   * declared none then. Undefined ONLY for a record written before P6.3 -- kept distinct from '' so
+   * the exchange can give such a session today's default (sessionTier, exchange.ts).
+   */
+  sandboxTier?: string;
 }
 
 export const AUDIT_STREAM = 'sh:cp:audit';
@@ -112,6 +118,7 @@ export class OwnershipIndex {
         poolSelector: rec.poolSelector ?? '',
         credentialName: rec.credentialName,
         tombstone: rec.tombstone ? '1' : '0',
+        sandboxTier: rec.sandboxTier ?? '',
       }),
     );
     await this.guard(() =>
@@ -133,6 +140,7 @@ export class OwnershipIndex {
       poolSelector: h.poolSelector ? h.poolSelector : null,
       credentialName: h.credentialName ?? '',
       tombstone: h.tombstone === '1',
+      sandboxTier: h.sandboxTier,
     };
   }
 
