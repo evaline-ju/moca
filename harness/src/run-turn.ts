@@ -31,6 +31,7 @@ import {
   SandboxAffinityPendingError,
   assertServerSandbox,
   type SelectDeps,
+  type WorkspaceReset,
 } from './select-sandbox.js';
 import { checkpointExtension } from './checkpoint-extension.js';
 import { budgetVoterExtension, branchSpend } from './budget-voter.js';
@@ -127,6 +128,14 @@ export interface AcquiredTurnSandbox {
   heartbeat: () => Promise<void>;
   /** Return this call's lease. A no-op unless `leased`. */
   release: () => Promise<void>;
+  placement?: TurnPlacement;
+}
+
+/** Where a leased turn ran (P6.3 spec §6). Absent when nothing was leased. */
+export interface TurnPlacement {
+  sandboxId: string;
+  tier: string;
+  workspaceReset?: WorkspaceReset;
 }
 
 /**
@@ -194,6 +203,7 @@ export async function acquireTurnSandbox(
   headCwd: string,
   sessionId: string | undefined,
   deps: SelectDeps = {},
+  tier?: string,
 ): Promise<AcquiredTurnSandbox> {
   const noop = async () => {};
   if (injected) return { sandbox: injected, leased: false, heartbeat: noop, release: noop };
@@ -215,7 +225,7 @@ export async function acquireTurnSandbox(
     // a one-off. Sharing a literal 'anon' workspace across unrelated turns would be the cross-turn
     // bleed spec §2.3 is about, and an EMPTY key is refused outright by microvm-worker (§3.4).
     sessionId ?? holderId,
-    { cap, ttlMs, holderId, remoteSandbox: env.SH_REMOTE_SANDBOX === '1' },
+    { cap, ttlMs, holderId, remoteSandbox: env.SH_REMOTE_SANDBOX === '1', tier },
     deps,
   );
   if (!selected)
@@ -232,6 +242,43 @@ export async function acquireTurnSandbox(
     leased: selected.leased,
     heartbeat: selected.heartbeat,
     release: selected.release,
+    ...(selected.leased && selected.sandboxId
+      ? {
+          placement: {
+            sandboxId: selected.sandboxId,
+            tier: selected.tier ?? '',
+            ...(selected.workspaceReset ? { workspaceReset: selected.workspaceReset } : {}),
+          },
+        }
+      : {}),
+  };
+}
+
+/** The `workspace_reset` frame for a placement that moved the session, else null (P6.3 spec §6). */
+export function placementFrame(
+  sessionId: string,
+  p: TurnPlacement | undefined,
+): TurnStreamFrame | null {
+  if (!p?.workspaceReset) return null;
+  return {
+    type: 'workspace_reset',
+    sessionId,
+    from: p.workspaceReset.from,
+    tier: p.tier,
+    reason: p.workspaceReset.reason,
+  };
+}
+
+/** The result, plus where the turn ran -- what a JSON caller and the runtime report read. */
+export function withPlacement(result: TurnResult, p: TurnPlacement | undefined): TurnResult {
+  if (!p) return result;
+  return {
+    ...result,
+    sandbox: {
+      id: p.sandboxId,
+      tier: p.tier,
+      ...(p.workspaceReset ? { workspaceReset: p.workspaceReset } : {}),
+    },
   };
 }
 
@@ -282,6 +329,11 @@ export interface TurnConfig {
   serverMode?: boolean;
   /** Server mode only: allow local tools when no sandbox resolves. SH_LOCAL_TOOLS=1; refused under multi tenancy. */
   allowLocalTools?: boolean;
+  /**
+   * The session's sandbox tier, as the control plane's exchange returned it (P6.3 spec §3.4). Absent
+   * for every caller without a control plane; selectPoolSandbox then uses SH_SANDBOX_DEFAULT_TIER.
+   */
+  sandboxTier?: string;
 }
 
 export interface ModelSelection {
@@ -500,6 +552,7 @@ export interface TurnResult {
   stopReason: string;
   errorMessage?: string;
   usage?: LeafUsage;
+  sandbox?: { id: string; tier: string; workspaceReset?: WorkspaceReset };
 }
 
 /**
@@ -731,6 +784,8 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
     process.env,
     cwd,
     opened.sessionManager.getSessionId(),
+    {},
+    input.config?.sandboxTier,
   );
 
   // A null config would leave Pi's built-in tools running LOCALLY, in this process (MI1 §5 R3). Both
@@ -741,6 +796,12 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
     await acquired.release();
     throw err;
   }
+
+  // Before any model output, so the notice precedes the turn it explains. It also flushes the SSE
+  // headers: a later pre-content failure then degrades to an error frame instead of a status code,
+  // which is the same regime as any failure after the first token.
+  const resetFrame = placementFrame(opened.sessionManager.getSessionId(), acquired.placement);
+  if (resetFrame) input.onEvent?.(resetFrame);
 
   let leaseRenewal: ReturnType<typeof setInterval> | undefined;
   if (acquired.leased) {
@@ -755,7 +816,10 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
   }
 
   try {
-    return await executeTurnCore(input, acquired.sandbox, opened);
+    return withPlacement(
+      await executeTurnCore(input, acquired.sandbox, opened),
+      acquired.placement,
+    );
   } finally {
     // Clear first, then release: if release throws, the interval is already gone rather than
     // left running against a lease nobody holds.

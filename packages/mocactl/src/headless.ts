@@ -22,6 +22,7 @@ import {
   fieldRefusedByServer,
   resolveSessionOptions,
 } from './core/session-options.js';
+import { workspaceResetText } from './render/blocks.js';
 import { sessionManager, setAuth, type Runtime } from './runtime.js';
 
 export interface Io {
@@ -161,6 +162,9 @@ export async function cmdRun(rt: Runtime, io: Io, opts: RunOptions): Promise<num
       if (opts.json) io.out(JSON.stringify(e.frame) + '\n');
       // Plain text goes straight to a terminal; JSON output escapes control characters itself.
       else if (e.frame.type === 'text') io.out(sanitizeRemote(e.frame.delta));
+      // The sandbox id and tier are server-originated, so they are sanitized like the text above.
+      else if (e.frame.type === 'workspace_reset')
+        io.err(sanitizeRemote(workspaceResetText(e.frame)));
     } else if (e.kind === 'retrying') {
       io.err(`the harness has no capacity — retrying in ${e.seconds}s`);
     } else if (e.kind === 'turn-end') {

@@ -73,6 +73,20 @@ describe('reduceFrame', () => {
     const s = apply(EMPTY_BLOCKS, { type: 'tool_result', id: 'nope', isError: true, preview: 'x' });
     expect(s.blocks[0]).toMatchObject({ kind: 'event', label: 'tool_result' });
   });
+
+  it('shows a workspace_reset frame as a warning notice naming the old sandbox', () => {
+    const s = reduceFrame(EMPTY_BLOCKS, {
+      type: 'workspace_reset',
+      sessionId: 's',
+      from: 'm-0',
+      tier: 'microvm',
+      reason: 'detached',
+    });
+    const notice = s.blocks.find((b) => b.kind === 'notice');
+    expect(notice).toMatchObject({ kind: 'notice', tone: 'warning' });
+    expect((notice as { text: string }).text).toContain("'m-0'");
+    expect((notice as { text: string }).text).toContain('microvm');
+  });
 });
 
 describe('queued prompts', () => {

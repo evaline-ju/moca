@@ -25,6 +25,13 @@ export type ErrorFrame = {
   errorMessage?: string;
   usage?: Usage;
 };
+export type WorkspaceResetFrame = {
+  type: 'workspace_reset';
+  sessionId: string;
+  from: string;
+  tier: string;
+  reason: 'detached' | 'retiered';
+};
 export type UnknownFrame = { type: 'unknown'; event: string; data: unknown };
 
 export type TurnFrame =
@@ -32,6 +39,7 @@ export type TurnFrame =
   | ThinkingFrame
   | ToolUseFrame
   | ToolResultFrame
+  | WorkspaceResetFrame
   | DoneFrame
   | ErrorFrame
   | UnknownFrame;
@@ -41,6 +49,7 @@ export const KNOWN_FRAME_TYPES = [
   'thinking',
   'tool_use',
   'tool_result',
+  'workspace_reset',
   'done',
   'error',
 ] as const;

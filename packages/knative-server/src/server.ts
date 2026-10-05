@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { runTurn, executeTurn, type TurnConfig } from '@moca/harness/run-turn';
+import { runTurn, executeTurn, type TurnConfig, type TurnResult } from '@moca/harness/run-turn';
 import { terminalFrame, type TurnStreamFrame } from '@moca/harness/turn-stream';
 import {
   runLeaf,
@@ -173,8 +173,9 @@ async function handleTurn(req: IncomingMessage, res: ServerResponse): Promise<vo
     if (auth) {
       // Best-effort pod-identity reporting (spec §7.4). Never gates the turn on Redis.
       void deps.reportRuntime?.(auth.sessionId, runtimeFieldsForTurn(process.env, 'start'));
+      let result: TurnResult | undefined;
       try {
-        const result = await executeTurn({
+        result = await executeTurn({
           prompt,
           sessionId: auth.sessionId,
           config: buildConfig(auth),
@@ -183,7 +184,10 @@ async function handleTurn(req: IncomingMessage, res: ServerResponse): Promise<vo
         });
         res.writeHead(200, JSON_HEADERS).end(JSON.stringify(result));
       } finally {
-        void deps.reportRuntime?.(auth.sessionId, runtimeFieldsForTurn(process.env, 'end'));
+        void deps.reportRuntime?.(
+          auth.sessionId,
+          runtimeFieldsForTurn(process.env, 'end', result?.sandbox),
+        );
       }
       return;
     }
@@ -311,8 +315,9 @@ async function handleTurnStream(
   const { writeFrame, stop } = makeFrameWriter(res, intEnv('SH_TURN_STREAM_KEEPALIVE_MS', 20000));
   const effectiveSessionId = auth?.sessionId ?? sessionId;
   if (auth) void deps.reportRuntime?.(auth.sessionId, runtimeFieldsForTurn(process.env, 'start'));
+  let result: TurnResult | undefined;
   try {
-    const result = await executeTurn({
+    result = await executeTurn({
       prompt,
       sessionId: effectiveSessionId,
       config: buildConfig(auth),
@@ -355,7 +360,11 @@ async function handleTurnStream(
     }
   } finally {
     stop();
-    if (auth) void deps.reportRuntime?.(auth.sessionId, runtimeFieldsForTurn(process.env, 'end'));
+    if (auth)
+      void deps.reportRuntime?.(
+        auth.sessionId,
+        runtimeFieldsForTurn(process.env, 'end', result?.sandbox),
+      );
     if (!res.writableEnded) res.end();
   }
 }
