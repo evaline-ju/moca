@@ -16,8 +16,17 @@ function fakeAttach(token?: string) {
   s.emitData = (f) => s.emit('data', f);
   return s;
 }
+
 const hello = (sandboxId: string) => ({
-  hello: { sandboxId, labels: { 'moca.dev/tier': 'microvm' }, capabilities: [], image: '', arch: 'amd64', capacityMax: 4, trust: 'untrusted' },
+  hello: {
+    sandboxId,
+    labels: { 'moca.dev/tier': 'microvm' },
+    capabilities: [],
+    image: '',
+    arch: 'amd64',
+    capacityMax: 4,
+    trust: 'untrusted',
+  },
 });
 
 /** One ordered log of every Redis-facing call, so ordering across records and marks is assertable. */
@@ -89,7 +98,21 @@ describe('relay detach marks (P6.3 spec §3.2)', () => {
     await vi.waitFor(() => expect(records.put).toHaveBeenCalled());
     expect(relay.parked()).toContain('sbx-4');
     s.emit('end');
-    await vi.waitFor(() => expect(err).toHaveBeenCalledWith(expect.stringContaining('detach mark'), expect.anything()));
+    // Both clear (on Hello) and mark (on teardown) failures are logged
+    await vi.waitFor(() =>
+      expect(err).toHaveBeenCalledWith(
+        expect.stringContaining('detach mark clear failed'),
+        expect.anything(),
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(err).toHaveBeenCalledWith(
+        expect.stringContaining('detach mark write failed'),
+        expect.anything(),
+      ),
+    );
+    // Despite failures, presence was removed
+    expect(records.remove).toHaveBeenCalledWith('sbx-4');
     expect(relay.parked()).not.toContain('sbx-4');
     err.mockRestore();
   });
