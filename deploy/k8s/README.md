@@ -866,12 +866,12 @@ StorageClass, for the Redis PVC.
 
 Everything the `ocp` target does outside the namespace is skipped or replaced:
 
-| The `ocp` target | `ocp-single` |
-| --- | --- |
-| creates the `moca`, `moca-sandbox`, `moca-credentials` namespaces | uses your existing namespace (existence checked, never created) |
-| grants `nonroot-v2` to each ServiceAccount (`oc adm`) | no SCC: every explicit UID/GID is stripped, restricted-v2 assigns from the namespace's range |
-| Routes, `ingresses.config/cluster` read, TLS secrets | no Routes; `kubectl port-forward`, like Kind |
-| requires `oc` | kubectl only |
+| The `ocp` target                                                  | `ocp-single`                                                                                 |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| creates the `moca`, `moca-sandbox`, `moca-credentials` namespaces | uses your existing namespace (existence checked, never created)                              |
+| grants `nonroot-v2` to each ServiceAccount (`oc adm`)             | no SCC: every explicit UID/GID is stripped, restricted-v2 assigns from the namespace's range |
+| Routes, `ingresses.config/cluster` read, TLS secrets              | no Routes; `kubectl port-forward`, like Kind                                                 |
+| requires `oc`                                                     | kubectl only                                                                                 |
 
 The isolation the base draws from the namespace boundary moves to pod-label NetworkPolicies: the
 default-deny, the sandbox's egress (relay attach port and the public internet only), the relay's

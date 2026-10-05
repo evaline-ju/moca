@@ -12,7 +12,10 @@ spec:
         - name: supervisor
           env:
             - { name: SH_RELAY_ADDR, value: 'sandbox-relay-exec.moca-single.svc:9444' }
-            - { name: SH_CONTROL_PLANE_URL, value: 'http://moca-control-plane.moca-single.svc:8080' }
+            - {
+                name: SH_CONTROL_PLANE_URL,
+                value: 'http://moca-control-plane.moca-single.svc:8080',
+              }
 ---
 apiVersion: apps/v1
 kind: Deployment

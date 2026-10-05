@@ -14,7 +14,9 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s overlays/ocp-single', () => {
     expect(objs().filter((o) => o.kind === 'Route')).toEqual([]);
     // base's three namespaces are gone, so every remaining object is namespaced, and all to one.
     const namespaces = new Set(
-      objs().filter((o) => o.metadata.namespace).map((o) => o.metadata.namespace),
+      objs()
+        .filter((o) => o.metadata.namespace)
+        .map((o) => o.metadata.namespace),
     );
     expect(namespaces).toEqual(new Set([NS]));
   });
@@ -43,7 +45,9 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s overlays/ocp-single', () => {
     const sbx = container(ss, 'sandbox');
     const mounts = (sbx.volumeMounts ?? []).map((v: { mountPath: string }) => v.mountPath);
     expect(mounts).toEqual(expect.arrayContaining(['/workspace', '/home/sandbox']));
-    const vols = podSpec(ss).volumes.filter((v: { emptyDir?: unknown }) => v.emptyDir !== undefined);
+    const vols = podSpec(ss).volumes.filter(
+      (v: { emptyDir?: unknown }) => v.emptyDir !== undefined,
+    );
     expect(vols.map((v: { name: string }) => v.name)).toEqual(['workspace', 'home']);
   });
 
@@ -99,11 +103,13 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s overlays/ocp-single', () => {
     expect(ss.spec.replicas).toBe(2);
     expect(ss.spec.serviceName).toBe('moca-sandbox');
     // SANDBOX_ID from the pod name, so the pool IDs stay unique and stable.
-    expect(envVar(container(ss, 'sandbox'), 'SANDBOX_ID')?.valueFrom.fieldRef.fieldPath).toBe(
-      'metadata.name',
-    );
+    const fieldRef = envVar(container(ss, 'sandbox'), 'SANDBOX_ID')?.valueFrom as
+      { fieldRef: { fieldPath: string } } | undefined;
+    expect(fieldRef?.fieldRef.fieldPath).toBe('metadata.name');
     // The attach token still comes from the Secret, now same-namespace.
-    expect(envVar(container(ss, 'sandbox'), 'SANDBOX_TOKEN')?.valueFrom.secretKeyRef).toEqual({
+    const secretRef = envVar(container(ss, 'sandbox'), 'SANDBOX_TOKEN')?.valueFrom as
+      { secretKeyRef: { name: string; key: string } } | undefined;
+    expect(secretRef?.secretKeyRef).toEqual({
       name: 'moca-relay-attach',
       key: 'SH_RELAY_TOKEN',
     });
