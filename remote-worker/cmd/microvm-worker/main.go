@@ -694,12 +694,14 @@ func main() {
 	// from the golden snapshot's manifest loaded above instead, which the build script
 	// fills by probing INSIDE the guest before snapshotting; an empty manifest field
 	// advertises nothing rather than lying.
+	labels := session.TierLabels(os.LookupEnv, "microvm")
 	sess := session.New(session.Config{
 		SandboxID:     env(get, "SANDBOX_ID", "sbx-microvm-1"),
 		Image:         env(get, "SANDBOX_IMAGE", ""),
 		Trust:         env(get, "SANDBOX_TRUST", "untrusted"),
 		Capabilities:  man.Capabilities,
 		MaxConcurrent: maxConcurrent,
+		Labels:        labels,
 	}, vmpool.Runner{Pool: pool})
 
 	// slots is in the banner because this tier's default is 16 while the shipped unit sets
@@ -707,10 +709,10 @@ func main() {
 	// nothing in journalctl naming the number, and /stats is gated behind the opt-in
 	// SH_DIAG_STATS_ADDR. cmd/worker logs the same thing as capacity=%d. #305's own thesis
 	// is that a run whose slots came from a typo must not look like a run that chose them.
-	log.Printf("microvm-worker: relay=%s sandbox_id=%s tls=%v vmm=%s D=%d guest=%dMiB budget=%dMiB slots=%d workspace_idle=%s",
+	log.Printf("microvm-worker: relay=%s sandbox_id=%s tls=%v vmm=%s D=%d guest=%dMiB budget=%dMiB slots=%d workspace_idle=%s labels=%v",
 		relayAddr, env(get, "SANDBOX_ID", "sbx-microvm-1"), useTLS, cfg.VMM,
 		cfg.StandbyDepth, cfg.GuestRAMBytes>>20, cfg.MaxCommittedBytes>>20, maxConcurrent,
-		effectiveWorkspaceIdle(cfg))
+		effectiveWorkspaceIdle(cfg), labels)
 	if w := slotBudgetWarning(cfg, maxConcurrent); w != "" {
 		log.Printf("microvm-worker: %s", w)
 	}

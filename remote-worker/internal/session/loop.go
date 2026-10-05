@@ -58,6 +58,9 @@ type Config struct {
 	Capabilities  []string
 	MaxConcurrent int
 	Heartbeat     time.Duration
+	// Labels go into Hello.labels verbatim; the relay mirrors them into the presence record.
+	// TierLabels builds the one the harness reads (moca.dev/tier).
+	Labels map[string]string
 }
 
 // ErrEgressWedged ends a session whose terminal-frame reserve could not be
@@ -293,6 +296,7 @@ func (s *Session) Serve(ctx context.Context, st Stream) error {
 	// guarantee it is first.
 	if err := st.Send(&pb.WorkerFrame{Msg: &pb.WorkerFrame_Hello{Hello: &pb.Hello{
 		SandboxId:    s.cfg.SandboxID,
+		Labels:       s.cfg.Labels,
 		Capabilities: s.cfg.Capabilities,
 		Image:        s.cfg.Image,
 		Arch:         runtime.GOARCH,
