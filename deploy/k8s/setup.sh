@@ -290,6 +290,47 @@ ensure_relay_secrets() {
   )
 }
 
+# P4 hosts' attach tokens (spec §4.3): one key per P4 ID in moca-relay-sandbox-tokens, which the relay
+# reads on every attach from its SH_RELAY_TOKEN_DIR mount (base/relay.yaml). Generated once and
+# kept; a key whose ID is no longer listed is removed -- that is revocation. Removal is an explicit
+# JSON patch, not left to server-side apply's field pruning, so it does not depend on how the API
+# server tracks stringData ownership. With no IDs the Secret stays, empty: the relay's mount of it is
+# optional, but an emptied Secret revokes deterministically where a deleted one may not. Never in
+# moca-sandbox: no P4 host runs there.
+P4_TOKENS_SECRET=moca-relay-sandbox-tokens
+ensure_p4_tokens() {
+  [[ "$TARGET" == ocp ]] || return 0
+  local json relay_json exec_token stale
+  json="$(secret_json "$P4_TOKENS_SECRET" "$NS")"
+  if [[ -n "$P4_IDS" ]]; then
+    relay_json="$(secret_json moca-relay "$NS")"
+    exec_token="$(json_value "$relay_json" MOCA_RELAY_EXEC_TOKEN)"
+    (
+      i=0
+      for id in $P4_IDS; do
+        tok="$(json_value "$json" "$id")"
+        [[ -n "$tok" ]] || { log "generating the relay token for P4 sandbox $id"; tok="$(rand_hex)"; }
+        # The relay refuses a directory token equal to the exec token (spec §2.2); never hand one out.
+        while [[ "$tok" == "$exec_token" ]]; do
+          log "the relay token for $id equals MOCA_RELAY_EXEC_TOKEN; regenerating it"
+          tok="$(rand_hex)"
+        done
+        export "S_$i=$tok"
+        i=$((i + 1))
+      done
+      # shellcheck disable=SC2086 # one argument per ID; IDs are validated identifiers
+      apply_secret "$P4_TOKENS_SECRET" "$NS" $P4_IDS
+    )
+  fi
+  [[ -n "$json" ]] || return 0
+  stale="$(printf '%s' "$json" | jq -r --arg keep "$P4_IDS" \
+    '($keep | split(" ")) as $k | .data // {} | keys[] | select(. as $x | ($k | index($x)) == null)')"
+  [[ -n "$stale" ]] || return 0
+  log "revoking the relay token of P4 sandbox(es) no longer listed: $(printf '%s' "$stale" | tr '\n' ' ')"
+  kc patch secret "$P4_TOKENS_SECRET" -n "$NS" --type=json \
+    -p "$(printf '%s\n' "$stale" | jq -Rnc '[inputs | {op: "remove", path: "/data/\(.)"}]')" >/dev/null
+}
+
 ensure_redis_secret() {
   local json pw
   json="$(secret_json moca-redis "$NS")"
@@ -371,6 +412,7 @@ ensure_mu1_secret() {
 
 ensure_secrets() {
   ensure_relay_secrets
+  ensure_p4_tokens
   ensure_redis_secret
   ensure_mu1_secret
 }
@@ -378,8 +420,12 @@ ensure_secrets() {
 # --- Settings, TLS, SCC, the generated overlay, apply, wait (spec §4.1 steps 5-7) -----------------
 SUP_HOST=''
 CP_HOST=''
+RELAY_HOST=''
 SETTINGS_HASH=''
 GEN_DIR=''
+RELAY_CA="$K8S_DIR/.generated/ocp/moca-relay-ca.crt"
+P4_BUNDLES="$K8S_DIR/.generated/ocp/p4"
+ROUTE_CERT_MADE=''
 
 route_hosts() {
   local domain
@@ -387,6 +433,7 @@ route_hosts() {
   [[ -n "$domain" ]] || die 'could not read the cluster apps domain (ingresses.config/cluster .spec.domain)'
   SUP_HOST="moca-$NS.$domain"
   CP_HOST="moca-control-plane-$NS.$domain"
+  RELAY_HOST="moca-relay-$NS.$domain"
 }
 
 # The client id as resolved by write_settings (sticky: the earlier run's value when
@@ -438,19 +485,24 @@ ensure_mock_model() {
     kc apply --server-side --force-conflicts --field-manager=moca-setup -f - >/dev/null
 }
 
-# The passthrough Route needs a certificate valid for the Route host, which service-ca cannot issue.
-ensure_tls() {
-  [[ "$TARGET" == ocp ]] || return 0
-  if [[ -n "$TLS_CERT" ]]; then
-    log "installing the supervisor TLS certificate from $TLS_CERT"
-    kc create secret tls moca-supervisor-tls -n "$NS" --cert="$TLS_CERT" --key="$TLS_KEY" --dry-run=client -o json |
+# route_cert SECRET HOST CERT KEY CA: a passthrough Route needs a certificate valid for HOST, which
+# service-ca cannot issue. With CERT/KEY (an operator certificate), install them into SECRET.
+# Otherwise -- only when SECRET does not exist yet -- generate a self-signed one for HOST, valid
+# 825 days, and write its certificate to CA. Sets ROUTE_CERT_MADE=self-signed when it generated one.
+# Never call this inside $(...): a command substitution drops set -e, and a failed GET there would
+# read as "absent" and replace an operator certificate.
+route_cert() {
+  local secret="$1" host="$2" cert="$3" key="$4" ca="$5" existing dir
+  ROUTE_CERT_MADE=''
+  if [[ -n "$cert" ]]; then
+    log "installing the $secret certificate from $cert"
+    kc create secret tls "$secret" -n "$NS" --cert="$cert" --key="$key" --dry-run=client -o json |
       kc apply --server-side --force-conflicts --field-manager=moca-setup -f - >/dev/null
     return 0
   fi
   # Absent reads as empty; any other API error aborts (set -e, outside any conditional), so an
   # unreadable operator certificate is never replaced by a self-signed one.
-  local existing dir ca="$K8S_DIR/.generated/ocp/moca-supervisor-ca.crt"
-  existing="$(kc get secret moca-supervisor-tls -n "$NS" --ignore-not-found -o name)"
+  existing="$(kc get secret "$secret" -n "$NS" --ignore-not-found -o name)"
   [[ -z "$existing" ]] || return 0
   mkdir -p "$(dirname "$ca")"
   dir="$(mktemp -d)"
@@ -460,16 +512,88 @@ ensure_tls() {
     trap 'rm -rf "$dir"' EXIT
     chmod 700 "$dir"
     # openssl's stderr is progress noise on success; on failure it is the reason, so show it.
-    if ! openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=$SUP_HOST" \
-      -addext "subjectAltName=DNS:$SUP_HOST" -keyout "$dir/tls.key" -out "$ca" 2>"$dir/openssl.err"; then
+    if ! openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=$host" \
+      -addext "subjectAltName=DNS:$host" -keyout "$dir/tls.key" -out "$ca" 2>"$dir/openssl.err"; then
       cat "$dir/openssl.err" >&2
-      die "openssl could not create the self-signed certificate for $SUP_HOST"
+      die "openssl could not create the self-signed certificate for $host"
     fi
-    kc create secret tls moca-supervisor-tls -n "$NS" --cert="$ca" --key="$dir/tls.key" --dry-run=client -o json |
+    kc create secret tls "$secret" -n "$NS" --cert="$ca" --key="$dir/tls.key" --dry-run=client -o json |
       kc apply --server-side --force-conflicts --field-manager=moca-setup -f - >/dev/null
   )
-  log "WARNING: no --tls-cert given, so the supervisor uses a SELF-SIGNED certificate for $SUP_HOST."
-  log "  Every mocactl user must trust it: export NODE_EXTRA_CA_CERTS=$ca"
+  ROUTE_CERT_MADE=self-signed
+}
+
+ensure_tls() {
+  [[ "$TARGET" == ocp ]] || return 0
+  local ca="$K8S_DIR/.generated/ocp/moca-supervisor-ca.crt"
+  route_cert moca-supervisor-tls "$SUP_HOST" "$TLS_CERT" "$TLS_KEY" "$ca"
+  if [[ "$ROUTE_CERT_MADE" == self-signed ]]; then
+    log "WARNING: no --tls-cert given, so the supervisor uses a SELF-SIGNED certificate for $SUP_HOST."
+    log "  Every mocactl user must trust it: export NODE_EXTRA_CA_CERTS=$ca"
+  fi
+  [[ -n "$P4_IDS" ]] || return 0
+  route_cert moca-relay-tls "$RELAY_HOST" "$RELAY_TLS_CERT" "$RELAY_TLS_KEY" "$RELAY_CA"
+  [[ "$ROUTE_CERT_MADE" != self-signed ]] ||
+    log "no --relay-tls-cert given: the relay Route uses a SELF-SIGNED certificate for $RELAY_HOST; every P4 bundle carries it as relay-ca.crt"
+  refresh_relay_ca
+}
+
+# The CA a P4 host must trust (spec §4.4), read back from moca-relay-tls on every run so it is right
+# whichever checkout created the certificate: the certificate itself when it is self-issued (the
+# self-signed one route_cert made), nothing when it is an operator's -- that chains to an issuer
+# the host trusts system-wide, and the worker keeps the system pool (RELAY_CA_FILE only adds).
+refresh_relay_ca() {
+  local json crt subject issuer
+  json="$(secret_json moca-relay-tls "$NS")"
+  crt="$(json_value "$json" tls.crt)"
+  [[ -n "$crt" ]] || die 'moca-relay-tls has no tls.crt: delete the Secret and re-run, or pass --relay-tls-cert'
+  subject="$(printf '%s\n' "$crt" | openssl x509 -noout -subject_hash)" || die 'moca-relay-tls holds no readable certificate'
+  issuer="$(printf '%s\n' "$crt" | openssl x509 -noout -issuer_hash)" || die 'moca-relay-tls holds no readable certificate'
+  mkdir -p "$(dirname "$RELAY_CA")"
+  if [[ "$subject" == "$issuer" ]]; then
+    printf '%s\n' "$crt" >"$RELAY_CA"
+    chmod 644 "$RELAY_CA"
+  else
+    rm -f "$RELAY_CA"
+  fi
+}
+
+# One bundle per P4 ID (spec §4.5): what `setup-microvm.sh --remote` installs on that host. The
+# token reaches worker.env through the builtin printf, never argv. A bundle whose ID is no longer
+# listed is deleted, like its token.
+write_p4_bundles() {
+  [[ "$TARGET" == ocp ]] || return 0
+  local json id tok dir d
+  if [[ -d "$P4_BUNDLES" ]]; then
+    for d in "$P4_BUNDLES"/*/; do
+      [[ -d "$d" ]] || continue
+      id="$(basename "$d")"
+      case " $P4_IDS " in
+      *" $id "*) ;;
+      *) log "deleting the bundle of $id (no longer in SH_P4_SANDBOX_IDS)"; rm -rf "$d" ;;
+      esac
+    done
+  fi
+  [[ -n "$P4_IDS" ]] || return 0
+  json="$(secret_json "$P4_TOKENS_SECRET" "$NS")"
+  for id in $P4_IDS; do
+    tok="$(json_value "$json" "$id")"
+    [[ -n "$tok" ]] || die "$P4_TOKENS_SECRET has no token for $id"
+    dir="$P4_BUNDLES/$id"
+    (
+      umask 077
+      mkdir -p "$dir"
+      chmod 700 "$P4_BUNDLES" "$dir"
+      printf 'RELAY_ADDR=%s:443\nRELAY_TLS=true\nSANDBOX_ID=%s\nSANDBOX_TOKEN=%s\n' "$RELAY_HOST" "$id" "$tok" >"$dir/worker.env"
+      chmod 600 "$dir/worker.env"
+      if [[ -f "$RELAY_CA" ]]; then
+        cp "$RELAY_CA" "$dir/relay-ca.crt"
+        chmod 600 "$dir/relay-ca.crt"
+      else
+        rm -f "$dir/relay-ca.crt"
+      fi
+    )
+  done
 }
 
 # Explicit non-root UIDs need nonroot-v2 (restricted-v2 does not reliably admit them; see
@@ -606,6 +730,7 @@ main() {
   ensure_secrets
   [[ "$TARGET" != ocp ]] || route_hosts
   ensure_tls
+  write_p4_bundles
   write_settings
   ensure_mock_model
   grant_scc
