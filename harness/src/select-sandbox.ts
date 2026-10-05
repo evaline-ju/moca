@@ -603,8 +603,7 @@ async function select(
   const grpcById = new Map(grpcRecs.map((r) => [r.sandboxId, r]));
 
   const candidates = [...pods, ...grpcRecs.map((r) => r.sandboxId)];
-  if (candidates.length === 0)
-    throw new SandboxPoolEmptyError(selector, source, tiers ? tier : undefined);
+  const empty = () => new SandboxPoolEmptyError(selector, source, tiers ? tier : undefined);
 
   // Acquire `name`, then build what the caller gets; a throw after the acquire releases the lease
   // before the original error propagates (unchanged from before -- it is just shared by two paths now).
@@ -662,6 +661,7 @@ async function select(
 
   // The pods-only path stays byte-for-byte what it was: no affinity store is built or called.
   if (!remoteOn) {
+    if (candidates.length === 0) throw empty();
     for (const name of await leastLoaded()) {
       const got = await take(name);
       if (got) return got;
@@ -693,26 +693,40 @@ async function select(
       );
       return got;
     }
-    if (allRecs.some((r) => r.sandboxId === prior.sandboxId)) {
+    if (allRecs.some((r) => r.sandboxId === prior.sandboxId && !!r.labels?.[TIER_LABEL])) {
       // Present, but advertising another tier: an operator re-tiered the worker. It will not come
       // back to this tier by waiting, so the grace would only delay the same outcome (Review Focus 3).
+      // An UNLABELLED record is not "another tier" (spec §4 step 4): it is a worker that lost its
+      // SANDBOX_TIER, most likely by mistake, so it takes the grace path below like an absent one.
+      // Resetting at once would cost every affine session its workspace before the operator could
+      // read the unlabelled warning and fix the worker.
       reset = { from: prior.sandboxId, reason: 'retiered' };
     } else {
       const since = await affinity.detachedSince(prior.sandboxId, now, affinityTtlMs);
-      // A mark in the future (relay clock ahead) gives left > graceMs: still pending, never negative-time logic.
+      // A mark in the future (relay clock ahead) gives left > graceMs: still pending, never
+      // negative-time logic. The REPORTED wait is clamped to the grace, though: the skew is not time
+      // the client should be told to wait, and the next turn re-evaluates anyway.
       const left = graceMs - (now - since);
       if (left > 0) {
+        const retryInMs = Math.min(left, graceMs);
         console.warn(
           `sandbox affinity: session ${sessionId} waits for '${prior.sandboxId}' ` +
-            `(absent; ${Math.ceil(left / 1000)}s of grace left)`,
+            `(absent; ${Math.ceil(retryInMs / 1000)}s of grace left)`,
         );
-        throw new SandboxAffinityPendingError(prior.sandboxId, left);
+        throw new SandboxAffinityPendingError(prior.sandboxId, retryInMs);
       }
       reset = { from: prior.sandboxId, reason: 'detached' };
     }
   }
 
   // Step 5: least-loaded within the tier. Step 6: record the choice.
+  //
+  // The empty check lives HERE on the records path, after affinity, not before it (spec §5, "Relay
+  // restart"): while a restarted relay has no records yet, a session with affinity must get the
+  // pending 503 above -- which also starts its grace clock -- rather than an empty-pool error. Only a
+  // session with no entry, or one past its grace, reaches this point with nothing to choose from.
+  // Checked before `leastLoaded`, so an empty set never costs a lease read.
+  if (candidates.length === 0) throw empty();
   for (const name of await leastLoaded()) {
     const got = await take(name, reset);
     if (!got) continue;

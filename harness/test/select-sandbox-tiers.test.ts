@@ -348,15 +348,16 @@ describe('selectPoolSandbox: affinity (P6.3 spec §4 steps 2–6, §5)', () => {
   it('a detach mark in the future (clock skew) is treated as just detached: pending', async () => {
     const { lease } = fakeLease();
     const aff = fakeAffinity({ s: { sandboxId: 'm-0', tier: 'microvm' } }, { 'm-0': NOW + 10_000 });
-    await expect(
-      selectPoolSandbox(
-        tiered,
-        '/h',
-        's',
-        opts({ tier: 'microvm' }),
-        deps([m('m-1')], lease, { affinity: aff.store, ...at }),
-      ),
-    ).rejects.toBeInstanceOf(SandboxAffinityPendingError);
+    const err = await selectPoolSandbox(
+      tiered,
+      '/h',
+      's',
+      opts({ tier: 'microvm' }),
+      deps([m('m-1')], lease, { affinity: aff.store, ...at }),
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(SandboxAffinityPendingError);
+    // The skew is not time the client should be told to wait: the reported wait is the grace.
+    expect((err as SandboxAffinityPendingError).retryInMs).toBe(60_000);
   });
 
   // Review Focus 3.
@@ -411,10 +412,14 @@ describe('selectPoolSandbox: affinity (P6.3 spec §4 steps 2–6, §5)', () => {
   });
 
   it('losing the race twice is pending, never a third attempt', async () => {
-    const { lease } = fakeLease();
+    const { lease, released } = fakeLease();
     const aff = fakeAffinity();
+    let claims = 0;
     aff.store.get = async () => null; // the winner's entry never becomes visible
-    aff.store.claim = async () => ({ sandboxId: 'm-9', tier: 'microvm' });
+    aff.store.claim = async () => {
+      claims++;
+      return { sandboxId: 'm-9', tier: 'microvm' };
+    };
     await expect(
       selectPoolSandbox(
         tiered,
@@ -424,6 +429,9 @@ describe('selectPoolSandbox: affinity (P6.3 spec §4 steps 2–6, §5)', () => {
         deps([m('m-0')], lease, { affinity: aff.store, ...at }),
       ),
     ).rejects.toBeInstanceOf(SandboxAffinityPendingError);
+    // Each losing pass gave its lease back, and there were exactly two passes.
+    expect(released).toEqual(['m-0', 'm-0']);
+    expect(claims).toBe(2);
   });
 
   it('a failed affinity READ fails the turn, and takes no lease (§5)', async () => {
@@ -492,6 +500,90 @@ describe('selectPoolSandbox: affinity (P6.3 spec §4 steps 2–6, §5)', () => {
       deps([rec('c-0'), rec('c-1')], lease, { affinity: aff.store, ...at }),
     );
     expect(sel?.sandboxId).toBe('c-0');
+  });
+
+  // Fix round 1: an UNLABELLED record is not "another tier" (spec §4 step 4).
+  it('a present but UNLABELLED affine record takes the grace path, not retiered', async () => {
+    const { lease, acquired } = fakeLease();
+    const aff = fakeAffinity({ s: { sandboxId: 'x-0', tier: 'microvm' } });
+    const p = selectPoolSandbox(
+      tiered,
+      '/h',
+      's',
+      opts({ tier: 'microvm' }),
+      deps([rec('x-0'), m('m-1')], lease, { affinity: aff.store, ...at }),
+    );
+    await expect(p).rejects.toBeInstanceOf(SandboxAffinityPendingError);
+    expect(aff.calls).toContain('detachedSince:x-0');
+    expect(aff.detached.get('x-0')).toBe(NOW);
+    expect(acquired).toEqual([]);
+  });
+
+  it('a present but UNLABELLED affine record past the grace falls back, reason detached', async () => {
+    const { lease } = fakeLease();
+    const aff = fakeAffinity({ s: { sandboxId: 'x-0', tier: 'microvm' } }, { 'x-0': NOW - 61_000 });
+    const sel = await selectPoolSandbox(
+      tiered,
+      '/h',
+      's',
+      opts({ tier: 'microvm' }),
+      deps([rec('x-0'), m('m-1')], lease, { affinity: aff.store, ...at }),
+    );
+    expect(sel?.sandboxId).toBe('m-1');
+    expect(sel?.workspaceReset).toEqual({ from: 'x-0', reason: 'detached' });
+    expect(aff.calls).toContain('detachedSince:x-0');
+  });
+
+  // Fix round 1: spec §5, "Relay restart" -- the tier has no records at all for a moment.
+  it('no records in the tier, with affinity and no mark: pending (not empty), and the mark is written', async () => {
+    const { lease, acquired } = fakeLease();
+    const load = vi.spyOn(lease, 'load');
+    const aff = fakeAffinity({ s: { sandboxId: 'm-0', tier: 'microvm' } });
+    const p = selectPoolSandbox(
+      tiered,
+      '/h',
+      's',
+      opts({ tier: 'microvm' }),
+      deps([rec('c-0', 'container')], lease, { affinity: aff.store, ...at }),
+    );
+    await expect(p).rejects.toBeInstanceOf(SandboxAffinityPendingError);
+    expect(aff.detached.get('m-0')).toBe(NOW);
+    expect(load).not.toHaveBeenCalled();
+    expect(acquired).toEqual([]);
+  });
+
+  it('no records in the tier and no affinity entry: SandboxPoolEmptyError naming the tier', async () => {
+    const { lease, acquired } = fakeLease();
+    const load = vi.spyOn(lease, 'load');
+    const p = selectPoolSandbox(
+      tiered,
+      '/h',
+      's',
+      opts({ tier: 'microvm' }),
+      deps([], lease, { affinity: fakeAffinity().store, ...at }),
+    );
+    await expect(p).rejects.toBeInstanceOf(SandboxPoolEmptyError);
+    await expect(p).rejects.toThrow("sandbox tier 'microvm'");
+    expect(load).not.toHaveBeenCalled();
+    expect(acquired).toEqual([]);
+  });
+
+  it('no records in the tier, with affinity past the grace: SandboxPoolEmptyError, not saturated', async () => {
+    const { lease, acquired } = fakeLease();
+    const load = vi.spyOn(lease, 'load');
+    const aff = fakeAffinity({ s: { sandboxId: 'm-0', tier: 'microvm' } }, { 'm-0': NOW - 61_000 });
+    const p = selectPoolSandbox(
+      tiered,
+      '/h',
+      's',
+      opts({ tier: 'microvm' }),
+      deps([], lease, { affinity: aff.store, ...at }),
+    );
+    await expect(p).rejects.toBeInstanceOf(SandboxPoolEmptyError);
+    await expect(p).rejects.not.toBeInstanceOf(SandboxPoolSaturatedError);
+    await expect(p).rejects.toThrow("sandbox tier 'microvm'");
+    expect(load).not.toHaveBeenCalled();
+    expect(acquired).toEqual([]);
   });
 
   it('INERT off the records path: remote off, or discovery=pods, never touches affinity', async () => {
