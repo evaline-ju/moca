@@ -67,8 +67,10 @@ mocactl change; the deployment paths only set configuration.
    is not in `SH_SANDBOX_TIERS` (as §0.2 item 3 and §5 already say). Step 1 now names both.
 4. **A session view shows the tier the session runs in (§3.3).** For a record that names no tier --
    written before P6.3 (no field) or created while no tiers were declared (`''`) -- that is today's
-   deployment default, which the data plane applies; the view is `null` only when the deployment
-   declares no tiers. A `sandbox` body that is not an object is a 400 `invalid_request`.
+   deployment default; the view is `null` only when the deployment declares no tiers. The exchange
+   names that same default for such a session (it does not leave the data plane to apply its own),
+   so the view and the placement come from one value. A `sandbox` body that is not an object is a
+   400 `invalid_request`.
 
 ## 1. Scope
 
@@ -150,13 +152,12 @@ tiers`), and `''` is stored.
 - At startup the control plane refuses a `SH_SANDBOX_DEFAULT_TIER` that is not in
   `SH_SANDBOX_TIERS`, and a `SH_SANDBOX_TIERS` without a default (unless it names exactly one tier,
   which is then the default).
-- `ExchangeResponse` gains `sandboxTier: string`. A record written before this slice has no field;
-  the exchange returns the current default for it (or `''` when no tiers are declared).
+- `ExchangeResponse` gains `sandboxTier?: string`: the stored tier, or, for a record stored with
+  `''` or written before this slice (no field), the current default. It is omitted only when the
+  deployment declares no tiers, so the untiered response is byte-identical to before.
 - Session listings, `GET /v1/sessions/{id}` and `GET /v1/sessions/{id}/resources`
-  (`session.sandboxTier`) include `sandboxTier`: the tier the session runs in. That is the stored
-  tier; for a record stored with `''` or written before this slice, the current default (the
-  exchange names none for `''`, and the data plane gives such a session the default, §3.4); `null`
-  only when the deployment declares no tiers.
+  (`session.sandboxTier`) include `sandboxTier`: the tier the session runs in, by the exchange's
+  rule; `null` only when the deployment declares no tiers.
 - `GET /v1/discovery` gains `sandboxTiers: { names: string[]; default: string } | null`.
 - `docs/api/openapi.yaml` and the client spec are updated with all of the above.
 
@@ -166,9 +167,10 @@ tiers`), and `''` is stored.
   `acquireTurnSandbox`, which passes it to `selectPoolSandbox` as `opts.tier`.
 - With no `TurnAuth` (an unauthenticated turn on a deployment that allows it) and on every leaf
   path (`run-leaf.ts`), `opts.tier` is `SH_SANDBOX_DEFAULT_TIER` from the process environment.
-- On a deployment that declares tiers, an `opts.tier` of `''` or undefined (a session stored with
-  `''`, or no tier at all) gets `SH_SANDBOX_DEFAULT_TIER`; only on an untiered deployment is there
-  no tier filter.
+- On a deployment that declares tiers, an `opts.tier` of `''` or undefined gets
+  `SH_SANDBOX_DEFAULT_TIER`; only on an untiered deployment is there no tier filter. A session turn
+  normally carries a tier (the exchange names the default for a session that recorded none, §3.3);
+  this fallback covers the unauthenticated and leaf paths above.
 
 ### 3.5 Affinity (new, harness)
 

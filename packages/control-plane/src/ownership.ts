@@ -47,8 +47,8 @@ export interface SessionRecord {
   tombstone: boolean;
   /**
    * The session's sandbox tier, chosen once at creation (P6.3 spec §3.3). '' when the deployment
-   * declared none then. Undefined ONLY for a record written before P6.3 -- kept distinct from '' so
-   * the exchange can give such a session today's default (sessionTier, exchange.ts).
+   * declared none then. Undefined ONLY for a record written before P6.3, which has no field. Read
+   * as stored, never coerced; the exchange gives both today's default (sessionTier, exchange.ts).
    */
   sandboxTier?: string;
 }

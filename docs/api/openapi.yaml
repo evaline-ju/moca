@@ -418,7 +418,21 @@ paths:
                 type: object
                 required: [session, harness, sandbox]
                 properties:
-                  session: { type: object }
+                  session:
+                    type: object
+                    required: [id, state, createdAt, lastTurnAt, turns, sandboxTier]
+                    properties:
+                      id: { type: string }
+                      state: { type: string, enum: [active, deleting] }
+                      createdAt: { type: integer, description: epoch ms }
+                      lastTurnAt: { type: [integer, 'null'], description: epoch ms }
+                      turns: { type: integer }
+                      sandboxTier:
+                        type: [string, 'null']
+                        description: |
+                          the sandbox tier the session runs in (P6.3), by the same rule as
+                          Session.sandboxTier; from the control plane's own record, never from the
+                          self-reported runtime hash
                   harness: { type: object }
                   sandbox: { type: object }
                   lease: { type: [object, 'null'] }
@@ -555,7 +569,11 @@ paths:
                   sessionId: { type: string }
                   subject: { type: string }
                   sandboxTier:
-                    { type: string, description: present only when the session has a tier }
+                    type: string
+                    description: |
+                      the tier the session's turn runs in (P6.3): the recorded tier, or today's
+                      default for a session that recorded none; absent only when the deployment
+                      declares no tiers
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }

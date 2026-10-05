@@ -180,7 +180,7 @@ async function auditBestEffort(
 async function sessionView(rec: SessionRecord, deps: CpDeps) {
   const runtime = await deps.index.getRuntime(rec.sessionId);
   // The tier the session actually runs in: what it was created with, or -- for '' or a record that
-  // predates P6.3 -- today's default, which the data plane applies. Null only when untiered.
+  // predates P6.3 -- today's default, which the exchange names for it. Null only when untiered.
   const tier = viewTier(rec, deps.config.sandboxTiers);
   return {
     sessionId: rec.sessionId,

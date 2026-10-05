@@ -34,8 +34,8 @@ export interface ExchangeResponse {
    */
   authHeader?: Exclude<InferenceAuthHeader, 'authorization'>;
   /**
-   * The session's sandbox tier (P6.3 spec §3.3), which the data plane filters sandboxes on. Present
-   * only when non-empty; absent means "no tier", and the data plane then uses its own default.
+   * The session's sandbox tier (P6.3 spec §3.3), which the data plane filters sandboxes on
+   * (sessionTier). Absent only when the deployment declares no tiers, so that response is unchanged.
    */
   sandboxTier?: string;
 }
@@ -51,23 +51,25 @@ export function placeholderFor(subject: string): string {
 }
 
 /**
- * The tier to hand the data plane. The stored one -- including '' for a session created while no
- * tiers were declared, which the exchange then leaves out (so the untiered response stays
- * byte-identical) and the data plane gives its own default. A record written before P6.3 has no
- * field at all and gets TODAY's default: what it would have been given had it been created now.
+ * The tier to hand the data plane: the stored one, or -- for a session that names none (stored ''
+ * because it was created while no tiers were declared, or a record written before P6.3 with no
+ * field) -- TODAY's default, the tier such a session runs in. Naming the default here, rather than
+ * leaving the data plane to apply its own SH_SANDBOX_DEFAULT_TIER, makes the exchange the one
+ * source of truth for these sessions, so the placement cannot disagree with viewTier. '' only when
+ * the deployment declares no tiers, which the exchange then leaves out: the untiered response stays
+ * byte-identical.
  */
 export function sessionTier(rec: SessionRecord, tiers: CpConfig['sandboxTiers']): string {
-  return rec.sandboxTier ?? tiers?.default ?? '';
+  return rec.sandboxTier || tiers?.default || '';
 }
 
 /**
- * The tier a session view shows (sessionView, projectResources): the tier the session actually runs
- * in. Unlike sessionTier, a stored '' also falls back to today's default, because that is what the
- * data plane gives a session the exchange named no tier for -- showing null there would contradict
- * the placement the same session reports. Null only when the deployment declares no tiers.
+ * The tier a session view shows (sessionView, projectResources): the tier the session runs in,
+ * which is exactly what the exchange names (sessionTier). Null only when the deployment declares no
+ * tiers.
  */
 export function viewTier(rec: SessionRecord, tiers: CpConfig['sandboxTiers']): string | null {
-  return rec.sandboxTier || tiers?.default || null;
+  return sessionTier(rec, tiers) || null;
 }
 
 /**

@@ -91,8 +91,11 @@ describe('sessionTier (P6.3 spec §3.3)', () => {
   it('is the stored tier', () => {
     expect(sessionTier({ ...base, sandboxTier: 'microvm' }, tiers)).toBe('microvm');
   });
-  it('is "" for a session created while no tiers were declared, even if some are now', () => {
-    expect(sessionTier({ ...base, sandboxTier: '' }, tiers)).toBe('');
+  it("is TODAY's default for a session created while no tiers were declared, now that some are", () => {
+    expect(sessionTier({ ...base, sandboxTier: '' }, tiers)).toBe('container');
+  });
+  it('is "" only when the deployment declares no tiers', () => {
+    expect(sessionTier({ ...base, sandboxTier: '' }, null)).toBe('');
   });
   it("is TODAY's default for a record written before P6.3", () => {
     expect(sessionTier(base, tiers)).toBe('container');
@@ -156,6 +159,21 @@ describe('exchangeCredential', () => {
     await seedCredential(t);
     const token = await sessionToken(t); // creates the session: no tier requested, so the default
     expect((await exchangeCredential(token, t)).sandboxTier).toBe('microvm');
+  });
+
+  it("names TODAY's default for a session created while no tiers were declared (P6.3)", async () => {
+    // Created untiered (stored ''), then the deployment declares tiers: the exchange names the
+    // default the session now runs in, so the data plane never applies a default of its own.
+    const token = await sessionToken(d);
+    expect((await d.index.get('sid-fixed'))?.sandboxTier).toBe('');
+    const tiered = {
+      ...d,
+      config: {
+        ...d.config,
+        sandboxTiers: { names: ['container', 'microvm'], default: 'microvm' },
+      },
+    };
+    expect((await exchangeCredential(token, tiered)).sandboxTier).toBe('microvm');
   });
 
   it('returns a placeholder, not the real key, whenever the deployment has an injector', async () => {
