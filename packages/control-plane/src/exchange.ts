@@ -52,11 +52,22 @@ export function placeholderFor(subject: string): string {
 
 /**
  * The tier to hand the data plane. The stored one -- including '' for a session created while no
- * tiers were declared, which stays untiered. A record written before P6.3 has no field at all and
- * gets TODAY's default: what it would have been given had it been created now.
+ * tiers were declared, which the exchange then leaves out (so the untiered response stays
+ * byte-identical) and the data plane gives its own default. A record written before P6.3 has no
+ * field at all and gets TODAY's default: what it would have been given had it been created now.
  */
 export function sessionTier(rec: SessionRecord, tiers: CpConfig['sandboxTiers']): string {
   return rec.sandboxTier ?? tiers?.default ?? '';
+}
+
+/**
+ * The tier a session view shows (sessionView, projectResources): the tier the session actually runs
+ * in. Unlike sessionTier, a stored '' also falls back to today's default, because that is what the
+ * data plane gives a session the exchange named no tier for -- showing null there would contradict
+ * the placement the same session reports. Null only when the deployment declares no tiers.
+ */
+export function viewTier(rec: SessionRecord, tiers: CpConfig['sandboxTiers']): string | null {
+  return rec.sandboxTier || tiers?.default || null;
 }
 
 /**

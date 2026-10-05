@@ -231,12 +231,27 @@ describe('projectResources', () => {
       tiers,
     ) as Record<string, Record<string, unknown>>;
     expect(out.session!.sandboxTier).toBe('container');
-    // A session created while no tiers were declared ('') stays untiered: null, not the default.
+  });
+
+  it("shows today's default for a record stored with '', matching its placement", () => {
+    // '' was stored while the deployment declared no tiers. The exchange leaves the tier out for
+    // it, and the data plane gives it today's default -- so session.sandboxTier must agree with
+    // placement.tier rather than contradict it with null.
+    const tiers = { names: ['container', 'microvm'], default: 'container' };
+    const out = projectResources(
+      { ...rec, sandboxTier: '' },
+      { sandboxId: 'c-0', sandboxTier: 'container' },
+      { podName: null, phase: 'unknown', tenant: 't' },
+      tiers,
+    ) as Record<string, Record<string, unknown>>;
+    expect(out.session!.sandboxTier).toBe('container');
+    expect(out.placement!.tier).toBe('container');
+    // Null only when the deployment declares no tiers at all.
     const untiered = projectResources(
       { ...rec, sandboxTier: '' },
       {},
       { podName: null, phase: 'unknown', tenant: 't' },
-      tiers,
+      null,
     ) as Record<string, Record<string, unknown>>;
     expect(untiered.session!.sandboxTier).toBeNull();
   });

@@ -65,9 +65,10 @@ mocactl change; the deployment paths only set configuration.
 3. **§4 step 1 excludes a mislabelled record too.** It named only a record with no tier label as
    excluded and logged; the code also excludes, and logs once per sandbox ID, a record whose label
    is not in `SH_SANDBOX_TIERS` (as §0.2 item 3 and §5 already say). Step 1 now names both.
-4. **A session view shows the tier the session runs in (§3.3).** For a record written before P6.3,
-   which stored no tier, that is today's deployment default, the exchange's rule; untiered, it is
-   `null`. A `sandbox` body that is not an object is a 400 `invalid_request`.
+4. **A session view shows the tier the session runs in (§3.3).** For a record that names no tier --
+   written before P6.3 (no field) or created while no tiers were declared (`''`) -- that is today's
+   deployment default, which the data plane applies; the view is `null` only when the deployment
+   declares no tiers. A `sandbox` body that is not an object is a 400 `invalid_request`.
 
 ## 1. Scope
 
@@ -151,9 +152,11 @@ tiers`), and `''` is stored.
   which is then the default).
 - `ExchangeResponse` gains `sandboxTier: string`. A record written before this slice has no field;
   the exchange returns the current default for it (or `''` when no tiers are declared).
-- Session listings and `GET /v1/sessions/{id}` include `sandboxTier`: the tier the session runs
-  in, by the exchange's rule (the stored tier; for a record written before this slice, the current
-  default), or `null` when untiered.
+- Session listings, `GET /v1/sessions/{id}` and `GET /v1/sessions/{id}/resources`
+  (`session.sandboxTier`) include `sandboxTier`: the tier the session runs in. That is the stored
+  tier; for a record stored with `''` or written before this slice, the current default (the
+  exchange names none for `''`, and the data plane gives such a session the default, §3.4); `null`
+  only when the deployment declares no tiers.
 - `GET /v1/discovery` gains `sandboxTiers: { names: string[]; default: string } | null`.
 - `docs/api/openapi.yaml` and the client spec are updated with all of the above.
 
@@ -163,7 +166,9 @@ tiers`), and `''` is stored.
   `acquireTurnSandbox`, which passes it to `selectPoolSandbox` as `opts.tier`.
 - With no `TurnAuth` (an unauthenticated turn on a deployment that allows it) and on every leaf
   path (`run-leaf.ts`), `opts.tier` is `SH_SANDBOX_DEFAULT_TIER` from the process environment.
-- `''` or undefined means "no tier filter".
+- On a deployment that declares tiers, an `opts.tier` of `''` or undefined (a session stored with
+  `''`, or no tier at all) gets `SH_SANDBOX_DEFAULT_TIER`; only on an untiered deployment is there
+  no tier filter.
 
 ### 3.5 Affinity (new, harness)
 
@@ -260,16 +265,18 @@ stays retryable in `classifyOutcome`, beside `SandboxPoolSaturatedError` and `Sa
   `new` command.
   - Headless: `mocactl run --new --option sandboxTier=<name>`. An omitted tier is left to the
     server's default, never a "choose with --option" refusal. A name that is not declared is
-    refused locally, listing the declared names, as the control plane's 400 would. With
-    `sandboxTiers: null`, a given tier is refused locally: "this deployment declares no sandbox
-    tiers".
+    refused locally, naming it and listing the declared names, as the control plane's 400 would.
+    With `sandboxTiers: null`, a given tier is refused locally: "this deployment declares no
+    sandbox tiers".
   - TUI: the New Session overlay shows a tier picker only when more than one tier is declared, with
     the default preselected (or the tier used last).
   - The control plane's session listings and `GET /v1/sessions/{id}` carry the tier, and mocactl
     shows it in its Sessions list.
 - **Placement.** The data plane's runtime report (`runtimeFieldsForTurn`, `reportRuntime`) gains
   `sandboxId` and `sandboxTier` at turn end, from the lease actually taken, and
-  `workspaceResetAt` / `workspaceResetFrom` after a fallback. `projectResources` exposes them as the
+  `workspaceResetAt` / `workspaceResetFrom` after a fallback. `sandboxTier` is written even as `''`
+  (no tiers declared): the hash write merges, so omitting it would keep a previous turn's tier
+  beside the new `sandboxId`. `projectResources` exposes them as the
   top-level `placement` object of `GET /v1/sessions/{id}/resources`
   (`{ sandboxId, tier, workspaceReset: { at, from } | null } | null`, null until a leased turn has
   reported), which shows where the session runs and when it last lost its workspace. mocactl has no

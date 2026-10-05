@@ -256,6 +256,27 @@ describe('POST /v1/sessions', () => {
       expect(s.sandboxTier).toBe('container');
     });
 
+    it("a record stored with '' shows today's default on a tiered deployment", async () => {
+      // '' means "created while no tiers were declared". The exchange leaves the tier out for it,
+      // and the data plane gives it the deployment default (harness select-sandbox), so that is
+      // the tier the view must show -- not null.
+      const f = fakeRedis();
+      const t = makeDeps({
+        index: new OwnershipIndex(f.redis),
+        config: { sandboxTiers: { names: ['container', 'microvm'], default: 'container' } },
+      });
+      await seedCredential(t);
+      await HANDLERS.createSession!(
+        ctx({ principal: alice, body: { sandbox: { tier: 'microvm' } } }),
+        t,
+      );
+      f.hashes.get('sh:cp:session:sid-fixed')!.sandboxTier = '';
+      expect((await t.index.get('sid-fixed'))!.sandboxTier).toBe('');
+      const page = await HANDLERS.listSessions!(ctx({ principal: alice }), t);
+      const [s] = (page.body as { sessions: { sandboxTier: string | null }[] }).sessions;
+      expect(s.sandboxTier).toBe('container');
+    });
+
     it('a session created while no tiers were declared shows null in the view', async () => {
       await seedCredential(d);
       await HANDLERS.createSession!(ctx({ principal: alice, body: {} }), d);

@@ -6,7 +6,7 @@ import {
   type CredentialStore,
   type InferenceAuthHeader,
 } from './credential-store.js';
-import { exchangeCredential, OPERATOR_FALLBACK_NAME, sessionTier } from './exchange.js';
+import { exchangeCredential, OPERATOR_FALLBACK_NAME, viewTier } from './exchange.js';
 import type { RunKubectl } from './kubectl.js';
 import { DEFAULT_PAGE_SIZE, type OwnershipIndex, type SessionRecord } from './ownership.js';
 import type { IdentityProvider } from './identity.js';
@@ -179,10 +179,9 @@ async function auditBestEffort(
 /** Public view of a session record. `turns` comes from the display-only runtime hash. */
 async function sessionView(rec: SessionRecord, deps: CpDeps) {
   const runtime = await deps.index.getRuntime(rec.sessionId);
-  // The session's actual tier: either what it was created with, or today's default if it predates P6.3.
-  // An '' tier (created while no tiers were declared) shows as null; a new session with today's default
-  // shows that default, so the view matches what the exchange will hand the data plane.
-  const tier = sessionTier(rec, deps.config.sandboxTiers) || null;
+  // The tier the session actually runs in: what it was created with, or -- for '' or a record that
+  // predates P6.3 -- today's default, which the data plane applies. Null only when untiered.
+  const tier = viewTier(rec, deps.config.sandboxTiers);
   return {
     sessionId: rec.sessionId,
     owner: rec.owner,

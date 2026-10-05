@@ -31,7 +31,10 @@ export interface SessionSummary {
   state: 'active' | 'deleting';
   lastTurnAt: number | null;
   turns: number;
-  /** The sandbox tier the session runs in (P6.3); null when untiered, absent before P6.3. */
+  /**
+   * The sandbox tier the session runs in (P6.3); null when the deployment declares no tiers, absent
+   * before P6.3.
+   */
   sandboxTier?: string | null;
 }
 

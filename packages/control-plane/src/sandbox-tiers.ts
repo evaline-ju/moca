@@ -17,9 +17,6 @@ const TIER_NAME = /^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$/;
  * Read SH_SANDBOX_TIERS / SH_SANDBOX_DEFAULT_TIER. Null means the deployment declares no tiers, and
  * nothing is filtered. Throws, naming the variable, on a configuration that cannot be served: a
  * silently ignored typo here would put every session in "no tier" and defeat the whole slice.
- *
- * The control plane has its own copy (it does not depend on this package); both are pinned to
- * test/fixtures/sandbox-tiers-cases.json.
  */
 export function parseSandboxTiers(env: NodeJS.ProcessEnv): SandboxTiers | null {
   const names = (env.SH_SANDBOX_TIERS ?? '')

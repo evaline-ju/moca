@@ -103,8 +103,9 @@ components:
           type: [string, 'null']
           description: |
             the sandbox tier the session runs in (P6.3): the tier recorded at creation; for a
-            session created before P6.3, which recorded none, today's deployment default; null when
-            the deployment declares no tiers
+            session that recorded none (created before P6.3, or while the deployment declared no
+            tiers), today's deployment default, which the data plane applies; null only when the
+            deployment declares no tiers
     CredentialDescriptor:
       type: object
       required: [name, kind, consumer, destination, binding]

@@ -4,6 +4,7 @@ import {
   exchangeCredential,
   placeholderFor,
   sessionTier,
+  viewTier,
 } from '../src/exchange.js';
 import { HANDLERS, type CpDeps } from '../src/handlers.js';
 import { OwnershipIndex, type CpRedisLike } from '../src/ownership.js';
@@ -96,6 +97,31 @@ describe('sessionTier (P6.3 spec §3.3)', () => {
   it("is TODAY's default for a record written before P6.3", () => {
     expect(sessionTier(base, tiers)).toBe('container');
     expect(sessionTier(base, null)).toBe('');
+  });
+});
+
+describe('viewTier: the tier a session view shows', () => {
+  const tiers = { names: ['container', 'microvm'], default: 'container' };
+  const base = {
+    sessionId: 's',
+    owner: 'o',
+    tenant: 'o',
+    createdAt: 0,
+    state: 'active' as const,
+    poolSelector: null,
+    credentialName: '',
+    tombstone: false,
+  };
+  it('is the stored tier', () => {
+    expect(viewTier({ ...base, sandboxTier: 'microvm' }, tiers)).toBe('microvm');
+  });
+  it("is today's default for '' or a pre-P6.3 record, as the data plane runs it", () => {
+    expect(viewTier({ ...base, sandboxTier: '' }, tiers)).toBe('container');
+    expect(viewTier(base, tiers)).toBe('container');
+  });
+  it('is null only when the deployment declares no tiers', () => {
+    expect(viewTier({ ...base, sandboxTier: '' }, null)).toBeNull();
+    expect(viewTier(base, null)).toBeNull();
   });
 });
 

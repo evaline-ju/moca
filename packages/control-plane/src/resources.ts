@@ -1,5 +1,5 @@
 import { buildFindPodBySelectorArgs, buildGetPodPhaseArgs, type RunKubectl } from './kubectl.js';
-import { sessionTier } from './exchange.js';
+import { viewTier } from './exchange.js';
 import type { SessionRecord } from './ownership.js';
 import type { SandboxTiers } from './sandbox-tiers.js';
 
@@ -67,7 +67,7 @@ export function projectResources(
   rec: SessionRecord,
   runtime: Record<string, string>,
   sandbox: SandboxView,
-  /** The deployment's tiers, so a record written before P6.3 shows the default it actually runs in. */
+  /** The deployment's tiers, so a record stored with '' or none shows the default it runs in. */
   tiers: SandboxTiers | null = null,
 ): unknown {
   const harnessPod = runtime.harnessPod ?? null;
@@ -80,7 +80,7 @@ export function projectResources(
       turns: num(runtime.turns) ?? 0,
       // The tier the session runs in, by the same rule as the session view (sessionView): from the
       // control plane's own record, never from the self-reported runtime hash.
-      sandboxTier: sessionTier(rec, tiers) || null,
+      sandboxTier: viewTier(rec, tiers),
     },
     harness: {
       // A leaf runs in a KEDA-spawned worker Job whose pod name starts with the ScaledJob name; a
