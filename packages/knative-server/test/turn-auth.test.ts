@@ -625,6 +625,7 @@ describe('runtimeFieldsForTurn', () => {
     expect(Number(end.workspaceResetAt)).toBeGreaterThan(0);
     const plain = runtimeFieldsForTurn({}, 'end', { id: 'c-0', tier: '' });
     expect(plain.sandboxId).toBe('c-0');
+    expect(plain.sandboxTier).toBeUndefined();
     expect(plain.workspaceResetFrom).toBeUndefined();
   });
 });

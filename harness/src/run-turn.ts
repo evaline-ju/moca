@@ -797,12 +797,6 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
     throw err;
   }
 
-  // Before any model output, so the notice precedes the turn it explains. It also flushes the SSE
-  // headers: a later pre-content failure then degrades to an error frame instead of a status code,
-  // which is the same regime as any failure after the first token.
-  const resetFrame = placementFrame(opened.sessionManager.getSessionId(), acquired.placement);
-  if (resetFrame) input.onEvent?.(resetFrame);
-
   let leaseRenewal: ReturnType<typeof setInterval> | undefined;
   if (acquired.leased) {
     // leaseTimings, not Number(env.X ?? …): an empty or unparseable KAGENTI_SANDBOX_HEARTBEAT_MS
@@ -816,6 +810,12 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
   }
 
   try {
+    // Before any model output, so the notice precedes the turn it explains. It also flushes the SSE
+    // headers: a later pre-content failure then degrades to an error frame instead of a status code,
+    // which is the same regime as any failure after the first token. Inside the try, so a sink that
+    // throws still releases the lease below.
+    const resetFrame = placementFrame(opened.sessionManager.getSessionId(), acquired.placement);
+    if (resetFrame) input.onEvent?.(resetFrame);
     return withPlacement(
       await executeTurnCore(input, acquired.sandbox, opened),
       acquired.placement,

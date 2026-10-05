@@ -225,33 +225,36 @@ describe('acquireTurnSandbox', () => {
     };
     // The fallback logs one line by design; silenced here so the suite's output stays clean.
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const got = await acquireTurnSandbox(
-      undefined,
-      {
-        KAGENTI_SANDBOX_POOL_SELECTOR: 'app=sandbox',
-        SH_REMOTE_SANDBOX: '1',
-        SH_SANDBOX_DISCOVERY: 'records',
-        SH_SANDBOX_TIERS: 'container,microvm',
-        SH_SANDBOX_DEFAULT_TIER: 'container',
-      },
-      '/head',
-      'sess-7',
-      {
-        lease,
-        records,
-        affinity,
-        makeExecClient: () => ({}) as never,
-        makeTransport: () => ({ exec: async () => ({}) as never, close: async () => {} }),
-      },
-      'microvm',
-    );
-    expect(got.placement).toEqual({
-      sandboxId: 'm-0',
-      tier: 'microvm',
-      workspaceReset: { from: 'm-gone', reason: 'detached' },
-    });
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("moved from 'm-gone' to 'm-0'"));
-    warn.mockRestore();
+    try {
+      const got = await acquireTurnSandbox(
+        undefined,
+        {
+          KAGENTI_SANDBOX_POOL_SELECTOR: 'app=sandbox',
+          SH_REMOTE_SANDBOX: '1',
+          SH_SANDBOX_DISCOVERY: 'records',
+          SH_SANDBOX_TIERS: 'container,microvm',
+          SH_SANDBOX_DEFAULT_TIER: 'container',
+        },
+        '/head',
+        'sess-7',
+        {
+          lease,
+          records,
+          affinity,
+          makeExecClient: () => ({}) as never,
+          makeTransport: () => ({ exec: async () => ({}) as never, close: async () => {} }),
+        },
+        'microvm',
+      );
+      expect(got.placement).toEqual({
+        sandboxId: 'm-0',
+        tier: 'microvm',
+        workspaceReset: { from: 'm-gone', reason: 'detached' },
+      });
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("moved from 'm-gone' to 'm-0'"));
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('reports no placement when nothing was leased', async () => {

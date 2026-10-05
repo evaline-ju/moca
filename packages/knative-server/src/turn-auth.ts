@@ -330,7 +330,8 @@ export function runtimeFieldsForTurn(
   // P6.3 spec §6: where the turn actually ran, known only once it has (hence 'end', from the result).
   if (sandbox) {
     fields.sandboxId = sandbox.id;
-    fields.sandboxTier = sandbox.tier;
+    // Omitted rather than '' when no tiers are declared, like every other field here.
+    if (sandbox.tier) fields.sandboxTier = sandbox.tier;
     if (sandbox.workspaceReset) {
       fields.workspaceResetAt = now;
       fields.workspaceResetFrom = sandbox.workspaceReset.from;

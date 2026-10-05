@@ -87,6 +87,20 @@ describe('reduceFrame', () => {
     expect((notice as { text: string }).text).toContain("'m-0'");
     expect((notice as { text: string }).text).toContain('microvm');
   });
+
+  it('a workspace_reset with no tier names no tier', () => {
+    const s = reduceFrame(EMPTY_BLOCKS, {
+      type: 'workspace_reset',
+      sessionId: 's',
+      from: 'c-0',
+      tier: '',
+      reason: 'detached',
+    });
+    const notice = s.blocks.find((b) => b.kind === 'notice') as { text: string };
+    expect(notice.text).toBe(
+      "workspace reset: sandbox 'c-0' is gone; this turn runs on a fresh workspace",
+    );
+  });
 });
 
 describe('queued prompts', () => {

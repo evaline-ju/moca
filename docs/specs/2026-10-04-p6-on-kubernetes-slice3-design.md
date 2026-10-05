@@ -216,8 +216,9 @@ stays retryable in `classifyOutcome`, beside `SandboxPoolSaturatedError` and `Sa
   `sandbox`, so the resources view shows where the session runs and when it last lost its workspace.
 - **The turn itself.** After a fallback, a streamed turn emits a new frame before any other:
   `{ type: 'workspace_reset'; sessionId; from; tier; reason }` (`harness/src/turn-stream.ts`,
-  `TurnStreamFrame`). A JSON turn result gains `workspaceReset?: { from, tier, reason }`. mocactl prints it as
-  a notice. Clients that do not know the frame type must ignore it (§10).
+  `TurnStreamFrame`). A JSON turn result gains
+  `sandbox?: { id, tier, workspaceReset?: { from, reason } }` (where the turn ran, and the reset if
+  any). mocactl prints the frame as a notice. Clients that do not know the frame type must ignore it (§10).
 - **Logs.** One structured line for each non-trivial decision: affinity pending, fallback, an
   unlabelled record excluded, an affinity write failed. No new metrics in this slice.
 
