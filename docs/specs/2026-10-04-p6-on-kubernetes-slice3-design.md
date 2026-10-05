@@ -76,7 +76,9 @@ mocactl change; the deployment paths only set configuration.
 - A tier label on presence records, set by the workers; a detach timestamp written by the relay.
 - `selectPoolSandbox`: filter by tier, prefer the affine sandbox, the grace-period fallback.
 - The tier on the control plane's session (create, store, exchange, list, discovery).
-- `mocactl new --tier`, the TUI picker, and placement in the session's resources view.
+- mocactl's `sandboxTier` session option (the New Session overlay, presets, and
+  `run --new --option sandboxTier=<name>`), and the tier in its Sessions list.
+- A top-level `placement` object in `GET /v1/sessions/{id}/resources`.
 - A `workspace_reset` turn-stream frame.
 - Configuration on every deployment path; the rewrite of `P4-ON-P6.md`'s "A P4-only host" and of
   slice 2's one-tier-per-stack guard.
@@ -190,9 +192,9 @@ The inputs gain `opts.tier?: string`. The no-selector path, the pods path, the l
    worker's environment), keep only records with `labels["moca.dev/tier"] === opts.tier`. A record
    with **no** tier label, or with a label that is not in `SH_SANDBOX_TIERS`, is excluded, with one
    log line per sandbox ID per process naming the ID and its labels, so a misconfigured worker fails
-   loudly instead of serving either tier. When no tiers
-   are declared, nothing is filtered. Pods (the `pods` and `both` discovery sources) are container
-   tier: they pass the filter only when `opts.tier` is the default tier.
+   loudly instead of serving either tier. When no tiers are declared, nothing is filtered. Pods (the
+   `pods` and `both` discovery sources) are container tier: they pass the filter only when
+   `opts.tier` is the default tier.
 2. **Read affinity** for `sessionId`. An entry recorded under another tier (for instance `''`,
    written before tiers were declared) is **not** ignored: if its sandbox is in the filtered set it
    is used as in step 3 and re-recorded under `opts.tier` (`replace`), with no workspace reset —
@@ -277,8 +279,9 @@ stays retryable in `classifyOutcome`, beside `SandboxPoolSaturatedError` and `Sa
   `TurnStreamFrame`). A JSON turn result gains
   `sandbox?: { id, tier, workspaceReset?: { from, reason } }` (where the turn ran, and the reset if
   any). mocactl prints the frame as a notice. Clients that do not know the frame type must ignore it (§10).
-- **Logs.** One structured line for each non-trivial decision: affinity pending, fallback, an
-  unlabelled record excluded, an affinity write failed. No new metrics in this slice.
+- **Logs.** One structured line for each non-trivial decision: affinity pending, fallback, a record
+  excluded for having no tier label or a label not in `SH_SANDBOX_TIERS` (once per sandbox ID), an
+  affinity write failed. No new metrics in this slice.
 
 ## 7. Configuration and deployment paths
 

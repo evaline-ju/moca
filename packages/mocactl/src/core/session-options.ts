@@ -1,4 +1,4 @@
-import type { ControlPlaneApi, CreateSessionRequest } from '../api/types.js';
+import type { ControlPlaneApi, CreateSessionRequest, Discovery } from '../api/types.js';
 import type { Preset } from '../config.js';
 import { ApiError } from '../api/errors.js';
 import { sanitizeRemote } from './sanitize.js';
@@ -19,10 +19,15 @@ export interface SessionOptionField {
   emptyHint: string;
   /**
    * With no choice to offer, leave the field unset and let the server decide rather than block: the
-   * control plane may have a default (the operator fallback, #368). A server refusal comes back as
-   * `credential_required` and is mapped to `emptyHint` by fieldRefusedByServer.
+   * control plane may have a default of its own (the operator fallback credential, #368; no tier on
+   * an untiered deployment).
    */
   serverMayResolve?: boolean;
+  /**
+   * The error code with which the server refuses a session that left this field unset; such a
+   * refusal is mapped back to this field's `emptyHint` by fieldRefusedByServer.
+   */
+  refusalCode?: string;
   /**
    * The server has its own default for this field (P6.3's sandbox tier): a non-interactive caller
    * that did not choose leaves it unset instead of being refused with "choose with --option".
@@ -37,6 +42,7 @@ export const inferenceCredentialField: SessionOptionField = {
   label: 'Inference credential',
   emptyHint: 'add an inference credential to start',
   serverMayResolve: true,
+  refusalCode: 'credential_required',
   async source(api) {
     return (await api.listCredentials())
       .filter((c) => c.consumer === 'inference')
@@ -60,7 +66,15 @@ export const sandboxTierField: SessionOptionField = {
   serverMayResolve: true,
   serverDefaults: true,
   async source(api) {
-    const tiers = (await api.discovery()).sandboxTiers;
+    let tiers: Discovery['sandboxTiers'];
+    try {
+      tiers = (await api.discovery()).sandboxTiers;
+    } catch (err) {
+      // A control plane that predates /v1/discovery (used with --harness-url, api/discovery.ts)
+      // predates tiers too: offer none, so the field is skipped. Any other failure is real.
+      if (err instanceof ApiError && err.status === 404) return [];
+      throw err;
+    }
     if (!tiers) return [];
     return tiers.names.map((n) => ({
       value: n,
@@ -132,14 +146,15 @@ export async function resolveSessionOptions(
 
 /**
  * The field a `POST /v1/sessions` refusal is about, when the server declined to resolve one the
- * client left to it (serverMayResolve): the caller then shows that field's emptyHint, as if blocked.
+ * client left to it (matched on its refusalCode): the caller then shows that field's emptyHint, as
+ * if blocked.
  */
 export function fieldRefusedByServer(
   err: unknown,
   fields: readonly SessionOptionField[],
 ): SessionOptionField | undefined {
-  if (!(err instanceof ApiError) || err.code !== 'credential_required') return undefined;
-  return fields.find((f) => f.serverMayResolve);
+  if (!(err instanceof ApiError)) return undefined;
+  return fields.find((f) => f.refusalCode !== undefined && f.refusalCode === err.code);
 }
 
 export function checkPreset(

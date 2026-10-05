@@ -46,6 +46,15 @@ describe('resolveSessionOptions', () => {
     ).toBeUndefined();
   });
 
+  it('maps a refusal to the field by its refusal code, whatever the field order', () => {
+    const refused = new ApiError('control-plane', 400, 'credential_required', 'no credential');
+    const reversed = [...SESSION_OPTION_FIELDS].reverse();
+    expect(reversed[0].key).toBe('sandboxTier');
+    expect(fieldRefusedByServer(refused, reversed)?.key).toBe('inferenceCredential');
+    // The tier field may also be left to the server, but no refusal is about it.
+    expect(fieldRefusedByServer(refused, [sandboxTierField])).toBeUndefined();
+  });
+
   it('picks the only inference credential silently, ignoring other consumers', async () => {
     const r = await resolveSessionOptions(api('anthropic'), SESSION_OPTION_FIELDS, {}, {});
     expect(r).toMatchObject({
@@ -147,6 +156,43 @@ describe('sandboxTierField (P6.3)', () => {
       {},
     );
     expect(r).toMatchObject({ status: 'ready', request: { sandbox: { tier: 'microvm' } } });
+  });
+
+  it('a tier used last beats the server default as the preselection', async () => {
+    const r = await resolveSessionOptions(
+      api({ names: ['container', 'microvm'], default: 'container' }),
+      [sandboxTierField],
+      {},
+      { sandboxTier: 'microvm' },
+    );
+    expect(r.status === 'needs-input' && r.defaultValue).toBe('microvm');
+  });
+
+  it('skips the field when the control plane predates /v1/discovery (a 404, with --harness-url)', async () => {
+    const cp = fakeControlPlane({
+      discovery: async () => {
+        throw new ApiError('control-plane', 404, 'http_404');
+      },
+      listCredentials: async () => [credential('anthropic')],
+    });
+    const r = await resolveSessionOptions(cp, SESSION_OPTION_FIELDS, {}, {});
+    expect(r).toEqual({
+      status: 'ready',
+      values: { inferenceCredential: 'anthropic' },
+      request: { credentials: { inference: 'anthropic' } },
+    });
+  });
+
+  it('lets any other discovery failure propagate', async () => {
+    const cp = fakeControlPlane({
+      discovery: async () => {
+        throw new ApiError('control-plane', 500, 'internal_error');
+      },
+    });
+    await expect(resolveSessionOptions(cp, [sandboxTierField], {}, {})).rejects.toMatchObject({
+      status: 500,
+      code: 'internal_error',
+    });
   });
 
   it('a given tier on a deployment with none is blocked, saying so', async () => {

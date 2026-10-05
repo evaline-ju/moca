@@ -425,6 +425,17 @@ paths:
                   placement:
                     type: [object, 'null']
                     description: where the last leased turn ran; null until one has
+                    required: [sandboxId, tier, workspaceReset]
+                    properties:
+                      sandboxId: { type: string }
+                      tier: { type: [string, 'null'] }
+                      workspaceReset:
+                        type: [object, 'null']
+                        description: when, and from which sandbox, the session last lost its workspace
+                        required: [at, from]
+                        properties:
+                          at: { type: number, description: epoch ms }
+                          from: { type: string, description: the sandbox the session left }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
   /v1/sessions/{id}/token:

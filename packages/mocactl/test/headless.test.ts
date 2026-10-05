@@ -143,6 +143,28 @@ describe('cmdRun', () => {
     expect(requests[0]).not.toHaveProperty('sandbox');
   });
 
+  it('refuses an undeclared tier locally, listing the declared ones (P6.3)', async () => {
+    const o = io();
+    const cp = fakeControlPlane({
+      discovery: async () => ({
+        harnessUrl: 'http://h',
+        sandboxTiers: { names: ['container', 'microvm'], default: 'container' },
+      }),
+      listCredentials: async () => [credential('anthropic')],
+    });
+    expect(
+      await cmdRun(runtime({ cp }), o, {
+        prompt: 'hi',
+        options: { sandboxTier: 'gpu' },
+        json: false,
+      }),
+    ).toBe(2);
+    expect(o.stderr.join('\n')).toContain(
+      'choose the sandbox tier with --option sandboxTier=<value>: container, microvm',
+    );
+    expect(cp.calls).not.toContain('createSession');
+  });
+
   it('refuses to run without a valid login', async () => {
     const o = io();
     expect(
