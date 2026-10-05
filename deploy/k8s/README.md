@@ -748,7 +748,10 @@ token. Copy it straight to its host and delete the copy once installed.
 
 The host needs what `deploy/microvm/P4-ON-P6.md` lists for P4 (`/dev/kvm`, Firecracker and jailer,
 a golden snapshot, Go or `MICROVM_BIN`) and outbound TCP 443 to the relay Route host. Check that
-first with `curl -v https://moca-relay-moca.<apps domain>`. It does **not** need P6 installed.
+first with `curl -v https://moca-relay-moca.<apps domain>`: a completed TLS handshake proves it is
+reachable, even when curl then stops at a certificate verification error (as it does with the
+default self-signed certificate); a timeout or `Connection refused` does not. It does **not** need
+P6 installed.
 
 `setup-microvm.sh --remote <bundle>` installs the worker with the bundle's address, TLS, ID and
 token (the cluster's token replaces any local one), installs `relay-ca.crt` as
@@ -783,8 +786,8 @@ restart. Claims 7–11 do not run on this tier.
 - **Add** an ID to the list and re-run `setup.sh`: the new token reaches the relay's directory
   within the kubelet's Secret sync (about a minute; P7 prints the measured time), and the host's
   next attach succeeds. Attached hosts stay attached.
-- **Revoke** by removing the ID: its token and bundle are deleted, and its **next** attach is
-  refused. A host already attached stays attached until its stream drops; to cut it off at once,
+- **Revoke** by removing the ID: its token and bundle are deleted, and once the removal reaches the
+  relay's directory (the same kubelet Secret sync, about a minute) its **next** attach is refused. A host already attached stays attached until its stream drops; to cut it off at once,
   restart the relay (`kubectl -n moca rollout restart deployment/sandbox-relay`), which drops every
   attached sandbox.
 

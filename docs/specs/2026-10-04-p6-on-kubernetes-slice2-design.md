@@ -64,7 +64,7 @@ The rules around that lookup:
 
 - **A missing file is not an error.** `ENOENT` means this ID has no directory token, and the lookup falls through to steps 2–3. That is how in-cluster sandbox pods keep authenticating with `SH_RELAY_TOKEN`.
 - **Fail closed on every other read problem.** A read that fails with anything other than `ENOENT` (permissions, I/O, a directory where a file should be) does **not** fall through, and the attach is refused. The relay logs `relay token for <id> unreadable`, never the value. An **empty** file is likewise no token and no fallthrough: the ID is listed but has no usable token, so the attach is refused.
-- **The ID rule.** Only `sandboxId`s matching `^[A-Za-z_][A-Za-z0-9_]*$` are looked up in the directory, which rules out path traversal. Any other ID skips the directory and takes steps 2–3 exactly as before. The container tier's own IDs (`moca-sandbox-0`, …) contain dashes and authenticate with `SH_RELAY_TOKEN`, so refusing them would break that tier.
+- **The ID rule.** Only `sandboxId`s matching `^[A-Za-z_][A-Za-z0-9_]*$` are looked up in the directory, which rules out path traversal. Any other ID skips the directory and takes steps 2–3 exactly as before. The container tier's own IDs (`moca-sandbox-0`, …) contain dashes and authenticate with `SH_RELAY_TOKEN`, so refusing them would break that tier. The reserved ID `DIR` is refused before any lookup, because `SH_RELAY_TOKEN_DIR` sits in the `SH_RELAY_TOKEN_<id>` namespace.
 - **Comparison.** The comparison stays constant-time and length-checked.
 
 ### 2.2 Exec-token separation under reload (MI1 R5)
@@ -132,7 +132,7 @@ The relay Route host `moca-relay-moca.<apps domain>` gets the same treatment as 
 
 - with `--relay-tls-cert`, that certificate is installed into Secret `moca-relay-tls`;
 - otherwise a self-signed certificate is generated once, valid for 825 days with the SAN set to the host, and kept on every re-run;
-- the CA is written to `deploy/k8s/.generated/ocp/moca-relay-ca.crt` when the certificate in `moca-relay-tls` is self-issued (its subject hash equals its issuer hash), and removed otherwise. It is read back from the Secret on every run, so it is right whichever checkout created the certificate.
+- the CA is written to `deploy/k8s/.generated/ocp/moca-relay-ca.crt` when the certificate in `moca-relay-tls` is self-issued (its subject hash equals its issuer hash), and removed otherwise. It is read back from the Secret on every run with P4 IDs, so it is right whichever checkout created the certificate.
 
 ### 4.5 Bundles
 
@@ -199,7 +199,7 @@ The mock model gains scripts for claims 3–4, `K8S-SMOKE-P4-WRITE` and `K8S-SMO
 - **Relay (vitest):**
   - reading a token from the directory, covering the trailing newline, an empty file, a missing file and a non-ENOENT error;
   - falling back to the environment;
-  - refusing an ID that fails the ID rule;
+  - an ID that fails the ID rule skips the directory and uses the environment path; the reserved name `DIR` is refused outright;
   - refusing a directory token equal to the exec token;
   - a token written into the directory after the relay starts being accepted on the next attach, with the same relay instance.
 - **Go:** `RELAY_CA_FILE`, against an in-test TLS gRPC server with a self-signed certificate:
@@ -229,6 +229,7 @@ The mock model gains scripts for claims 3–4, `K8S-SMOKE-P4-WRITE` and `K8S-SMO
   - the CA file is installed;
   - the drop-in is swapped;
   - the journal check passes on success and dies on a timeout;
+  - the settle window: a rejected token (an `attached` line followed by `stream ended`) and reconnect churn both fail the install;
   - an invalid bundle is refused;
   - the switch back to local mode restores the local token and drop-in.
 - **The live acceptance run** (§8).
