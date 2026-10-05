@@ -721,4 +721,18 @@ grep -qF -- "--cert=$TMP/leaf.crt" "$MOCK_LOG" || fail '--relay-tls-cert was not
 [[ ! -e "$RCA" && ! -e "$P4B/moca_microvm_0/relay-ca.crt" ]] || fail 'an operator certificate still produced a relay CA file'
 pass 'an operator relay certificate is installed, and the bundle carries no CA (the host trusts its issuer)'
 
+echo "== P6.2 Task 7: rendering and printing"
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp)
+! gen | grep -q 'p4-relay\|moca-relay' || fail 'a stack with no P4 IDs rendered the p4-relay component'
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS=moca_microvm_0; expect_ok --target ocp)
+gen | grep -qx '  - ../../overlays/ocp/p4-relay' || fail 'the p4-relay component is not listed'
+gen | grep -q 'name: moca-relay }' || fail 'the relay Route is not patched'
+gen | grep -q 'value: moca-relay-moca.apps.example.test' || fail 'the relay Route host is wrong'
+expect_out "$REPO/deploy/k8s/.generated/ocp/p4/moca_microvm_0"
+expect_out "scp -r $REPO/deploy/k8s/.generated/ocp/p4/moca_microvm_0 <kvm-host>:moca-p4-moca_microvm_0"
+expect_out 'sudo deploy/microvm/setup-microvm.sh --remote ~/moca-p4-moca_microvm_0'
+pass 'P4 IDs render the p4-relay component and the relay Route host, and print each host command; none render nothing'
+
 echo "setup.test.sh: all passed"

@@ -92,4 +92,68 @@ describe.skipIf(NO_KUBECTL)('the generated OCP overlay (setup.sh write_overlay)'
     const cp = find(objs, 'Deployment', 'moca-control-plane', 'moca');
     expect(cp.spec.template.metadata.annotations['moca.dev/settings-hash']).toBe(HASH);
   });
+
+  it('renders nothing of P4 with no P4 IDs, so the relay matches slice 1', () => {
+    const names = objs.map((o) => `${o.kind}/${o.metadata.name}`);
+    expect(names).not.toContain('Route/moca-relay');
+    expect(names).not.toContain('Service/sandbox-relay-tls');
+    expect(names).not.toContain('NetworkPolicy/sandbox-relay-from-router');
+    const relay = podSpec(find(objs, 'Deployment', 'sandbox-relay', 'moca'));
+    expect(relay.containers.map((c: { name: string }) => c.name)).toEqual(['sandbox-relay']);
+  });
 });
+
+describe.skipIf(NO_KUBECTL)(
+  'the generated OCP overlay with P4 IDs (setup.sh write_overlay)',
+  () => {
+    const P4_DIR = resolve(K8S_DIR, '.generated/test-ocp-p4');
+    const RELAY_HOST = 'moca-relay-moca.apps.example.test';
+    let objs: K8sObject[] = [];
+    beforeAll(() => {
+      execFileSync('bash', [WRITER, P4_DIR], {
+        env: {
+          ...process.env,
+          GO_TARGET: 'ocp',
+          GO_SUP_HOST: SUP_HOST,
+          GO_CP_HOST: CP_HOST,
+          GO_SANDBOX_COUNT: '0',
+          GO_CLIENT_ID: 'Iv1.generated-overlay-test',
+          GO_SETTINGS_HASH: HASH,
+          GO_P4_IDS: 'moca_microvm_0 moca_microvm_1',
+          GO_RELAY_HOST: RELAY_HOST,
+        },
+        stdio: ['ignore', 'ignore', 'inherit'],
+      });
+      const out = execFileSync('kubectl', ['kustomize', P4_DIR], { encoding: 'utf8' });
+      objs = parseAllDocuments(out)
+        .map((d) => d.toJS() as K8sObject | null)
+        .filter((o): o is K8sObject => o !== null);
+    });
+    afterAll(() => {
+      rmSync(P4_DIR, { recursive: true, force: true });
+    });
+
+    it('includes the p4-relay component, with the relay Route host patched', () => {
+      const route = find(objs, 'Route', 'moca-relay', 'moca');
+      expect(route.spec.host).toBe(RELAY_HOST);
+      expect(route.spec.tls.termination).toBe('passthrough');
+      expect(find(objs, 'Service', 'sandbox-relay-tls', 'moca').spec.ports[0].port).toBe(8444);
+      find(objs, 'NetworkPolicy', 'sandbox-relay-from-router', 'moca'); // throws when absent
+    });
+
+    it('gives the relay its TLS sidecar beside the relay container, which keeps the token dir', () => {
+      const relay = podSpec(find(objs, 'Deployment', 'sandbox-relay', 'moca'));
+      expect(relay.containers.map((c: { name: string }) => c.name).sort()).toEqual([
+        'sandbox-relay',
+        'tls',
+      ]);
+      const env = relay.containers.find((c: { name: string }) => c.name === 'sandbox-relay').env;
+      expect(env).toContainEqual({ name: 'SH_RELAY_TOKEN_DIR', value: '/run/relay-tokens' });
+    });
+
+    it('keeps the supervisor and control plane patches of the no-P4 render', () => {
+      expect(find(objs, 'Route', 'moca', 'moca').spec.host).toBe(SUP_HOST);
+      expect(find(objs, 'StatefulSet', 'moca-sandbox', 'moca-sandbox').spec.replicas).toBe(0);
+    });
+  },
+);
