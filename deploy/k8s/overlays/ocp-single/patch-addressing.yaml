@@ -1,0 +1,38 @@
+# The cross-namespace env strings -> same-namespace. The namespace transformer fixes
+# metadata.namespace and the RoleBinding's subjects, but these literal env values carry hostnames
+# that no transformer rewrites. The ".moca-single" name matches this overlay's checked-in
+# namespace placeholder; setup.sh's generated overlay patches the real one over it.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: moca-supervisor, namespace: moca }
+spec:
+  template:
+    spec:
+      containers:
+        - name: supervisor
+          env:
+            - { name: SH_RELAY_ADDR, value: 'sandbox-relay-exec.moca-single.svc:9444' }
+            - { name: SH_CONTROL_PLANE_URL, value: 'http://moca-control-plane.moca-single.svc:8080' }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: moca-control-plane, namespace: moca }
+spec:
+  template:
+    spec:
+      containers:
+        - name: control-plane
+          env:
+            - { name: SH_CREDENTIAL_NAMESPACE, value: moca-single }
+            - { name: SH_SANDBOX_NAMESPACE, value: moca-single }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: moca-sandbox, namespace: moca-sandbox }
+spec:
+  template:
+    spec:
+      containers:
+        - name: sandbox
+          env:
+            - { name: RELAY_ADDR, value: 'sandbox-relay-attach.moca-single.svc:9443' }

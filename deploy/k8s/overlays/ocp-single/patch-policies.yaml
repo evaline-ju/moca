@@ -1,0 +1,47 @@
+# The two base NetworkPolicies that select peers by namespaceSelector, because in the base those
+# peers lived in another namespace. In one namespace the pod labels alone must carry the same
+# restrictions: sandboxes still reach only the relay's attach port, and only the supervisor
+# reaches SandboxExec.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: sandbox-relay, namespace: moca }
+spec:
+  podSelector: { matchLabels: { app: sandbox-relay } }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Attach: in-cluster sandboxes only (was namespaceSelector + podSelector).
+    - from:
+        - podSelector: { matchLabels: { app: moca-sandbox } }
+      ports:
+        - { protocol: TCP, port: 9443 }
+    # SandboxExec: the supervisor's workers only. A sandbox that could reach this could Exec into
+    # every other sandbox.
+    - from:
+        - podSelector: { matchLabels: { app: moca-supervisor } }
+      ports:
+        - { protocol: TCP, port: 9444 }
+  egress:
+    - to:
+        - podSelector: { matchLabels: { app: redis } }
+      ports:
+        - { protocol: TCP, port: 6379 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: moca-sandbox, namespace: moca-sandbox }
+spec:
+  podSelector: { matchLabels: { app: moca-sandbox } }
+  policyTypes: [Ingress, Egress]
+  egress:
+    # The only cluster destination a sandbox has (was namespaceSelector moca + podSelector).
+    - to:
+        - podSelector: { matchLabels: { app: sandbox-relay } }
+      ports:
+        - { protocol: TCP, port: 9443 }
+    # Research turns (curl, git): the public internet. The private, CGNAT and link-local ranges
+    # are carved out, which covers Pod and Service CIDRs and cloud instance metadata
+    # (169.254.169.254, #357).
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]

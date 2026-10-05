@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # deploy/k8s/setup.sh -- bring up P6 on Kubernetes (docs/specs/2026-10-02-p6-on-kubernetes-slice1-design.md §4).
 #
-#   deploy/k8s/setup.sh --target kind|kind-ci|ocp [--image IMG] [--sandbox-image IMG]
+#   deploy/k8s/setup.sh --target kind|kind-ci|ocp|ocp-single [--image IMG] [--sandbox-image IMG]
 #                       [--build|--skip-build] [--tls-cert FILE --tls-key FILE]
 #                       [--relay-tls-cert FILE --relay-tls-key FILE]
 #
@@ -9,8 +9,9 @@
 # SH_SANDBOX_COUNT (default 2; 0 runs no container sandboxes), SH_WAIT_SECONDS (default 120),
 # SH_P4_SANDBOX_IDS (ocp only: comma-separated IDs of P4 microVM hosts outside the cluster, each
 # attaching to the relay over TLS; needs SH_SANDBOX_COUNT=0 -- see
-# docs/specs/2026-10-04-p6-on-kubernetes-slice2-design.md), SH_SOURCE_ONLY=1 (define the functions
-# and stop, for tests).
+# docs/specs/2026-10-04-p6-on-kubernetes-slice2-design.md), SH_SINGLE_NAMESPACE (ocp-single only:
+# the one namespace everything lands in; default moca-single, must already exist), SH_SOURCE_ONLY=1
+# (define the functions and stop, for tests).
 #
 # Idempotent: a re-run converges and never rotates a secret. Inputs are sticky: a re-run keeps every
 # setting, --image, --sandbox-image (ocp), SH_SANDBOX_COUNT and SH_P4_SANDBOX_IDS it is not given; an
@@ -39,6 +40,8 @@ RELAY_TLS_KEY=''
 # P4 sandbox IDs (P6.2), space-separated once normalised; resolved against moca-setup in load_setup_inputs.
 P4_IDS=''
 P4_IDS_GIVEN=''
+# ocp-single's namespace (README §12), validated in parse_args.
+SINGLE_NS=''
 
 log() { printf '==> %s\n' "$*" >&2; }
 die() {
@@ -68,9 +71,9 @@ parse_args() {
     esac
   done
   case "$TARGET" in
-  kind | kind-ci | ocp) ;;
-  '') die '--target is required: kind, kind-ci or ocp' ;;
-  *) die "unknown --target '$TARGET': kind, kind-ci or ocp" ;;
+  kind | kind-ci | ocp | ocp-single) ;;
+  '') die '--target is required: kind, kind-ci, ocp or ocp-single' ;;
+  *) die "unknown --target '$TARGET': kind, kind-ci, ocp or ocp-single" ;;
   esac
   if [[ -n "$TLS_CERT$TLS_KEY" ]]; then
     [[ "$TARGET" == ocp ]] || die '--tls-cert/--tls-key apply to --target ocp only'
@@ -88,6 +91,15 @@ parse_args() {
   P4_IDS="$(normalize_p4_ids "${SH_P4_SANDBOX_IDS-}")"
   [[ -z "$P4_IDS" ]] || [[ "$TARGET" == ocp ]] ||
     die "SH_P4_SANDBOX_IDS ($P4_IDS) needs --target ocp: a P4 host outside the cluster reaches the relay through an OpenShift Route, and $TARGET has none"
+  # ocp-single's namespace: validated here, before anything touches a cluster. It must already
+  # exist -- creating one needs cluster scope, which this target assumes you lack.
+  if [[ "$TARGET" == ocp-single ]]; then
+    SINGLE_NS="${SH_SINGLE_NAMESPACE:-moca-single}"
+    [[ "$SINGLE_NS" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] ||
+      die "SH_SINGLE_NAMESPACE='$SINGLE_NS' is not a namespace name (lowercase alphanumerics and '-', 1-63 chars)"
+    [[ "$SINGLE_NS" != moca && "$SINGLE_NS" != moca-sandbox && "$SINGLE_NS" != moca-credentials ]] ||
+      die "SH_SINGLE_NAMESPACE='$SINGLE_NS' collides with the base's namespace names; pick a dedicated one"
+  fi
   # Validated here, before anything touches a cluster; an unset or empty count is resolved later,
   # from the earlier run's value (load_setup_inputs).
   SH_SANDBOX_COUNT="${SH_SANDBOX_COUNT:-}"
@@ -97,6 +109,16 @@ parse_args() {
 }
 
 is_kind() { [[ "$TARGET" == kind || "$TARGET" == kind-ci ]]; }
+
+# ocp-single: every workload, Secret, Role and policy in ONE namespace (README §12). Resolved in
+# parse_args (SH_SINGLE_NAMESPACE validation) and applied here, after parse_args, so TARGET is
+# known. SINGLE_NS is the validated value; NS and SBX_NS both collapse to it.
+resolve_namespaces() {
+  if [[ "$TARGET" == ocp-single ]]; then
+    NS="$SINGLE_NS"
+    SBX_NS="$SINGLE_NS"
+  fi
+}
 
 # Every cluster call goes through here. On Kind it is pinned to the kind-moca context, never the
 # ambient one: a Kind run must not apply a stack to whatever cluster the shell happens to point at.
@@ -109,9 +131,9 @@ version_ge() { [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" == "$2" ]
 
 preflight() {
   local need='kubectl openssl jq' missing='' c v
-  if is_kind; then need="$need kind docker"; else need="$need oc"; fi
+  if is_kind; then need="$need kind docker"; elif [[ "$TARGET" != ocp-single ]]; then need="$need oc"; fi
+  # ocp-single runs kubectl only: no SCC grant and no Route reads, so oc is never needed.
   for c in $need; do command -v "$c" >/dev/null 2>&1 || missing="$missing $c"; done
-  command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || missing="$missing sha256sum|shasum"
   [[ -z "$missing" ]] || die "missing required commands:$missing"
   if is_kind; then
     # `|| true`: a grep that matches nothing would otherwise end the run here, under set -e and
@@ -122,8 +144,13 @@ preflight() {
     version_ge "$v" "$MIN_KIND_VERSION" ||
       die "kind v$MIN_KIND_VERSION or newer is required (found v$v): it is the first whose default CNI enforces NetworkPolicy, and this deployment's isolation IS NetworkPolicy"
   else
-    oc whoami >/dev/null 2>&1 || die 'not logged in to OpenShift: run `oc login` first'
-    log "target cluster: $(kubectl config current-context)"
+    if [[ "$TARGET" == ocp-single ]]; then
+      # The tenant's kubeconfig IS the login; nothing reads cluster-scoped objects.
+      log "target cluster: $(kubectl config current-context)"
+    else
+      oc whoami >/dev/null 2>&1 || die 'not logged in to OpenShift: run `oc login` first'
+      log "target cluster: $(kubectl config current-context)"
+    fi
   fi
 }
 
@@ -166,7 +193,16 @@ ensure_images() {
 harness_ref() { if is_kind; then echo "$LOCAL_HARNESS"; else echo "${IMAGE:-ghcr.io/rossoctl/moca:latest}"; fi; }
 
 # Namespaces alone first, so Secrets can land before any workload that mounts them.
-ensure_namespaces() { kc apply -f "$K8S_DIR/base/namespaces.yaml" >/dev/null; }
+ensure_namespaces() {
+  if [[ "$TARGET" == ocp-single ]]; then
+    # The one namespace must already exist: creating one needs cluster scope, which this target
+    # assumes you lack. A readable GET is also the permission check for everything that follows.
+    kc get namespace "$NS" >/dev/null 2>&1 ||
+      die "namespace $NS does not exist (or is unreadable). --target ocp-single cannot create it: have the cluster's admin create it, then re-run"
+  else
+    kc apply -f "$K8S_DIR/base/namespaces.yaml" >/dev/null
+  fi
+}
 
 # configmap_json NAME: the ConfigMap in $NS as JSON, or nothing when it does not exist. Any other
 # API error fails, and the caller's assignment aborts the run (set -e, outside any conditional): an
@@ -239,6 +275,11 @@ load_setup_inputs() {
   else
     data="$(jq -nc --arg n "$SH_SANDBOX_COUNT" --arg i "$IMAGE" --arg s "$SANDBOX_IMAGE" --arg p "${P4_IDS// /,}" \
       '{SH_SANDBOX_COUNT: $n, IMAGE: $i, SANDBOX_IMAGE: $s, SH_P4_SANDBOX_IDS: $p} | with_entries(select(.value != ""))')"
+  fi
+  # ocp-single adds its namespace, so a later smoke.sh finds it without being told
+  # (smoke.sh reads this key to pick its own -n).
+  if [[ "$TARGET" == ocp-single ]]; then
+    data="$(jq -nc --argjson d "$data" --arg ns "$NS" '$d + {SH_SINGLE_NAMESPACE: $ns}')"
   fi
   jq -n --arg ns "$NS" --argjson data "$data" \
     '{apiVersion: "v1", kind: "ConfigMap", metadata: {name: "moca-setup", namespace: $ns}, data: $data}' |
@@ -445,7 +486,9 @@ route_hosts() {
 CLIENT_ID=''
 client_id() { printf '%s' "$CLIENT_ID"; }
 
-public_harness_url() { if is_kind; then echo 'http://127.0.0.1:8080'; else echo "https://$SUP_HOST"; fi; }
+public_harness_url() {
+  if is_kind || [[ "$TARGET" == ocp-single ]]; then echo 'http://127.0.0.1:8080'; else echo "https://$SUP_HOST"; fi
+}
 
 # sha256: stdin's SHA-256, hex. sha256sum (Linux, coreutils) or shasum (macOS), whichever is present.
 sha256() {
@@ -659,6 +702,41 @@ write_overlay() {
         [[ -z "$SANDBOX_IMAGE" ]] || image_entry ghcr.io/rossoctl/moca-remote-worker "$SANDBOX_IMAGE"
       fi
     fi
+    if [[ "$TARGET" == ocp-single ]]; then
+      if [[ "$NS" != moca-single ]]; then
+        # The env strings the overlay hard-coded against its moca-single placeholder
+        # ("...moca-single.svc" hostnames, the credential and sandbox namespace settings):
+        # strategic-merge patches, which replace an env var by name without touching the rest of
+        # the list. They belong under patches:, so they come before the namespace: key below.
+        printf '  - target: { kind: Deployment, name: moca-supervisor }\n'
+        printf '    patch: |-\n'
+        printf '      apiVersion: apps/v1\n      kind: Deployment\n      metadata: { name: moca-supervisor }\n'
+        printf '      spec:\n        template:\n          spec:\n            containers:\n              - name: supervisor\n                env:\n'
+        printf '                  - { name: SH_RELAY_ADDR, value: "sandbox-relay-exec.%s.svc:9444" }\n' "$NS"
+        printf '                  - { name: SH_CONTROL_PLANE_URL, value: "http://moca-control-plane.%s.svc:8080" }\n' "$NS"
+        printf '  - target: { kind: Deployment, name: moca-control-plane }\n'
+        printf '    patch: |-\n'
+        printf '      apiVersion: apps/v1\n      kind: Deployment\n      metadata: { name: moca-control-plane }\n'
+        printf '      spec:\n        template:\n          spec:\n            containers:\n              - name: control-plane\n                env:\n'
+        printf '                  - { name: SH_CREDENTIAL_NAMESPACE, value: "%s" }\n' "$NS"
+        printf '                  - { name: SH_SANDBOX_NAMESPACE, value: "%s" }\n' "$NS"
+        printf '  - target: { kind: StatefulSet, name: moca-sandbox }\n'
+        printf '    patch: |-\n'
+        printf '      apiVersion: apps/v1\n      kind: StatefulSet\n      metadata: { name: moca-sandbox }\n'
+        printf '      spec:\n        template:\n          spec:\n            containers:\n              - name: sandbox\n                env:\n'
+        printf '                  - { name: RELAY_ADDR, value: "sandbox-relay-attach.%s.svc:9443" }\n' "$NS"
+      fi
+      # The namespace, as a transformer on the generated overlay: every object, every Service DNS
+      # name the transformer rewrites, and the RoleBinding's subjects follow it. The checked-in
+      # overlay builds against the moca-single placeholder, so with the default the env-string
+      # patches above are skipped (the overlay already carries the right strings).
+      printf 'namespace: %s\n' "$NS"
+      if [[ -n "$IMAGE$SANDBOX_IMAGE" ]]; then
+        printf 'images:\n'
+        [[ -z "$IMAGE" ]] || image_entry ghcr.io/rossoctl/moca "$IMAGE"
+        [[ -z "$SANDBOX_IMAGE" ]] || image_entry ghcr.io/rossoctl/moca-remote-worker "$SANDBOX_IMAGE"
+      fi
+    fi
   } >"$GEN_DIR/kustomization.yaml"
 }
 
@@ -718,6 +796,13 @@ P6 is up on kind (context $KIND_CONTEXT). Reach it with two port-forwards:
   kubectl --context $KIND_CONTEXT -n $NS port-forward svc/moca-control-plane 8090:8080
 then:  mocactl --control-plane-url http://127.0.0.1:8090 login
 EOF
+  elif [[ "$TARGET" == ocp-single ]]; then
+    cat >&2 <<EOF
+P6 is up on OpenShift, namespace $NS (single-namespace dev/test target; no Routes). Reach it by port-forward:
+  kubectl -n $NS port-forward svc/moca-supervisor 8080:8080
+  kubectl -n $NS port-forward svc/moca-control-plane 8090:8080
+then:  mocactl --control-plane-url http://127.0.0.1:8090 login
+EOF
   else
     cat >&2 <<EOF
 P6 is up on OpenShift.
@@ -742,6 +827,7 @@ EOF
 
 main() {
   parse_args "$@"
+  resolve_namespaces
   preflight
   ensure_images
   ensure_namespaces
