@@ -59,7 +59,7 @@ echo "== an unscripted prompt is a 400, not a guess"
 check "400" "$(post '{"model":"mock-p4","stream":true,"messages":[{"role":"user","content":"hello"}]}')" "400"
 
 echo "== the K8s smoke scripts (#423) are scripted, and do not disturb the P4 ones"
-for m in K8S-SMOKE-WRITE K8S-SMOKE-AGAIN K8S-SMOKE-RESEARCH K8S-SMOKE-DRAIN; do
+for m in K8S-SMOKE-WRITE K8S-SMOKE-AGAIN K8S-SMOKE-RESEARCH K8S-SMOKE-DRAIN K8S-SMOKE-P4-WRITE K8S-SMOKE-P4-READ; do
   code="$(post '{"model":"mock-k8s","stream":true,"messages":[{"role":"user","content":"run it. '"$m"'"}]}')"
   check "$m step 0 is 200" "$code" "200"
   check "$m step 0 is a bash tool_use" "$(grep -c '"name":"bash"' "$TMP/body")" "1"
