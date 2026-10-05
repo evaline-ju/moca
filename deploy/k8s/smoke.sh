@@ -108,12 +108,17 @@ if jq -e '.ready == true and .workers > 0 and .healthy == .workers' >/dev/null 2
 
 if [[ "$TIER" == p4 ]]; then
   claim P2 "every P4 sandbox in SH_P4_SANDBOX_IDS is attached through the relay, and no container sandbox is"
-  ids="$(kc -n "$NS" get configmap moca-setup -o jsonpath='{.data.SH_P4_SANDBOX_IDS}' 2>/dev/null || true)"
+  # A failed read is not an empty value: only a readable moca-setup can say "no P4 tier".
+  setup_read=1
+  ids="$(kc -n "$NS" get configmap moca-setup -o jsonpath='{.data.SH_P4_SANDBOX_IDS}' 2>"$OUT/p2-setup.err")" ||
+    { setup_read=0; ids=''; }
   keys="$(kc -n "$NS" exec redis-0 -- sh -c 'redis-cli HKEYS sh:sandbox:records' 2>/dev/null || true)"
   missing=''
   for id in ${ids//,/ }; do grep -qx "$id" <<<"$keys" || missing="$missing $id"; done
   containers="$(grep -E '^moca-sandbox-[0-9]+$' <<<"$keys" | tr '\n' ' ' || true)"
-  if [[ -z "$ids" ]]; then
+  if [[ "$setup_read" == 0 ]]; then
+    ko "could not read configmap moca-setup: $(head -c 300 "$OUT/p2-setup.err" 2>/dev/null)"
+  elif [[ -z "$ids" ]]; then
     ko "moca-setup holds no SH_P4_SANDBOX_IDS: this stack has no P4 tier (README \"P4 on Kubernetes\")"
   elif [[ -n "$missing" ]]; then
     ko "not in sh:sandbox:records:$missing (have: $(tr '\n' ' ' <<<"$keys"))"
@@ -191,7 +196,7 @@ if [[ "$TIER" == p4 ]]; then
   if new_session && turn p4write "$SID" "$(ask K8S-SMOKE-P4-WRITE 'uname -r; echo p4-proof | tee proof.txt')" &&
     grep -q p4-proof <(tool_out "$OUT/p4write.sse"); then
     # sed, not head: head's early exit would SIGPIPE jq, and pipefail would end the run here.
-    guest="$(tool_out "$OUT/p4write.sse" | sed -n 1p)"
+    guest="$(tool_out "$OUT/p4write.sse" | sed -n 1p || true)"
     nodes="$(kc get nodes -o jsonpath='{.items[*].status.nodeInfo.kernelVersion}' 2>/dev/null || true)"
     if [[ -z "$nodes" ]]; then
       ko "could not read the nodes' kernels (kubectl get nodes)"
@@ -296,27 +301,31 @@ JS
         "\(.metadata.name) \(.status.startTime) \([.status.containerStatuses[]?.restartCount] | add // 0)"] | join(",")'
     }
     token_seen() { kc -n "$NS" exec deploy/sandbox-relay -c sandbox-relay -- sh -c "test -s /run/relay-tokens/$1" >/dev/null 2>&1; }
-    setup_sh="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/setup.sh"
+    setup_sh="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd || true)/setup.sh"
     ids="$(kc -n "$NS" get configmap moca-setup -o jsonpath='{.data.SH_P4_SANDBOX_IDS}' 2>/dev/null || true)"
     before="$(relay_state 2>/dev/null || true)"
     if [[ -z "$ids" || -z "$before" ]]; then
       ko "could not read SH_P4_SANDBOX_IDS ('$ids') or the relay pod ('$before')"
     elif [[ ",$ids," == *",$SMOKE_P4_ADD_ID,"* ]]; then
       ko "SMOKE_P4_ADD_ID=$SMOKE_P4_ADD_ID is already a P4 host: pick a scratch id"
-    elif ! SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS="$ids,$SMOKE_P4_ADD_ID" bash "$setup_sh" --target ocp >"$OUT/p7-add.log" 2>&1; then
-      ko "setup.sh adding $SMOKE_P4_ADD_ID failed (log kept: $OUT/p7-add.log)"
     else
-      t0="$SECONDS"
-      if wait_for 180 token_seen "$SMOKE_P4_ADD_ID"; then
-        seen=$((SECONDS - t0))
-        after="$(relay_state 2>/dev/null || true)"
-        if [[ "$after" == "$before" ]]; then
-          ok "$SMOKE_P4_ADD_ID's token reached the relay's directory in ${seen}s; relay pod unchanged ($after)"
-        else
-          ko "the relay pod changed: before '$before', after '$after'"
-        fi
+      # setup.sh writes the sticky moca-setup early, so even a failed add can leave the scratch id
+      # behind (sticky, with a token and a bundle): the restore runs whenever the add was attempted.
+      if ! SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS="$ids,$SMOKE_P4_ADD_ID" bash "$setup_sh" --target ocp >"$OUT/p7-add.log" 2>&1; then
+        ko "setup.sh adding $SMOKE_P4_ADD_ID failed (log kept: $OUT/p7-add.log)"
       else
-        ko "$SMOKE_P4_ADD_ID's token never appeared in the relay's /run/relay-tokens within 180s"
+        t0="$SECONDS"
+        if wait_for 180 token_seen "$SMOKE_P4_ADD_ID"; then
+          seen=$((SECONDS - t0))
+          after="$(relay_state 2>/dev/null || true)"
+          if [[ "$after" == "$before" ]]; then
+            ok "$SMOKE_P4_ADD_ID's token reached the relay's directory in ${seen}s; relay pod unchanged ($after)"
+          else
+            ko "the relay pod changed: before '$before', after '$after'"
+          fi
+        else
+          ko "$SMOKE_P4_ADD_ID's token never appeared in the relay's /run/relay-tokens within 180s"
+        fi
       fi
       # Put the list back: revokes the scratch id and deletes its bundle.
       SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS="$ids" bash "$setup_sh" --target ocp >"$OUT/p7-restore.log" 2>&1 ||

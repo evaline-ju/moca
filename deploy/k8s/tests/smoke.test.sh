@@ -56,7 +56,9 @@ case " $* " in
 *" exec moca-sandbox-0 "*) echo BLOCKED ;;
 *" exec redis-0 "*) printf '%s' "${MOCK_REDIS_OUT-}" ;;
 *" get statefulset "*) echo 1 ;;
-*" get configmap moca-setup "*) printf '%s' "${MOCK_P4_IDS-moca_microvm_0}" ;;
+*" get configmap moca-setup "*)
+  [[ -z "${MOCK_SETUP_CM_FAIL-}" ]] || { echo 'Error from server (Forbidden): configmaps "moca-setup" is forbidden' >&2; exit 1; }
+  printf '%s' "${MOCK_P4_IDS-moca_microvm_0}" ;;
 *" get route moca-relay "*) echo moca-relay-moca.apps.example.test ;;
 *" get secret moca-relay "*) jq -n '{data: {MOCA_RELAY_EXEC_TOKEN: ("exec-token-must-stay-off-argv-0123" | @base64)}}' ;;
 *" get secret moca-relay-tls "*) jq -n '{data: {"tls.crt": ("-----BEGIN CERTIFICATE-----" | @base64)}}' ;;
@@ -155,5 +157,12 @@ pass 'p4 tier: P2 reads moca-setup and the records, P6 passes the exec token on 
   grep -qE '^  FAIL container sandboxes attached alongside P4' "$TMP/out" || fail 'a container record beside P4 did not fail claim P2'
   grep -qE '^  FAIL probe: .attach=14' "$TMP/out" || fail 'an UNAVAILABLE attach (TLS/dial failure) did not fail claim P6')
 pass 'p4 tier: a container record fails P2; an attach that never reached the relay (14) fails P6'
+
+(export SMOKE_MODEL_URL=https://model.example.test SMOKE_MODEL_TOKEN=model-token-not-real MOCK_SETUP_CM_FAIL=1
+  run_smoke --target ocp --tier p4
+  grep -qE '^  FAIL could not read configmap moca-setup' "$TMP/out" || fail 'a failed moca-setup read was not reported as a read failure'
+  ! grep -qF 'holds no SH_P4_SANDBOX_IDS' "$TMP/out" || fail 'a failed moca-setup read was reported as an empty SH_P4_SANDBOX_IDS'
+  expect_out 'PASS=')
+pass 'p4 tier: a failed read of moca-setup is a read failure in P2, not an empty SH_P4_SANDBOX_IDS'
 
 echo "smoke.test.sh: all passed"
