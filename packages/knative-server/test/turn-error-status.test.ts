@@ -93,8 +93,8 @@ describe('turnErrorHeaders', () => {
   });
 
   it("rounds up a pending sandbox's retryInMs to the next second", () => {
-    const pending4_2s = new SandboxAffinityPendingError('m-0', 4_200);
-    expect(turnErrorHeaders(503, pending4_2s)).toMatchObject({ 'Retry-After': '5' });
+    const pending7_2s = new SandboxAffinityPendingError('m-0', 7_200);
+    expect(turnErrorHeaders(503, pending7_2s)).toMatchObject({ 'Retry-After': '8' });
   });
 
   it('enforces a 1 s minimum for pending sandbox retryInMs', () => {
@@ -107,8 +107,13 @@ describe('turnErrorHeaders', () => {
     expect(turnErrorHeaders(503, saturated)).toMatchObject({ 'Retry-After': '5' });
   });
 
-  it('uses the config default Retry-After on non-503 status, even with a pending error', () => {
+  it('adds no Retry-After to a non-503, even with a pending error', () => {
     const pending = new SandboxAffinityPendingError('m-0', 30_000);
     expect(turnErrorHeaders(500, pending)).not.toHaveProperty('Retry-After');
+  });
+
+  it('falls back to configured value when pending error has NaN retryInMs', () => {
+    const pendingNaN = new SandboxAffinityPendingError('m-0', NaN);
+    expect(turnErrorHeaders(503, pendingNaN)).toMatchObject({ 'Retry-After': '5' });
   });
 });

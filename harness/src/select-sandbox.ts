@@ -514,7 +514,7 @@ async function remember<T>(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(
-      `sandbox affinity: could not record '${forLog(sandboxId)}' for session ${forLog(sessionId)}: ${message}`,
+      `sandbox affinity: could not record '${forLog(sandboxId)}' for session ${forLog(sessionId)}: ${forLog(message)}`,
     );
     return undefined;
   }

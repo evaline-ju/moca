@@ -12,9 +12,11 @@ import { intEnv } from './lease-timings.js';
  * under the same id.
  */
 
-/** A value safe to interpolate into one log line: CR, LF and other control characters removed (CodeQL js/log-injection). */
+/** A value safe to interpolate into one log line: CR, LF and other control characters removed (CodeQL js/log-injection).
+ * Explicit \r\n and no quantifier are required for CodeQL's StringReplaceSanitizer recognition.
+ */
 export function forLog(value: string): string {
-  return value.replace(/[\u0000-\u001f\u007f]+/g, '');
+  return value.replace(/[\r\n\u0000-\u001f\u007f]/g, '');
 }
 
 /** The presence label the tier filter reads; the workers' `session.TierLabelKey`. */

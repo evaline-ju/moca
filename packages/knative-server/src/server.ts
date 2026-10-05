@@ -273,7 +273,8 @@ export function turnErrorHeaders(status: number, err?: unknown): Record<string, 
     'name' in err &&
     err.name === 'SandboxAffinityPendingError' &&
     'retryInMs' in err &&
-    typeof err.retryInMs === 'number'
+    typeof err.retryInMs === 'number' &&
+    Number.isFinite(err.retryInMs)
   ) {
     const seconds = Math.min(10, Math.max(1, Math.ceil(err.retryInMs / 1000)));
     return { ...JSON_HEADERS, 'Retry-After': String(seconds) };
