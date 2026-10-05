@@ -92,6 +92,7 @@ export function buildConfig(auth?: TurnAuth | null): TurnConfig {
       cwd: process.env.HARNESS_CWD || process.cwd(),
       anthropicBaseUrl: auth.anthropicBaseUrl,
       upstreamCredential: auth.credential,
+      ...(auth.sandboxTier ? { sandboxTier: auth.sandboxTier } : {}),
       ...server,
     };
   }

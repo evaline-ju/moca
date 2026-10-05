@@ -29,6 +29,8 @@ export interface TurnAuth {
   credential: UpstreamCredential;
   /** Never undefined: an unresolvable endpoint is refused upstream, not defaulted (spec §6.2). */
   anthropicBaseUrl: string;
+  /** The session's sandbox tier from the exchange (P6.3); absent ⇒ the data plane's default. */
+  sandboxTier?: string;
 }
 
 export interface TurnAuthDeps {
@@ -250,6 +252,10 @@ export async function resolveTurnAuth(
       ...(resolved.authHeader === 'x-api-key' ? { header: resolved.authHeader } : {}),
     },
     anthropicBaseUrl: resolved.anthropicBaseUrl,
+    // Only a non-empty string is trusted; anything else is "no tier", never an odd value in a filter.
+    ...(typeof resolved.sandboxTier === 'string' && resolved.sandboxTier
+      ? { sandboxTier: resolved.sandboxTier }
+      : {}),
   };
 }
 

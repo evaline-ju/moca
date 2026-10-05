@@ -268,6 +268,18 @@ describe('buildConfig marks every server turn (MI1 R3)', () => {
       else process.env.SH_LOCAL_TOOLS = saved;
     }
   });
+
+  it('passes the session tier through to the turn (P6.3)', () => {
+    const auth = {
+      subject: 'github:1',
+      sessionId: 's',
+      credential: { mode: 'direct' as const, value: 'k' }, // notsecret
+      anthropicBaseUrl: 'https://x',
+      sandboxTier: 'microvm',
+    };
+    expect(buildConfig(auth).sandboxTier).toBe('microvm');
+    expect(buildConfig(null).sandboxTier).toBeUndefined();
+  });
 });
 
 describe('prepareServerProcess gives the process a private agent directory (MI1 R4)', () => {
