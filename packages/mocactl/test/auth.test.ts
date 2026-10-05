@@ -3,6 +3,7 @@ import {
   LoginCancelledError,
   LoginExpiredError,
   apiTokenValid,
+  codeValidity,
   deviceLogin,
   loginExpiryMinutes,
   toCachedAuth,
@@ -42,20 +43,66 @@ describe('deviceLogin', () => {
     expect(polls).toEqual([5000, 10000, 15000]);
   });
 
-  it('gives up with LoginExpiredError after expiresIn', async () => {
-    const c = clock();
+  /** A control plane that hands out codes U1, U2, ... each valid for `expiresIn` seconds. */
+  function issuing(expiresIn: number, poll: (deviceCode: string) => Promise<unknown>) {
+    let n = 0;
+    const issued: string[] = [];
     const cp = fakeControlPlane({
-      startDeviceAuth: async () => ({
-        deviceCode: 'd',
-        userCode: 'U',
-        verificationUri: 'v',
-        interval: 5,
-        expiresIn: 12,
-      }),
+      startDeviceAuth: async () => {
+        n += 1;
+        issued.push(`d${n}`);
+        return {
+          deviceCode: `d${n}`,
+          userCode: `U${n}`,
+          verificationUri: 'v',
+          interval: 5,
+          expiresIn,
+        };
+      },
+      pollDeviceAuth: poll as never,
     });
+    return { cp, issued };
+  }
+
+  it('re-issues the code once when the control plane says it expired, and logs in with the new one', async () => {
+    // #431: a user away from the browser comes back to a fresh code, not a failed login.
+    const c = clock();
+    const polled: string[] = [];
+    const { cp, issued } = issuing(900, async (dc) => {
+      polled.push(dc);
+      return dc === 'd1' ? 'expired' : login;
+    });
+    const shown: Array<[string, number]> = [];
+    const result = await deviceLogin({ cp, ...c }, (s, attempt) =>
+      shown.push([s.userCode, attempt]),
+    );
+    expect(result).toEqual(login);
+    expect(issued).toEqual(['d1', 'd2']);
+    expect(polled).toEqual(['d1', 'd2']);
+    expect(shown).toEqual([
+      ['U1', 1],
+      ['U2', 2],
+    ]);
+  });
+
+  it('re-issues once when the local deadline passes too, then gives up with LoginExpiredError', async () => {
+    const c = clock();
+    const { cp, issued } = issuing(12, async () => 'pending');
+    const shown: string[] = [];
+    await expect(deviceLogin({ cp, ...c }, (s) => shown.push(s.userCode))).rejects.toBeInstanceOf(
+      LoginExpiredError,
+    );
+    expect(issued).toEqual(['d1', 'd2']);
+    expect(shown).toEqual(['U1', 'U2']);
+  });
+
+  it('gives up with LoginExpiredError when the re-issued code expires as well, never a third code', async () => {
+    const c = clock();
+    const { cp, issued } = issuing(900, async () => 'expired');
     await expect(deviceLogin({ cp, ...c }, () => undefined)).rejects.toBeInstanceOf(
       LoginExpiredError,
     );
+    expect(issued).toEqual(['d1', 'd2']);
   });
 
   it('stops with LoginCancelledError when aborted', async () => {
@@ -85,6 +132,15 @@ describe('deviceLogin', () => {
       },
     });
     await expect(deviceLogin({ cp, ...c }, () => undefined)).rejects.toThrow('access_denied');
+  });
+});
+
+describe('codeValidity', () => {
+  it('reads as whole minutes, rounded down so it never overstates, and seconds under one', () => {
+    expect(codeValidity(900)).toBe('15 minutes');
+    expect(codeValidity(899)).toBe('14 minutes');
+    expect(codeValidity(60)).toBe('1 minute');
+    expect(codeValidity(45)).toBe('45 seconds');
   });
 });
 

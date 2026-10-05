@@ -17,6 +17,8 @@ import {
   verifyKeysFromEnv,
   CONTROL_PLANE_SECRETS,
   hostFromEnv,
+  redisClientOptions,
+  redisReconnectStrategy,
 } from '../src/main.js';
 import { keyIdFor, makeSigner, parseKeyset, publicKeyToBase64, verifyToken } from '../src/token.js';
 import { VaultCredentialStore } from '../src/vault-store.js';
@@ -349,5 +351,29 @@ describe('depsFromEnv against a Redis that starts AFTER the control plane (#423,
       if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
       errors.mockRestore();
     }
+  });
+});
+
+describe('redisReconnectStrategy (#434)', () => {
+  // The strategy is the whole difference between a control plane that recovers when Redis comes up
+  // after it and one stuck failing /readyz until someone restarts the pod (#423, spike F2). node-redis
+  // gives up on a refused FIRST connect under its default, and any strategy may give up by returning
+  // an Error or false -- so pin both the shape of the backoff and that it is actually wired in.
+  it('backs off 100 ms per retry up to 2 s, and never gives up', () => {
+    expect(redisReconnectStrategy(0)).toBe(0);
+    expect(redisReconnectStrategy(1)).toBe(100);
+    expect(redisReconnectStrategy(5)).toBe(500);
+    expect(redisReconnectStrategy(20)).toBe(2000);
+    for (const retries of [21, 100, 10_000, 1_000_000]) {
+      const delay = redisReconnectStrategy(retries);
+      expect(typeof delay, `retries=${retries}`).toBe('number');
+      expect(delay, `retries=${retries}`).toBe(2000);
+    }
+  });
+
+  it('is the strategy the control plane`s client is built with, not node-redis`s default', () => {
+    const opts = redisClientOptions('redis://127.0.0.1:6379');
+    expect(opts.url).toBe('redis://127.0.0.1:6379');
+    expect(opts.socket.reconnectStrategy).toBe(redisReconnectStrategy);
   });
 });

@@ -123,6 +123,8 @@ export function createRelay(deps: RelayDeps): Relay {
 
   function onAttach(stream: AttachStream): void {
     let sandboxId: string | undefined;
+    // The session THIS stream's Hello parked, so teardown acts on it and on nothing else.
+    let own: Parked | undefined;
     stream.on('data', (frame: WorkerFrame) => {
       if (frame.hello && !sandboxId) {
         const id = frame.hello.sandboxId;
@@ -143,6 +145,7 @@ export function createRelay(deps: RelayDeps): Relay {
         }
         sandboxId = id;
         const session: Parked = { stream, sinks: new Map() };
+        own = session;
         sessions.set(id, session);
         const rec: SandboxRecord = {
           sandboxId: id,
@@ -163,22 +166,25 @@ export function createRelay(deps: RelayDeps): Relay {
       const reqId = frame.chunk?.reqId ?? frame.end?.reqId ?? frame.error?.reqId;
       if (reqId !== undefined) parked.sinks.get(reqId)?.(toExecEvent(frame));
     });
+    /**
+     * Registered for both 'end' and 'error', and a stream can emit both. Guarded by session
+     * identity (#434): only while the map still holds THIS stream's session does teardown act. The
+     * second event finds the map empty -- or, if the worker reattached in between, holding the NEW
+     * session under the same id, which a by-id teardown used to evict: cancelling its presence
+     * retry, failing its execs and removing its record.
+     */
     const teardown = () => {
-      if (sandboxId) {
-        // Fail any in-flight execs fast instead of leaving their routeExec
-        // generators parked forever on a frame that will never arrive.
-        const parked = sessions.get(sandboxId);
-        if (parked) {
-          parked.cancelPresence?.();
-          for (const [reqId, sink] of parked.sinks) {
-            sink({ error: { reqId, message: 'worker disconnected' } } as ExecEvent);
-          }
-        }
-        sessions.delete(sandboxId);
-        void deps.records
-          .remove(sandboxId)
-          .catch((e) => console.error('presence remove failed', e));
+      if (!sandboxId || !own || sessions.get(sandboxId) !== own) return;
+      const parked = own;
+      own = undefined;
+      parked.cancelPresence?.();
+      // Fail any in-flight execs fast instead of leaving their routeExec
+      // generators parked forever on a frame that will never arrive.
+      for (const [reqId, sink] of parked.sinks) {
+        sink({ error: { reqId, message: 'worker disconnected' } } as ExecEvent);
       }
+      sessions.delete(sandboxId);
+      void deps.records.remove(sandboxId).catch((e) => console.error('presence remove failed', e));
     };
     stream.on('end', teardown);
     stream.on('error', teardown);

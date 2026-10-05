@@ -114,18 +114,24 @@ export class RedisRecordStore implements RecordStore {
    * cleared too, and the same client reconnects. `connect()` throws only while `isOpen` is true,
    * which this branch excludes; node-redis clears `isOpen` synchronously inside the give-up, and
    * sets it synchronously inside `connect()`, so concurrent callers still share one attempt.
+   *
+   * A failed attempt clears the memo only if it is still ITS memo (#428). `isOpen` goes false at
+   * the give-up, but the rejection reaches this `.catch` several microtasks later; a call in that
+   * window has already re-armed with a newer attempt, and wiping that one would send the next
+   * caller into a second `connect()` on an open socket (`Socket already opened`).
    */
   private connectOnce(): Promise<void> {
     if (this.closed) return Promise.reject(new Error('RedisRecordStore is closed'));
     if (this.ready && !this.client.isOpen) this.ready = undefined;
     if (!this.ready) {
-      this.ready = this.client
+      const p: Promise<void> = this.client
         .connect()
         .then(() => undefined)
         .catch((err: unknown) => {
-          this.ready = undefined;
+          if (this.ready === p) this.ready = undefined;
           throw err;
         });
+      this.ready = p;
     }
     return this.ready;
   }

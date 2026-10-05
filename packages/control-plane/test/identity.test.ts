@@ -254,8 +254,19 @@ describe('completeDeviceAuth', () => {
     );
   });
 
+  it('maps expired_token to its own code, so a client can re-issue without reading the text', async () => {
+    // A user away from the browser is the common way a login ends (#431): the client offers a new
+    // code for this one, and must not string-match GitHub's error to tell it from a denial.
+    const { fetch } = fakeFetch({
+      '/login/oauth/access_token': [{ status: 200, body: { error: 'expired_token' } }],
+    });
+    expect(await codeOf(() => provider(fetch).completeDeviceAuth('dc-1'))).toBe(
+      'device_code_expired',
+    );
+  });
+
   it('maps a terminal GitHub error to unauthorized', async () => {
-    for (const error of ['access_denied', 'expired_token', 'incorrect_device_code']) {
+    for (const error of ['access_denied', 'incorrect_device_code']) {
       const { fetch } = fakeFetch({
         '/login/oauth/access_token': [{ status: 200, body: { error } }],
       });

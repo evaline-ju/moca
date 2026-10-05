@@ -29,7 +29,10 @@ export interface DeviceStart {
 
 export interface IdentityProvider {
   startDeviceAuth(): Promise<DeviceStart>;
-  /** Throws `authorization_pending` (428) while the user has not yet approved. */
+  /**
+   * Throws `authorization_pending` (428) while the user has not yet approved, and
+   * `device_code_expired` (410) once the code has lapsed unapproved.
+   */
   completeDeviceAuth(deviceCode: string): Promise<Principal>;
 }
 
@@ -154,6 +157,11 @@ export class GithubOAuthProvider implements IdentityProvider {
       // fatal would abort a login that is perfectly live.
       if (token.error === 'authorization_pending' || token.error === 'slow_down') {
         throw new CpError('authorization_pending', `github: ${token.error}`);
+      }
+      // Terminal, but not a denial: the user did not approve in time. Its own code lets mocactl
+      // re-issue a code rather than report a failure (#431).
+      if (token.error === 'expired_token') {
+        throw new CpError('device_code_expired', 'the device code expired before it was approved');
       }
       throw new CpError('unauthorized', `github device authorization failed: ${token.error}`);
     }

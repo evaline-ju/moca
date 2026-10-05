@@ -62,6 +62,12 @@ export interface CpDeps {
    * Absent means "do not know", and readyz falls back to asking the index.
    */
   redisReady?: () => boolean;
+  /**
+   * How long readyz waits on the index before calling Redis unavailable; 500 ms by default. Below
+   * the kubelet's 1 s default probe timeout, so a connected-but-wedged Redis answers 503 rather
+   * than timing the probe out (#434). A test seam, not a setting.
+   */
+  readyzTimeoutMs?: number;
   /** Release the Redis client. A test that builds deps through depsFromEnv must call it. */
   close?: () => Promise<void>;
 }
@@ -447,10 +453,21 @@ export const HANDLERS: Record<string, Handler> = {
     if (deps.redisReady?.() === false) {
       throw new CpError('redis_unavailable', 'redis is not answering');
     }
+    // Ready is not the same as answering: a client node-redis reports ready can sit on a GET that
+    // never returns (a wedged server, a half-open socket), so the probe is bounded too (#434).
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error('readyz probe timed out')),
+        deps.readyzTimeoutMs ?? 500,
+      );
+    });
     try {
-      await deps.index.get('__readyz__');
+      await Promise.race([deps.index.get('__readyz__'), timeout]);
     } catch {
       throw new CpError('redis_unavailable', 'redis is not answering');
+    } finally {
+      clearTimeout(timer);
     }
     return { status: 200, body: 'ok' };
   },

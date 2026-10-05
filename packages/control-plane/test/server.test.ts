@@ -69,6 +69,56 @@ describe('probes', () => {
   });
 });
 
+describe('SIGTERM', () => {
+  it('closes the server, then releases the deps (Redis), then exits 0 (#434)', async () => {
+    const order: string[] = [];
+    const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      order.push(`exit ${code}`);
+    }) as never);
+    try {
+      d.close = vi.fn(async () => void order.push('close'));
+      server.once('close', () => order.push('server closed'));
+      process.emit('SIGTERM');
+      await vi.waitFor(() => expect(exit).toHaveBeenCalled(), { timeout: 2000 });
+      expect(order).toEqual(['server closed', 'close', 'exit 0']);
+    } finally {
+      exit.mockRestore();
+    }
+  });
+
+  it('does not wait out keep-alive on a connection whose request was in flight at SIGTERM (#436)', async () => {
+    // server.close() reaps the connections that are idle when it is called, but not one that goes
+    // idle afterwards: the ingress's keep-alive socket would then hold the exit (and the Redis
+    // release) for keepAliveTimeout. The agent reuses the socket /healthz left idle for /readyz.
+    server.keepAliveTimeout = 60_000;
+    vi.spyOn(d.index, 'get').mockImplementation(
+      () => new Promise((r) => setTimeout(() => r(undefined as never), 300)),
+    );
+    const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+    const get = (path: string) =>
+      new Promise<number>((resolve, reject) => {
+        http
+          .get(new URL(path, base), { agent }, (res) => {
+            res.resume();
+            res.on('end', () => resolve(res.statusCode ?? 0));
+          })
+          .on('error', reject);
+      });
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
+    try {
+      expect(await get('/healthz')).toBe(200);
+      const slow = get('/readyz');
+      await new Promise((r) => setTimeout(r, 50));
+      process.emit('SIGTERM');
+      expect(await slow).toBe(200);
+      await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0), { timeout: 2000 });
+    } finally {
+      exit.mockRestore();
+      agent.destroy();
+    }
+  });
+});
+
 describe('routing', () => {
   it('404s an unknown path and an unsupported method', async () => {
     expect((await request('GET', '/nope')).status).toBe(404);
