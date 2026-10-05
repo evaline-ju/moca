@@ -24,7 +24,8 @@
 # no relay drop-in, no podman, no installed P6 needed. Running again without --remote switches back.
 #
 # Env overrides: SH_UNIT_DIR, SH_ENV_DIR, SH_BIN_DIR, MICROVM_SANDBOX_ID, MICROVM_WORKSPACE_IDLE,
-# MICROVM_SNAPSHOT_DIR, MICROVM_BIN, MICROVM_ATTACH_TIMEOUT -- defaults below -- and
+# MICROVM_SNAPSHOT_DIR, MICROVM_BIN, MICROVM_ATTACH_TIMEOUT, MICROVM_ATTACH_SETTLE (--remote: seconds
+# an attach must hold before it counts) -- defaults below -- and
 # MICROVM_MAX_COMMITTED_MB (unset by default): a VM-memory budget in MiB for a host smaller than the
 # shipped unit's 24 GiB, written as a drop-in that also lowers the unit's AssertMemory to match.
 set -euo pipefail
@@ -39,6 +40,7 @@ SANDBOX_ID_GIVEN="${MICROVM_SANDBOX_ID+x}" # --remote refuses a given id that di
 : "${MICROVM_WORKSPACE_IDLE:=8h}"
 : "${MICROVM_SNAPSHOT_DIR:=/srv/snapshots/default}"
 : "${MICROVM_ATTACH_TIMEOUT:=60}"
+: "${MICROVM_ATTACH_SETTLE:=5}"
 
 RELAY_DROPIN="50-moca-microvm.conf"
 WORKER_DROPIN="50-moca-p6.conf"
@@ -370,20 +372,39 @@ verify_attached() {
 # timestamp would also match the previous process's line, and an unchanged re-run -- worker left
 # running -- logged its line before any timestamp this run could take. Captured, not piped into
 # `grep -q`: under pipefail grep's early exit would SIGPIPE journalctl and fail the match.
+#
+# "attached" alone is not proof: the worker logs it as soon as its stream opens, before the relay
+# has read the first frame. A wrong or revoked token is refused there -- the relay ends the stream,
+# and the worker logs "stream ended" within milliseconds and reconnects, attached/ended in a loop.
+# So an attach counts only once it has held for MICROVM_ATTACH_SETTLE seconds: the same invocation,
+# and of its attached / stream-ended lines the LAST is an attached one.
+last_attach_holds() { # last_attach_holds <journal text>
+  local line last=''
+  while IFS= read -r line; do
+    case "$line" in *"attached, serving execs"* | *"stream ended"*) last="$line" ;; esac
+  done <<<"$1"
+  [[ "$last" == *"attached, serving execs"* ]]
+}
+
 verify_attached_remote() {
-  local i inv='' out
+  local i inv='' now out
   for ((i = 0; i < MICROVM_ATTACH_TIMEOUT; i++)); do
-    inv="$(systemctl show -p InvocationID --value microvm-worker.service)"
+    inv="$(systemctl show -p InvocationID --value microvm-worker.service)" || inv=''
     if [[ -n "$inv" ]]; then
       out="$(journalctl -q -o cat "_SYSTEMD_INVOCATION_ID=$inv" 2>/dev/null || true)"
       if [[ "$out" == *"attached, serving execs"* ]]; then
-        log "$MICROVM_SANDBOX_ID is attached to the relay at $B_ADDR"
-        return 0
+        sleep "$MICROVM_ATTACH_SETTLE"
+        now="$(systemctl show -p InvocationID --value microvm-worker.service)" || now=''
+        out="$(journalctl -q -o cat "_SYSTEMD_INVOCATION_ID=$inv" 2>/dev/null || true)"
+        if [[ "$now" == "$inv" ]] && last_attach_holds "$out"; then
+          log "$MICROVM_SANDBOX_ID is attached to the relay at $B_ADDR"
+          return 0
+        fi
       fi
     fi
     sleep 1
   done
-  die "$MICROVM_SANDBOX_ID did not attach to $B_ADDR within ${MICROVM_ATTACH_TIMEOUT}s; the reason (TLS, token, DNS) is in: journalctl -u microvm-worker _SYSTEMD_INVOCATION_ID=$inv"
+  die "$MICROVM_SANDBOX_ID did not stay attached to $B_ADDR within ${MICROVM_ATTACH_TIMEOUT}s (a wrong or revoked token, TLS or DNS); the reason is in: journalctl -u microvm-worker _SYSTEMD_INVOCATION_ID=$inv"
 }
 
 main() {

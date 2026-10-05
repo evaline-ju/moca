@@ -50,12 +50,16 @@ while [ $# -gt 0 ]; do [ "$1" = "-o" ] && { printf 'fake-microvm-worker\n' >"$2"
 MOCK
 # journalctl -o cat _SYSTEMD_INVOCATION_ID=<id>: the worker's attach line, only for the invocation that
 # logged it (MOCK_JOURNAL_INV; default the current one), so a test can stage a line the PREVIOUS
-# process left behind.
+# process left behind. MOCK_JOURNAL_TAIL, when set, is printed after the attached line: what the
+# worker logs when the relay ends the stream (a wrong or revoked token is refused on the first frame).
 cat >"$TMP/bin/journalctl" <<'MOCK'
 #!/usr/bin/env bash
 printf 'journalctl %s\n' "$*" >>"$MOCK_LOG"
 want="${MOCK_JOURNAL_INV:-${MOCK_INVOCATION:-inv-1}}"
-[[ " $* " == *" _SYSTEMD_INVOCATION_ID=$want "* ]] && echo 'microvm-worker: attached, serving execs'
+if [[ " $* " == *" _SYSTEMD_INVOCATION_ID=$want "* ]]; then
+  echo 'microvm-worker: attached, serving execs'
+  [ -n "${MOCK_JOURNAL_TAIL:-}" ] && printf '%s\n' "$MOCK_JOURNAL_TAIL"
+fi
 exit 0
 MOCK
 # awk logs its argv like the other mocks, so a test can prove no token is ever an argument.
@@ -74,7 +78,7 @@ reset_host() { # a fresh P6 install: relay.env + sh-relay.service, a snapshot, n
   : >"$MOCK_LOG"
 }
 export SH_UNIT_DIR="$TMP/units" SH_ENV_DIR="$TMP/etc" SH_BIN_DIR="$TMP/usrbin" \
-  MICROVM_SNAPSHOT_DIR="$TMP/snap" MICROVM_ATTACH_TIMEOUT=1
+  MICROVM_SNAPSHOT_DIR="$TMP/snap" MICROVM_ATTACH_TIMEOUT=1 MICROVM_ATTACH_SETTLE=0
 run() { bash "$SCRIPT" >"$TMP/run.log" 2>&1; echo $?; }
 val() { grep -E "^$1=" "$2" | tail -1 | cut -d= -f2-; }
 hash_tree() { (cd "$TMP" && find units etc usrbin -type f -exec cksum {} + | sort); }
@@ -272,7 +276,10 @@ check "no local-relay worker drop-in" "$([ -e "$TMP/units/microvm-worker.service
 check "no relay drop-in, no relay env" "$([ -e "$TMP/units/sh-relay.service.d" ] || [ -e "$R" ] && echo present || echo absent)" "absent"
 check "no podman (no local Redis, no container check)" "$(grep -c '^podman' "$MOCK_LOG")" "0"
 check "worker started" "$(grep -c '^systemctl start microvm-worker.service$' "$MOCK_LOG")" "1"
-check "attach read from the current invocation's journal" "$(grep -c '^journalctl .*_SYSTEMD_INVOCATION_ID=inv-1' "$MOCK_LOG")" "1"
+# Two reads: the poll that sees the attach, and the re-read after the settle window. Both are the
+# current invocation's journal, never the unit's whole history.
+check "attach read from the current invocation's journal, then re-read after the settle" \
+  "$(grep -c '^journalctl ' "$MOCK_LOG") $(grep -c '^journalctl .*_SYSTEMD_INVOCATION_ID=inv-1' "$MOCK_LOG")" "2 2"
 check "the token never reached an argv" "$(grep -c "$BTOK" "$MOCK_LOG")" "0"
 
 before="$(hash_tree)"; : >"$MOCK_LOG"
@@ -285,6 +292,16 @@ check "re-run: nothing stopped, started or restarted" "$(grep -cE 'restart|syste
 : >"$MOCK_LOG"
 check "a stale attach line: exit 1" "$(MOCK_INVOCATION=inv-2 MOCK_JOURNAL_INV=inv-1 runr "$B")" "1"
 check "it names the current invocation's journal" "$(grep -c 'journalctl -u microvm-worker _SYSTEMD_INVOCATION_ID=inv-2' "$TMP/run.log")" "1"
+
+# The worker logs "attached" as soon as its stream opens; the relay checks the token on the first frame
+# and ends the stream, and the worker logs "stream ended" within milliseconds and reconnects.
+: >"$MOCK_LOG"
+check "a token the relay rejects (attached, then stream ended): exit 1" \
+  "$(MOCK_JOURNAL_TAIL='microvm-worker: stream ended (rpc error: code = Unavailable); reconnecting in 1s' runr "$B")" "1"
+check "the rejection names the current invocation's journal" "$(grep -c 'journalctl -u microvm-worker _SYSTEMD_INVOCATION_ID=inv-1' "$TMP/run.log")" "1"
+check "the rejection names the token as a cause" "$(grep -c 'wrong or revoked token' "$TMP/run.log")" "1"
+check "an attach after a stream that ended counts (a reconnect): exit 0" \
+  "$(MOCK_JOURNAL_TAIL="$(printf 'microvm-worker: stream ended (EOF); reconnecting in 1s\nmicrovm-worker: attached, serving execs')" runr "$B")" "0"
 
 mkbundle "$B" moca-relay-moca.apps.example.test:443 no-ca; : >"$MOCK_LOG"
 check "a bundle without a CA: exit 0" "$(runr "$B")" "0"
