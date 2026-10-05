@@ -52,11 +52,21 @@ MOCK
 # logged it (MOCK_JOURNAL_INV; default the current one), so a test can stage a line the PREVIOUS
 # process left behind. MOCK_JOURNAL_TAIL, when set, is printed after the attached line: what the
 # worker logs when the relay ends the stream (a wrong or revoked token is refused on the first frame).
+# MOCK_JOURNAL_CHURN=1: a worker reconnecting in a loop -- call N (counted in journal-calls next to
+# MOCK_LOG) returns N attached+stream-ended pairs, then an attached line, so every read ends "attached".
 cat >"$TMP/bin/journalctl" <<'MOCK'
 #!/usr/bin/env bash
 printf 'journalctl %s\n' "$*" >>"$MOCK_LOG"
 want="${MOCK_JOURNAL_INV:-${MOCK_INVOCATION:-inv-1}}"
 if [[ " $* " == *" _SYSTEMD_INVOCATION_ID=$want "* ]]; then
+  if [ -n "${MOCK_JOURNAL_CHURN:-}" ]; then
+    calls="${MOCK_LOG%/*}/journal-calls"
+    n=$(($(cat "$calls" 2>/dev/null || echo 0) + 1)); echo "$n" >"$calls"
+    for ((j = 0; j < n; j++)); do
+      echo 'microvm-worker: attached, serving execs'
+      echo 'microvm-worker: stream ended (rpc error: code = Unavailable); reconnecting in 1s'
+    done
+  fi
   echo 'microvm-worker: attached, serving execs'
   [ -n "${MOCK_JOURNAL_TAIL:-}" ] && printf '%s\n' "$MOCK_JOURNAL_TAIL"
 fi
@@ -300,6 +310,12 @@ check "a token the relay rejects (attached, then stream ended): exit 1" \
   "$(MOCK_JOURNAL_TAIL='microvm-worker: stream ended (rpc error: code = Unavailable); reconnecting in 1s' runr "$B")" "1"
 check "the rejection names the current invocation's journal" "$(grep -c 'journalctl -u microvm-worker _SYSTEMD_INVOCATION_ID=inv-1' "$TMP/run.log")" "1"
 check "the rejection names the token as a cause" "$(grep -c 'wrong or revoked token' "$TMP/run.log")" "1"
+# The race the count closes: a rejected worker loops attached -> stream ended -> backoff -> attached,
+# and a re-read just after a fresh attached line ends "attached" too.
+rm -f "$TMP/journal-calls"; : >"$MOCK_LOG"
+check "a worker reconnecting through the settle window (churn): exit 1" "$(MOCK_JOURNAL_CHURN=1 runr "$B")" "1"
+check "churn: the journal was re-read after the settle" "$(cat "$TMP/journal-calls")" "2"
+check "churn: the refusal names the current invocation's journal" "$(grep -c 'journalctl -u microvm-worker _SYSTEMD_INVOCATION_ID=inv-1' "$TMP/run.log")" "1"
 check "an attach after a stream that ended counts (a reconnect): exit 0" \
   "$(MOCK_JOURNAL_TAIL="$(printf 'microvm-worker: stream ended (EOF); reconnecting in 1s\nmicrovm-worker: attached, serving execs')" runr "$B")" "0"
 

@@ -375,28 +375,37 @@ verify_attached() {
 #
 # "attached" alone is not proof: the worker logs it as soon as its stream opens, before the relay
 # has read the first frame. A wrong or revoked token is refused there -- the relay ends the stream,
-# and the worker logs "stream ended" within milliseconds and reconnects, attached/ended in a loop.
-# So an attach counts only once it has held for MICROVM_ATTACH_SETTLE seconds: the same invocation,
-# and of its attached / stream-ended lines the LAST is an attached one.
-last_attach_holds() { # last_attach_holds <journal text>
-  local line last=''
+# the worker logs "stream ended" within milliseconds, waits its backoff and reconnects: at least
+# one attached/stream-ended pair per backoff cycle. So an attach counts only once it has HELD for
+# MICROVM_ATTACH_SETTLE seconds: the same invocation, the same number of attached / stream-ended
+# lines as at the first sighting (no reconnect churn inside the window), and the last of them an
+# attached one. The window outlasts the worker's first backoff (backoffMin 500ms, jittered to at
+# most 750ms, doubling from there; remote-worker/cmd/microvm-worker/main.go), so a rejected worker
+# reconnects at least once inside it; a later, longer backoff still leaves "stream ended" as the
+# last line, since that line follows its "attached" by milliseconds, not by the backoff.
+attach_state() { # attach_state <journal text> -> "<count of attached/ended lines> <last: attached|ended|none>"
+  local line n=0 last=none
   while IFS= read -r line; do
-    case "$line" in *"attached, serving execs"* | *"stream ended"*) last="$line" ;; esac
+    case "$line" in
+    *"attached, serving execs"*) n=$((n + 1)) last=attached ;;
+    *"stream ended"*) n=$((n + 1)) last=ended ;;
+    esac
   done <<<"$1"
-  [[ "$last" == *"attached, serving execs"* ]]
+  printf '%s %s' "$n" "$last"
 }
 
 verify_attached_remote() {
-  local i inv='' now out
+  local i inv='' now out first
   for ((i = 0; i < MICROVM_ATTACH_TIMEOUT; i++)); do
     inv="$(systemctl show -p InvocationID --value microvm-worker.service)" || inv=''
     if [[ -n "$inv" ]]; then
       out="$(journalctl -q -o cat "_SYSTEMD_INVOCATION_ID=$inv" 2>/dev/null || true)"
-      if [[ "$out" == *"attached, serving execs"* ]]; then
+      first="$(attach_state "$out")"
+      if [[ "$first" == *" attached" ]]; then
         sleep "$MICROVM_ATTACH_SETTLE"
         now="$(systemctl show -p InvocationID --value microvm-worker.service)" || now=''
         out="$(journalctl -q -o cat "_SYSTEMD_INVOCATION_ID=$inv" 2>/dev/null || true)"
-        if [[ "$now" == "$inv" ]] && last_attach_holds "$out"; then
+        if [[ "$now" == "$inv" && "$(attach_state "$out")" == "$first" ]]; then
           log "$MICROVM_SANDBOX_ID is attached to the relay at $B_ADDR"
           return 0
         fi
