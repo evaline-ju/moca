@@ -15,7 +15,13 @@
 # between tiers and lose the microVM workspace. This script therefore refuses while any sh-sandbox-*
 # container is running.
 #
-# Usage: sudo ./deploy/microvm/setup-microvm.sh      (re-running changes nothing)
+# Usage: sudo ./deploy/microvm/setup-microvm.sh [--remote BUNDLE_DIR]      (re-running changes nothing)
+#
+# --remote BUNDLE_DIR (P6 on Kubernetes, docs/specs/2026-10-04-p6-on-kubernetes-slice2-design.md §5):
+# attach this host's worker to a relay in a cluster, over TLS, instead of to a local P6. The bundle is
+# the directory deploy/k8s/setup.sh wrote for this host's ID; its token replaces a local one (the
+# cluster is the token authority), and MICROVM_SANDBOX_ID comes from it. Nothing local is touched:
+# no relay drop-in, no podman, no installed P6 needed. Running again without --remote switches back.
 #
 # Env overrides: SH_UNIT_DIR, SH_ENV_DIR, SH_BIN_DIR, MICROVM_SANDBOX_ID, MICROVM_WORKSPACE_IDLE,
 # MICROVM_SNAPSHOT_DIR, MICROVM_BIN, MICROVM_ATTACH_TIMEOUT -- defaults below -- and
@@ -28,6 +34,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 : "${SH_UNIT_DIR:=/etc/systemd/system}"
 : "${SH_ENV_DIR:=/etc/serverless-harness}"
 : "${SH_BIN_DIR:=/usr/local/bin}"
+SANDBOX_ID_GIVEN="${MICROVM_SANDBOX_ID+x}" # --remote refuses a given id that disagrees with the bundle
 : "${MICROVM_SANDBOX_ID:=moca_microvm_0}"
 : "${MICROVM_WORKSPACE_IDLE:=8h}"
 : "${MICROVM_SNAPSHOT_DIR:=/srv/snapshots/default}"
@@ -35,6 +42,10 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 RELAY_DROPIN="50-moca-microvm.conf"
 WORKER_DROPIN="50-moca-p6.conf"
+REMOTE_DROPIN="50-moca-remote.conf"
+RELAY_CA_DST="$SH_ENV_DIR/microvm-relay-ca.crt"
+REMOTE_BUNDLE='' # --remote's directory; empty in local mode
+B_ADDR='' B_ID='' B_TOKEN='' B_CA=''
 MEMORY_DROPIN="60-moca-memory.conf"
 # The shipped unit's SH_MEMORY_RESERVE_MB: a budget at or below it admits nothing (Config.Normalize).
 SHIPPED_RESERVE_MB=4096
@@ -72,17 +83,63 @@ relay_port() {
   echo "$p"
 }
 
+parse_args() {
+  while (($#)); do
+    case "$1" in
+    --remote)
+      [[ $# -ge 2 && -n "$2" ]] || die '--remote needs the bundle directory deploy/k8s/setup.sh wrote for this host'
+      REMOTE_BUNDLE="$2"
+      shift 2
+      ;;
+    *) die "unknown argument: $1 (usage: setup-microvm.sh [--remote BUNDLE_DIR])" ;;
+    esac
+  done
+}
+
+# load_bundle: the bundle deploy/k8s/setup.sh writes per P4 ID, checked before anything is written.
+# Every refusal names the field, never the token's value.
+load_bundle() {
+  local env="$REMOTE_BUNDLE/worker.env" tls
+  [[ -f "$env" ]] ||
+    die "no $env: --remote takes the bundle directory deploy/k8s/setup.sh writes (deploy/k8s/.generated/ocp/p4/<id>)"
+  B_ADDR="$(env_value RELAY_ADDR "$env")"
+  # Without a port the worker fails later, at dial, with an opaque error; the relay Route is on 443.
+  [[ "$B_ADDR" =~ ^[A-Za-z0-9.-]+:[0-9]+$ ]] ||
+    die "RELAY_ADDR='$B_ADDR' in $env must be host:port -- the relay Route is <host>:443"
+  tls="$(env_value RELAY_TLS "$env")"
+  [[ "$tls" == true ]] || die "RELAY_TLS='$tls' in $env: a relay outside this host is reached over TLS only"
+  B_ID="$(env_value SANDBOX_ID "$env")"
+  validate_sandbox_id "$B_ID" || exit 1
+  [[ -z "$SANDBOX_ID_GIVEN" || "$MICROVM_SANDBOX_ID" == "$B_ID" ]] ||
+    die "the bundle is for $B_ID but MICROVM_SANDBOX_ID=$MICROVM_SANDBOX_ID: unset it (--remote takes the id from the bundle)"
+  B_TOKEN="$(env_value SANDBOX_TOKEN "$env")"
+  [[ "$B_TOKEN" =~ ^[0-9a-f]{64}$ ]] ||
+    die "SANDBOX_TOKEN in $env is not 64 hex characters: copy the bundle again from deploy/k8s/.generated/ocp/p4/$B_ID"
+  B_CA=''
+  if [[ -f "$REMOTE_BUNDLE/relay-ca.crt" ]]; then
+    grep -q -- '-----BEGIN CERTIFICATE-----' "$REMOTE_BUNDLE/relay-ca.crt" ||
+      die "$REMOTE_BUNDLE/relay-ca.crt holds no PEM certificate"
+    B_CA="$REMOTE_BUNDLE/relay-ca.crt"
+  fi
+  MICROVM_SANDBOX_ID="$B_ID"
+}
+
 preflight() {
   [[ "$(id -u)" == 0 ]] || die "must run as root (installs units under $SH_UNIT_DIR)"
-  validate_sandbox_id "$MICROVM_SANDBOX_ID" || exit 1
+  if [[ -n "$REMOTE_BUNDLE" ]]; then load_bundle; else validate_sandbox_id "$MICROVM_SANDBOX_ID" || exit 1; fi
   if [[ -n "${MICROVM_MAX_COMMITTED_MB:-}" ]] &&
     ! { [[ "$MICROVM_MAX_COMMITTED_MB" =~ ^[1-9][0-9]*$ ]] && ((MICROVM_MAX_COMMITTED_MB > SHIPPED_RESERVE_MB)); }; then
     die "MICROVM_MAX_COMMITTED_MB='$MICROVM_MAX_COMMITTED_MB' must be a whole number of MiB above the unit's SH_MEMORY_RESERVE_MB ($SHIPPED_RESERVE_MB), or nothing is ever admitted"
   fi
-  [[ -f "$SH_ENV_DIR/relay.env" && -f "$SH_UNIT_DIR/sh-relay.service" ]] ||
-    die "no installed P6 found ($SH_ENV_DIR/relay.env, $SH_UNIT_DIR/sh-relay.service); run deploy/vm/setup-vm.sh first"
+  if [[ -z "$REMOTE_BUNDLE" ]]; then
+    [[ -f "$SH_ENV_DIR/relay.env" && -f "$SH_UNIT_DIR/sh-relay.service" ]] ||
+      die "no installed P6 found ($SH_ENV_DIR/relay.env, $SH_UNIT_DIR/sh-relay.service); run deploy/vm/setup-vm.sh first"
+  fi
   [[ -f "$MICROVM_SNAPSHOT_DIR/manifest.json" ]] ||
     die "no golden snapshot at $MICROVM_SNAPSHOT_DIR; build one with deploy/microvm/build-rootfs.sh then build-snapshot.sh (deploy/microvm/P4-ON-P6.md)"
+  # Remote: the tier rule is the cluster's (setup.sh refuses both tiers on one stack); this host's own
+  # containers, if any, attach to its own relay, which the remote worker does not use.
+  [[ -z "$REMOTE_BUNDLE" ]] || return 0
   local attached
   # -a: a STOPPED sandbox container still counts. setup-vm.sh runs them --restart=always, and
   # podman-restart.service brings every such container back at boot -- both tiers attached again.
@@ -101,9 +158,13 @@ install_if_changed() {
   fi
 }
 
-# render_env <file> <keep|set> <key> <value> [<keep|set> <key> <value>]... -> writes <file>.new
+# remove_if_present <path>: delete a file this script once wrote, recording it in CHANGED.
+remove_if_present() { if [[ -e "$1" ]]; then rm -f "$1"; CHANGED+=("$1"); fi; }
+
+# render_env <file> <keep|set|drop> <key> <value> [<keep|set|drop> <key> <value>]... -> writes <file>.new
 # keep: write only if the key is absent. set: replace the value IN PLACE (never delete-and-append,
-# which reorders the file and makes an unchanged re-run look like a change). Every other line --
+# which reorders the file and makes an unchanged re-run look like a change). drop: delete every
+# <key>= line; its value is ignored (pass '' to keep the triplet shape). Every other line --
 # including ones an operator added -- is preserved where it is.
 render_env() {
   local file="$1"; shift
@@ -113,10 +174,19 @@ render_env() {
   if [[ -s "$out" && -n "$(tail -c 1 "$out")" ]]; then printf '\n' >>"$out"; fi
   while (($#)); do
     mode="$1" key="$2" value="$3"; shift 3
+    if [[ "$mode" == drop ]]; then
+      if grep -qE "^$key=" "$out"; then
+        tmp="$(mktemp)"
+        awk -v k="$key" 'index($0, k "=") != 1' "$out" >"$tmp"
+        cat "$tmp" >"$out"; rm -f "$tmp"
+      fi
+      continue
+    fi
     if grep -qE "^$key=" "$out"; then
       [[ "$mode" == keep ]] && continue
       tmp="$(mktemp)"
-      awk -v k="$key" -v v="$value" 'index($0, k "=") == 1 { print k "=" v; next } { print }' "$out" >"$tmp"
+      # The value travels in the environment, never argv: it may be the relay token.
+      RENDER_VALUE="$value" awk -v k="$key" 'index($0, k "=") == 1 { print k "=" ENVIRON["RENDER_VALUE"]; next } { print }' "$out" >"$tmp"
       cat "$tmp" >"$out"; rm -f "$tmp"
     else
       printf '%s=%s\n' "$key" "$value" >>"$out"
@@ -146,12 +216,20 @@ install_units() {
   local stage; stage="$(mktemp -d)"
   install_if_changed "$SCRIPT_DIR/microvm-worker.service" "$SH_UNIT_DIR/microvm-worker.service" 0644
   install_if_changed "$SCRIPT_DIR/microvm-vms.slice" "$SH_UNIT_DIR/microvm-vms.slice" 0644
-  printf '# Written by deploy/microvm/setup-microvm.sh: the per-sandbox relay token for the P4 worker.\n[Service]\nEnvironmentFile=%s\n' \
-    "$SH_ENV_DIR/microvm-relay.env" >"$stage/relay.conf"
-  install_if_changed "$stage/relay.conf" "$SH_UNIT_DIR/sh-relay.service.d/$RELAY_DROPIN" 0644
-  printf '# Written by deploy/microvm/setup-microvm.sh: attach this worker to the P6 relay on this host.\n[Unit]\nAfter=sh-relay.service\nWants=sh-relay.service\n\n[Service]\nEnvironmentFile=%s\n' \
-    "$SH_ENV_DIR/microvm-worker.env" >"$stage/worker.conf"
-  install_if_changed "$stage/worker.conf" "$SH_UNIT_DIR/microvm-worker.service.d/$WORKER_DROPIN" 0644
+  if [[ -n "$REMOTE_BUNDLE" ]]; then
+    printf '# Written by deploy/microvm/setup-microvm.sh --remote: attach this worker to a relay outside this host, over TLS.\n[Unit]\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nEnvironmentFile=%s\n' \
+      "$SH_ENV_DIR/microvm-worker.env" >"$stage/worker.conf"
+    install_if_changed "$stage/worker.conf" "$SH_UNIT_DIR/microvm-worker.service.d/$REMOTE_DROPIN" 0644
+    remove_if_present "$SH_UNIT_DIR/microvm-worker.service.d/$WORKER_DROPIN"
+  else
+    printf '# Written by deploy/microvm/setup-microvm.sh: the per-sandbox relay token for the P4 worker.\n[Service]\nEnvironmentFile=%s\n' \
+      "$SH_ENV_DIR/microvm-relay.env" >"$stage/relay.conf"
+    install_if_changed "$stage/relay.conf" "$SH_UNIT_DIR/sh-relay.service.d/$RELAY_DROPIN" 0644
+    printf '# Written by deploy/microvm/setup-microvm.sh: attach this worker to the P6 relay on this host.\n[Unit]\nAfter=sh-relay.service\nWants=sh-relay.service\n\n[Service]\nEnvironmentFile=%s\n' \
+      "$SH_ENV_DIR/microvm-worker.env" >"$stage/worker.conf"
+    install_if_changed "$stage/worker.conf" "$SH_UNIT_DIR/microvm-worker.service.d/$WORKER_DROPIN" 0644
+    remove_if_present "$SH_UNIT_DIR/microvm-worker.service.d/$REMOTE_DROPIN"
+  fi
   install_memory_dropin "$stage"
   rm -rf "$stage"
 }
@@ -168,7 +246,7 @@ install_units() {
 install_memory_dropin() {
   local dst="$SH_UNIT_DIR/microvm-worker.service.d/$MEMORY_DROPIN"
   if [[ -z "${MICROVM_MAX_COMMITTED_MB:-}" ]]; then
-    if [[ -e "$dst" ]]; then rm -f "$dst"; CHANGED+=("$dst"); fi
+    remove_if_present "$dst"
     return
   fi
   printf '%s\n' \
@@ -184,9 +262,13 @@ install_memory_dropin() {
 install_env() {
   local worker="$SH_ENV_DIR/microvm-worker.env" relay="$SH_ENV_DIR/microvm-relay.env" port token
   port="$(relay_port "$SH_ENV_DIR/relay.env")"
-  # Generated once, never rotated (setup-vm.sh's rule for its own secrets): the worker's file is
-  # the source of truth, and the relay's copy is re-derived from it every run.
-  token="$(env_value SANDBOX_TOKEN "$worker")"
+  # Generated once, never rotated (setup-vm.sh's rule for its own secrets). The relay's copy is the
+  # source of truth when there is one: after --remote the worker's file holds the CLUSTER's token,
+  # and switching back must restore the one the local relay accepts -- never hand it the cluster's.
+  token="$(env_value "SH_RELAY_TOKEN_$MICROVM_SANDBOX_ID" "$relay")"
+  if [[ -z "$token" && "$(env_value RELAY_TLS "$worker")" != true ]]; then
+    token="$(env_value SANDBOX_TOKEN "$worker")"
+  fi
   if [[ -z "$token" ]]; then
     token="$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
     [[ ${#token} == 64 ]] || die "could not generate a relay token"
@@ -194,13 +276,37 @@ install_env() {
   render_env "$worker" \
     set RELAY_ADDR "127.0.0.1:$port" \
     set SANDBOX_ID "$MICROVM_SANDBOX_ID" \
-    keep SANDBOX_TOKEN "$token" \
-    keep SH_WORKSPACE_IDLE "$MICROVM_WORKSPACE_IDLE"
+    set SANDBOX_TOKEN "$token" \
+    keep SH_WORKSPACE_IDLE "$MICROVM_WORKSPACE_IDLE" \
+    drop RELAY_TLS '' \
+    drop RELAY_CA_FILE ''
   commit_env "$worker"
+  remove_if_present "$RELAY_CA_DST"
   # The relay's file is wholly installer-owned, so it is rendered from scratch rather than merged:
   # a changed MICROVM_SANDBOX_ID must not leave the OLD id's token behind, still valid at the relay.
   (umask 077; printf 'SH_RELAY_TOKEN_%s=%s\n' "$MICROVM_SANDBOX_ID" "$token" >"$relay.new")
   commit_env "$relay"
+}
+
+# --remote: the worker env comes from the bundle; the CA is not secret (0644). A stale
+# microvm-relay.env is left in place, so switching back restores the local token.
+install_env_remote() {
+  local worker="$SH_ENV_DIR/microvm-worker.env" ca
+  if [[ -n "$B_CA" ]]; then
+    install_if_changed "$B_CA" "$RELAY_CA_DST" 0644
+    ca=(set RELAY_CA_FILE "$RELAY_CA_DST")
+  else
+    remove_if_present "$RELAY_CA_DST"
+    ca=(drop RELAY_CA_FILE '')
+  fi
+  render_env "$worker" \
+    set RELAY_ADDR "$B_ADDR" \
+    set RELAY_TLS true \
+    set SANDBOX_ID "$B_ID" \
+    set SANDBOX_TOKEN "$B_TOKEN" \
+    keep SH_WORKSPACE_IDLE "$MICROVM_WORKSPACE_IDLE" \
+    "${ca[@]}"
+  commit_env "$worker"
 }
 
 changed_any() { # changed_any <path>...: true iff one of them is in CHANGED
@@ -213,7 +319,7 @@ apply() {
   local relay_restart=0
   if changed_any "$SH_UNIT_DIR/microvm-worker.service" "$SH_UNIT_DIR/microvm-vms.slice" \
     "$SH_UNIT_DIR/sh-relay.service.d/$RELAY_DROPIN" "$SH_UNIT_DIR/microvm-worker.service.d/$WORKER_DROPIN" \
-    "$SH_UNIT_DIR/microvm-worker.service.d/$MEMORY_DROPIN"; then
+    "$SH_UNIT_DIR/microvm-worker.service.d/$REMOTE_DROPIN" "$SH_UNIT_DIR/microvm-worker.service.d/$MEMORY_DROPIN"; then
     systemctl daemon-reload
   fi
   if changed_any "$SH_UNIT_DIR/sh-relay.service.d/$RELAY_DROPIN" "$SH_ENV_DIR/microvm-relay.env"; then
@@ -224,7 +330,8 @@ apply() {
   systemctl enable microvm-worker.service
   if ((relay_restart)) || changed_any "$SH_BIN_DIR/microvm-worker" "$SH_UNIT_DIR/microvm-worker.service" \
     "$SH_UNIT_DIR/microvm-vms.slice" "$SH_UNIT_DIR/microvm-worker.service.d/$WORKER_DROPIN" \
-    "$SH_UNIT_DIR/microvm-worker.service.d/$MEMORY_DROPIN" "$SH_ENV_DIR/microvm-worker.env"; then
+    "$SH_UNIT_DIR/microvm-worker.service.d/$REMOTE_DROPIN" "$SH_UNIT_DIR/microvm-worker.service.d/$MEMORY_DROPIN" \
+    "$SH_ENV_DIR/microvm-worker.env" "$RELAY_CA_DST"; then
     systemctl stop microvm-worker.service
     start_worker
   elif ! systemctl is-active --quiet microvm-worker.service; then
@@ -242,7 +349,7 @@ apply() {
 # teardown leaves the previous connection's behind -- which would read as "attached" even when the
 # new worker's attach is refused (a token mismatch, the silent failure that check exists for).
 start_worker() {
-  podman exec sh-redis redis-cli HDEL sh:sandbox:records "$MICROVM_SANDBOX_ID" >/dev/null
+  [[ -n "$REMOTE_BUNDLE" ]] || podman exec sh-redis redis-cli HDEL sh:sandbox:records "$MICROVM_SANDBOX_ID" >/dev/null
   systemctl start microvm-worker.service
 }
 
@@ -258,13 +365,35 @@ verify_attached() {
   die "$MICROVM_SANDBOX_ID did not attach within ${MICROVM_ATTACH_TIMEOUT}s; see journalctl -u microvm-worker -u sh-relay"
 }
 
+# --remote cannot read the cluster's presence records, so the worker's own log is the evidence: its
+# "attached, serving execs" line, read from the CURRENT process's journal (its InvocationID). A
+# timestamp would also match the previous process's line, and an unchanged re-run -- worker left
+# running -- logged its line before any timestamp this run could take. Captured, not piped into
+# `grep -q`: under pipefail grep's early exit would SIGPIPE journalctl and fail the match.
+verify_attached_remote() {
+  local i inv='' out
+  for ((i = 0; i < MICROVM_ATTACH_TIMEOUT; i++)); do
+    inv="$(systemctl show -p InvocationID --value microvm-worker.service)"
+    if [[ -n "$inv" ]]; then
+      out="$(journalctl -q -o cat "_SYSTEMD_INVOCATION_ID=$inv" 2>/dev/null || true)"
+      if [[ "$out" == *"attached, serving execs"* ]]; then
+        log "$MICROVM_SANDBOX_ID is attached to the relay at $B_ADDR"
+        return 0
+      fi
+    fi
+    sleep 1
+  done
+  die "$MICROVM_SANDBOX_ID did not attach to $B_ADDR within ${MICROVM_ATTACH_TIMEOUT}s; the reason (TLS, token, DNS) is in: journalctl -u microvm-worker _SYSTEMD_INVOCATION_ID=$inv"
+}
+
 main() {
+  parse_args "$@"
   preflight
   install_worker_binary
   install_units
-  install_env
+  if [[ -n "$REMOTE_BUNDLE" ]]; then install_env_remote; else install_env; fi
   apply
-  verify_attached
+  if [[ -n "$REMOTE_BUNDLE" ]]; then verify_attached_remote; else verify_attached; fi
   if ((${#CHANGED[@]})); then log "changed: ${CHANGED[*]}"; else log "nothing to change"; fi
 }
 

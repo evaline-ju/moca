@@ -35,6 +35,7 @@ cat >"$TMP/bin/systemctl" <<'MOCK'
 printf 'systemctl %s\n' "$*" >>"$MOCK_LOG"
 # is-active answers MOCK_IS_ACTIVE's exit code (0 = active, 3 = inactive/failed, as systemd does).
 [ "$1" = is-active ] && exit "${MOCK_IS_ACTIVE:-0}"
+[ "$1" = show ] && { echo "${MOCK_INVOCATION:-inv-1}"; exit 0; } # show -p InvocationID --value <unit>
 exit 0
 MOCK
 cat >"$TMP/bin/id" <<'MOCK'
@@ -47,6 +48,19 @@ cat >"$TMP/bin/go" <<'MOCK'
 printf 'go %s\n' "$*" >>"$MOCK_LOG"
 while [ $# -gt 0 ]; do [ "$1" = "-o" ] && { printf 'fake-microvm-worker\n' >"$2"; }; shift; done
 MOCK
+# journalctl -o cat _SYSTEMD_INVOCATION_ID=<id>: the worker's attach line, only for the invocation that
+# logged it (MOCK_JOURNAL_INV; default the current one), so a test can stage a line the PREVIOUS
+# process left behind.
+cat >"$TMP/bin/journalctl" <<'MOCK'
+#!/usr/bin/env bash
+printf 'journalctl %s\n' "$*" >>"$MOCK_LOG"
+want="${MOCK_JOURNAL_INV:-${MOCK_INVOCATION:-inv-1}}"
+[[ " $* " == *" _SYSTEMD_INVOCATION_ID=$want "* ]] && echo 'microvm-worker: attached, serving execs'
+exit 0
+MOCK
+# awk logs its argv like the other mocks, so a test can prove no token is ever an argument.
+real_awk="$(command -v awk)"
+printf '#!/bin/sh\nprintf "awk %%s\\n" "$*" >>"$MOCK_LOG"\nexec %s "$@"\n' "$real_awk" >"$TMP/bin/awk"
 chmod +x "$TMP/bin/"*
 export PATH="$TMP/bin:$PATH"
 
@@ -221,6 +235,108 @@ echo "== an attach that never shows up fails the install, naming the journal"
 reset_host
 check "exit 1" "$(MOCK_HEXISTS=0 run)" "1"
 check "points at journalctl" "$(grep -c 'journalctl -u microvm-worker' "$TMP/run.log")" "1"
+
+echo "== --remote: a P4 host attached to a relay in a cluster (k8s slice 2 spec §5)"
+BTOK=0a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f6071 # 64 hex, as setup.sh issues
+mkbundle() { # mkbundle DIR [RELAY_ADDR] [with-ca|no-ca]
+  mkdir -p "$1"
+  printf 'RELAY_ADDR=%s\nRELAY_TLS=true\nSANDBOX_ID=moca_microvm_0\nSANDBOX_TOKEN=%s\n' "${2:-moca-relay-moca.apps.example.test:443}" "$BTOK" >"$1/worker.env"
+  if [[ "${3:-with-ca}" == with-ca ]]; then
+    printf -- '-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----\n' >"$1/relay-ca.crt"
+  else
+    rm -f "$1/relay-ca.crt"
+  fi
+}
+reset_remote_host() { # no P6 at all: just a snapshot
+  reset_host
+  rm -f "$TMP/etc/relay.env" "$TMP/units/sh-relay.service"
+}
+runr() { bash "$SCRIPT" --remote "$1" >"$TMP/run.log" 2>&1; echo $?; }
+B="$TMP/bundle"; CA="$TMP/etc/microvm-relay-ca.crt"; RD="$TMP/units/microvm-worker.service.d/50-moca-remote.conf"
+W="$TMP/etc/microvm-worker.env"; R="$TMP/etc/microvm-relay.env"
+
+reset_remote_host; mkbundle "$B"
+check "exit 0, with no P6 on this host" "$(runr "$B")" "0"
+check "worker dials the relay Route" "$(val RELAY_ADDR "$W")" "moca-relay-moca.apps.example.test:443"
+check "over TLS" "$(val RELAY_TLS "$W")" "true"
+check "as the bundle's sandbox" "$(val SANDBOX_ID "$W")" "moca_microvm_0"
+check "with the bundle's token" "$(val SANDBOX_TOKEN "$W")" "$BTOK"
+check "trusting the bundle's CA" "$(val RELAY_CA_FILE "$W")" "$CA"
+check "workspace idle default" "$(val SH_WORKSPACE_IDLE "$W")" "8h"
+check "worker env is 0600" "$(mode "$W")" "600"
+check "the CA is installed 0644, verbatim" "$(mode "$CA") $(cmp -s "$B/relay-ca.crt" "$CA" && echo same)" "644 same"
+check "remote drop-in loads the worker env" "$(grep -c "^EnvironmentFile=$W\$" "$RD")" "1"
+check "remote drop-in waits for the network" "$(grep -c '^Wants=network-online.target$' "$RD")" "1"
+check "remote drop-in never names the local relay" "$(grep -c 'sh-relay' "$RD")" "0"
+check "no local-relay worker drop-in" "$([ -e "$TMP/units/microvm-worker.service.d/50-moca-p6.conf" ] && echo present || echo absent)" "absent"
+check "no relay drop-in, no relay env" "$([ -e "$TMP/units/sh-relay.service.d" ] || [ -e "$R" ] && echo present || echo absent)" "absent"
+check "no podman (no local Redis, no container check)" "$(grep -c '^podman' "$MOCK_LOG")" "0"
+check "worker started" "$(grep -c '^systemctl start microvm-worker.service$' "$MOCK_LOG")" "1"
+check "attach read from the current invocation's journal" "$(grep -c '^journalctl .*_SYSTEMD_INVOCATION_ID=inv-1' "$MOCK_LOG")" "1"
+check "the token never reached an argv" "$(grep -c "$BTOK" "$MOCK_LOG")" "0"
+
+before="$(hash_tree)"; : >"$MOCK_LOG"
+check "re-run: exit 0" "$(runr "$B")" "0"
+check "re-run: every file byte-identical" "$(hash_tree)" "$before"
+check "re-run: nothing stopped, started or restarted" "$(grep -cE 'restart|systemctl (stop|start)' "$MOCK_LOG")" "0"
+
+# Review Focus 3: the only attach line belongs to an earlier invocation (inv-1); the unit's current
+# one (inv-2: the worker restarted, say, and is failing its TLS handshake) has logged none.
+: >"$MOCK_LOG"
+check "a stale attach line: exit 1" "$(MOCK_INVOCATION=inv-2 MOCK_JOURNAL_INV=inv-1 runr "$B")" "1"
+check "it names the current invocation's journal" "$(grep -c 'journalctl -u microvm-worker _SYSTEMD_INVOCATION_ID=inv-2' "$TMP/run.log")" "1"
+
+mkbundle "$B" moca-relay-moca.apps.example.test:443 no-ca; : >"$MOCK_LOG"
+check "a bundle without a CA: exit 0" "$(runr "$B")" "0"
+check "RELAY_CA_FILE removed" "$(grep -c '^RELAY_CA_FILE=' "$W")" "0"
+check "the old CA file removed" "$([ -e "$CA" ] && echo present || echo absent)" "absent"
+
+echo "== --remote refuses a bad bundle, writing nothing"
+for case in no-env no-port tls-false dashed-id short-token bad-ca no-value; do
+  reset_remote_host; rm -rf "${B:?}"; mkbundle "$B"
+  arg="$B"
+  case "$case" in
+    no-env) rm -f "$B/worker.env" ;;
+    no-port) mkbundle "$B" moca-relay-moca.apps.example.test ;; # Review Focus 4
+    tls-false) sed -i.bak 's/^RELAY_TLS=.*/RELAY_TLS=false/' "$B/worker.env" ;;
+    dashed-id) sed -i.bak 's/^SANDBOX_ID=.*/SANDBOX_ID=moca-microvm-0/' "$B/worker.env" ;;
+    short-token) sed -i.bak 's/^SANDBOX_TOKEN=.*/SANDBOX_TOKEN=abc/' "$B/worker.env" ;;
+    bad-ca) printf 'not a certificate\n' >"$B/relay-ca.crt" ;;
+    no-value) arg='' ;;
+  esac
+  if [[ -n "$arg" ]]; then got="$(runr "$arg")"; else got="$(bash "$SCRIPT" --remote >"$TMP/run.log" 2>&1; echo $?)"; fi
+  check "$case: exit 1" "$got" "1"
+  check "$case: no microvm env files" "$(find "$TMP/etc" -name '*microvm*' | wc -l | tr -d ' ')" "0"
+  check "$case: no systemctl" "$(grep -c '^systemctl' "$MOCK_LOG")" "0"
+  check "$case: the token is not echoed" "$(grep -c "$BTOK" "$TMP/run.log")" "0"
+done
+reset_remote_host; mkbundle "$B" moca-relay-moca.apps.example.test; runr "$B" >/dev/null
+check "no-port: the refusal names host:443" "$(grep -c 'must be host:port.*:443' "$TMP/run.log")" "1"
+reset_remote_host; mkbundle "$B"
+check "MICROVM_SANDBOX_ID disagreeing with the bundle: exit 1" "$(MICROVM_SANDBOX_ID=moca_microvm_9 runr "$B")" "1"
+
+echo "== switching back: local mode after --remote restores the local relay's token"
+reset_host
+check "local install: exit 0" "$(run)" "0"
+ltok="$(val SANDBOX_TOKEN "$W")"
+mkbundle "$B"; : >"$MOCK_LOG"
+check "then --remote: exit 0" "$(runr "$B")" "0"
+check "--remote: the bundle's token replaces the local one" "$(val SANDBOX_TOKEN "$W")" "$BTOK"
+check "--remote: the relay's copy is left in place" "$(val SH_RELAY_TOKEN_moca_microvm_0 "$R")" "$ltok"
+check "--remote: the local relay is not restarted" "$(grep -c 'restart sh-relay' "$MOCK_LOG")" "0"
+check "--remote: 50-moca-p6.conf replaced by 50-moca-remote.conf" \
+  "$([ -e "$TMP/units/microvm-worker.service.d/50-moca-p6.conf" ] && echo p6)$([ -e "$RD" ] && echo remote)" "remote"
+: >"$MOCK_LOG"
+check "back to local: exit 0" "$(run)" "0"
+check "local: the local token is back" "$(val SANDBOX_TOKEN "$W")" "$ltok"
+check "local: loopback relay again" "$(val RELAY_ADDR "$W")" "127.0.0.1:9443"
+check "local: no RELAY_TLS, no RELAY_CA_FILE" "$(grep -cE '^(RELAY_TLS|RELAY_CA_FILE)=' "$W")" "0"
+check "local: the CA file is gone" "$([ -e "$CA" ] && echo present || echo absent)" "absent"
+check "local: 50-moca-p6.conf back, 50-moca-remote.conf gone" \
+  "$([ -e "$TMP/units/microvm-worker.service.d/50-moca-p6.conf" ] && echo p6)$([ -e "$RD" ] && echo remote)" "p6"
+check "local: the relay is not restarted (its drop-in and env did not change)" "$(grep -c 'restart sh-relay' "$MOCK_LOG")" "0"
+check "local: attach verified against the local presence records" "$(grep -c 'HEXISTS sh:sandbox:records moca_microvm_0' "$MOCK_LOG")" "1"
+check "local: no token on any argv" "$(grep -cE "$BTOK|$ltok" "$MOCK_LOG")" "0"
 
 if [ "$fails" -eq 0 ]; then echo "PASS"; else echo "FAIL ($fails)"; fi
 exit "$fails"
