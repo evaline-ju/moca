@@ -165,6 +165,39 @@ describe('relay presence put retry (#423 Task 16b, defect A)', () => {
     s2.end();
   });
 
+  it.each(['rejects', 'resolves'] as const)(
+    'a put in flight when teardown runs, then %s: no further put and no timer left (#433)',
+    async (outcome) => {
+      // The other teardown tests catch the retry WAITING on a timer; this one catches the attempt
+      // itself still out at Redis. Its settlement must not schedule a retry for a gone session.
+      const settle: Array<{ resolve: () => void; reject: (e: Error) => void }> = [];
+      const store: RecordStore = {
+        put: vi.fn(() => new Promise<void>((resolve, reject) => settle.push({ resolve, reject }))),
+        remove: vi.fn(async () => undefined),
+        list: async () => [],
+      };
+      const t = manualTimers();
+      const relay = createRelay({ records: store, validateToken: () => true, timers: t.timers });
+      const s = fakeAttach();
+      relay.onAttach(s as never);
+      s.emitData(hello('sbx-1'));
+      expect(store.put).toHaveBeenCalledTimes(1);
+
+      s.end();
+      expect(store.remove).toHaveBeenCalledTimes(1);
+
+      if (outcome === 'rejects') settle[0]!.reject(new Error('redis unreachable'));
+      else settle[0]!.resolve();
+      await new Promise((r) => setImmediate(r));
+
+      expect(store.put).toHaveBeenCalledTimes(1);
+      expect(t.delays).toEqual([]); // nothing was ever scheduled ...
+      expect(t.pending.size).toBe(0); // ... so nothing is left to fire
+      expect(errorLog).not.toHaveBeenCalled(); // and no failure is reported for a gone session
+      expect(infoLog).not.toHaveBeenCalled();
+    },
+  );
+
   it('a second teardown from the old stream (end, then error) leaves a same-id reattach alone (#434)', async () => {
     // teardown is registered for both 'end' and 'error', and a gRPC stream can emit both. If the
     // worker reattached in between, the old stream's second teardown found the NEW session under the
