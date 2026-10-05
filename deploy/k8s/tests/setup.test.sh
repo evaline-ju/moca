@@ -91,7 +91,12 @@ case "${1-} ${2-}" in
   if [[ " $* " == *" -o name "* ]]; then echo "$2/$3"; else cat "$f"; fi ;;
 "apply --server-side")
   obj="$(cat)"
-  obj="$(jq 'if .stringData then .data = ((.data // {}) + (.stringData | map_values(@base64))) | del(.stringData) else . end' <<<"$obj")"
+  # With MOCK_SSA_PRUNE=1, simulate server-side apply pruning: data becomes exactly the applied stringData keys
+  if [[ -n "${MOCK_SSA_PRUNE-}" && "$(jq -r '.kind' <<<"$obj")" == Secret && -n "$(jq -r '.stringData // empty' <<<"$obj")" ]]; then
+    obj="$(jq '.data = (.stringData | map_values(@base64)) | del(.stringData)' <<<"$obj")"
+  else
+    obj="$(jq 'if .stringData then .data = ((.data // {}) + (.stringData | map_values(@base64))) | del(.stringData) else . end' <<<"$obj")"
+  fi
   printf '%s\n' "$obj" >"$(store "$(jq -r .metadata.namespace <<<"$obj")" "$(jq -r .kind <<<"$obj")" "$(jq -r .metadata.name <<<"$obj")")" ;;
 "apply -f") : ;; # a file path (namespaces.yaml); stdin applies all go through --server-side
 "apply -k")
@@ -109,6 +114,11 @@ case "${1-} ${2-}" in
   [[ -f "$f" ]] || { echo "Error from server (NotFound): secrets \"$3\" not found" >&2; exit 1; }
   p=''
   while [[ $# -gt 0 ]]; do [[ "$1" == -p ]] && { p="$2"; break; }; shift; done
+  # Reject JSON Patch (array) bodies; only merge patch (object with data) is allowed.
+  if jq -e '. | type == "array"' <<<"$p" >/dev/null 2>&1; then
+    echo "error: the server does not support JSON Patch on this Secret; use merge patch" >&2
+    exit 1
+  fi
   jq --argjson p "$p" '.data = ((.data // {}) + ($p.data // {}) | with_entries(select(.value != null)))' "$f" >"$f.new"
   mv "$f.new" "$f" ;;
 "run moca-genkeys")
@@ -637,20 +647,22 @@ grep -q '^kubectl patch secret moca-relay-sandbox-tokens' "$MOCK_LOG" || fail 'r
 [[ ! -e "$P4B/moca_microvm_0" ]] || fail 'clearing the IDs left a bundle'
 pass 'tokens are kept on a re-run; a dropped ID loses its token and bundle; clearing the list empties the Secret'
 
-# Revocation uses an idempotent merge patch: nulling an absent key is a no-op, even if someone
-# manually deleted a stale key. Verify that a patch still succeeds when revocation tries to remove
-# a key that the API server may have already pruned.
+# Revocation uses an idempotent merge patch: the patch succeeds even when the stale key is already
+# absent (e.g., the API server pruned it during server-side apply). When MOCK_SSA_PRUNE=1, the
+# mock simulates server-side apply pruning keys it no longer applies, so the stale key is gone
+# before the patch runs.
 p4_ok moca_microvm_0,moca_microvm_1
-# Manually add a third stale key to the Secret to ensure the patch command is issued.
-jq '.data.stale_microvm = "dGVzdA=="' "$MOCK_STATE/moca__Secret__moca-relay-sandbox-tokens.json" >"$TMP/t.json"
-mv "$TMP/t.json" "$MOCK_STATE/moca__Secret__moca-relay-sandbox-tokens.json"
-# Now call with only moca_microvm_0; both moca_microvm_1 and stale_microvm are stale.
+t_mv0="$(tok moca_microvm_0)"
+# Now run with only moca_microvm_0, with API server pruning enabled. The apply will remove
+# moca_microvm_1 from the Secret, making it truly absent before revocation tries to patch it.
 : >"$MOCK_LOG"
-p4_ok moca_microvm_0
-# Revocation should patch to remove both stale keys.
-grep -q '^kubectl patch secret moca-relay-sandbox-tokens' "$MOCK_LOG" || fail 'revocation was not called'
-[[ "$(tok_keys)" == moca_microvm_0 ]] || fail 'revocation idempotency failed; remaining keys wrong'
-pass 'revocation uses idempotent merge patch: stale key removal succeeds'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS=moca_microvm_0 MOCK_SSA_PRUNE=1; expect_ok --target ocp)
+# Revocation should have tried to patch and succeeded despite moca_microvm_1 already being absent.
+grep -q '^kubectl patch secret moca-relay-sandbox-tokens' "$MOCK_LOG" || fail 'revocation patch was not called'
+[[ "$(tok moca_microvm_0)" == "$t_mv0" ]] || fail 'moca_microvm_0 token was rotated'
+[[ -z "$(sv moca moca-relay-sandbox-tokens moca_microvm_1 2>/dev/null || true)" ]] || fail 'moca_microvm_1 token was not revoked'
+[[ ! -e "$P4B/moca_microvm_1" ]] || fail "moca_microvm_1 bundle was not deleted"
+pass 'revocation is idempotent: the merge patch succeeds when the stale key is absent (server-side apply pruned it)'
 
 # A stored token equal to the exec token (the relay would refuse it, spec §2.2) is regenerated.
 reset_state
