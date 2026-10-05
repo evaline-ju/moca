@@ -15,6 +15,7 @@ import type { CpConfig, CpDeps } from './handlers.js';
 import { keyIdFor, makeSigner, parseKeyset, publicKeyFromBase64 } from './token.js';
 import { VaultCredentialStore, vaultTokenSource } from './vault-store.js';
 import { withCredentials } from './systemd-credentials.js';
+import { parseSandboxTiers } from './sandbox-tiers.js';
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
   const v = env[name];
@@ -90,6 +91,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
     injectorConfigured: env.SH_INJECTOR_CONFIGURED === 'true',
     sandboxNamespace: env.SH_SANDBOX_NAMESPACE || 'default',
     publicHarnessUrl: urlEnv(env, 'SH_PUBLIC_HARNESS_URL'),
+    sandboxTiers: parseSandboxTiers(env),
   };
   checkInferenceConfig(config);
   return config;

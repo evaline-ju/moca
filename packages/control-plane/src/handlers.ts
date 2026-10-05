@@ -13,6 +13,7 @@ import type { IdentityProvider } from './identity.js';
 import type { KeyObject } from 'node:crypto';
 import type { MintInput, TokenClaims } from './token.js';
 import { projectResources, resolveSandbox } from './resources.js';
+import type { SandboxTiers } from './sandbox-tiers.js';
 
 export interface CpConfig {
   apiTokenTtlSeconds: number;
@@ -37,6 +38,11 @@ export interface CpConfig {
    * only this control plane's URL. Unset means the deployment advertises none.
    */
   publicHarnessUrl?: string;
+  /**
+   * The declared sandbox tiers (P6.3), or null when the deployment declares none. Read once at boot:
+   * configFromEnv refuses a list it cannot serve, so a session is never validated against a typo.
+   */
+  sandboxTiers: SandboxTiers | null;
 }
 
 export interface CpDeps {
@@ -191,7 +197,10 @@ export const HANDLERS: Record<string, Handler> = {
   // "this control plane predates discovery" and name the right fix for each.
   getDiscovery: async (_ctx, deps) => ({
     status: 200,
-    body: { harnessUrl: deps.config.publicHarnessUrl ?? null },
+    body: {
+      harnessUrl: deps.config.publicHarnessUrl ?? null,
+      sandboxTiers: deps.config.sandboxTiers,
+    },
   }),
 
   startDeviceAuth: async (_ctx, deps) => ({
