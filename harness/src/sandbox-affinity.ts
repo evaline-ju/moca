@@ -12,6 +12,11 @@ import { intEnv } from './lease-timings.js';
  * under the same id.
  */
 
+/** A value safe to interpolate into one log line: CR, LF and other control characters removed (CodeQL js/log-injection). */
+export function forLog(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f]+/g, '');
+}
+
 /** The presence label the tier filter reads; the workers' `session.TierLabelKey`. */
 export const TIER_LABEL = 'moca.dev/tier';
 
@@ -168,7 +173,9 @@ export class RedisAffinityStore implements AffinityStore {
     await this.ready;
     const parsed = parseEntry(await this.client.get(affinityKey(sessionId)));
     if (parsed === 'corrupt') {
-      console.warn(`sandbox affinity: ignoring a corrupt value at ${affinityKey(sessionId)}`);
+      console.warn(
+        `sandbox affinity: ignoring a corrupt value at ${affinityKey(forLog(sessionId))}`,
+      );
       return null;
     }
     return parsed;

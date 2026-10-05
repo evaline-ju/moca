@@ -13,6 +13,7 @@ import { RedisLeaseStore, type LeaseStore } from './sandbox-lease.js';
 import { RedisRecordStore, type RecordStore, type SandboxRecord } from './pool-records.js';
 import {
   affinityTimings,
+  forLog,
   parseSandboxTiers,
   RedisAffinityStore,
   TIER_LABEL,
@@ -489,9 +490,9 @@ function recordInTier(r: SandboxRecord, tier: string, declared: readonly string[
     const labels = JSON.stringify(r.labels ?? {});
     console.warn(
       t
-        ? `sandbox '${r.sandboxId}' advertises ${TIER_LABEL}='${t}', which is not one of SH_SANDBOX_TIERS ` +
-            `(${declared.join(', ')}) (labels ${labels}); excluded — fix SANDBOX_TIER on its worker`
-        : `sandbox '${r.sandboxId}' advertises no ${TIER_LABEL} label (labels ${labels}); ` +
+        ? `sandbox '${forLog(r.sandboxId)}' advertises ${TIER_LABEL}='${forLog(t)}', which is not one of SH_SANDBOX_TIERS ` +
+            `(${declared.join(', ')}) (labels ${forLog(labels)}); excluded — fix SANDBOX_TIER on its worker`
+        : `sandbox '${forLog(r.sandboxId)}' advertises no ${TIER_LABEL} label (labels ${forLog(labels)}); ` +
             'excluded while SH_SANDBOX_TIERS is set — set SANDBOX_TIER on its worker',
     );
   }
@@ -513,7 +514,7 @@ async function remember<T>(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(
-      `sandbox affinity: could not record '${sandboxId}' for session ${sessionId}: ${message}`,
+      `sandbox affinity: could not record '${forLog(sandboxId)}' for session ${forLog(sessionId)}: ${message}`,
     );
     return undefined;
   }
@@ -735,7 +736,7 @@ async function select(
       if (left > 0) {
         const retryInMs = Math.min(left, graceMs);
         console.warn(
-          `sandbox affinity: session ${sessionId} waits for '${prior.sandboxId}' ` +
+          `sandbox affinity: session ${forLog(sessionId)} waits for '${forLog(prior.sandboxId)}' ` +
             `(absent; ${Math.ceil(retryInMs / 1000)}s of grace left)`,
         );
         throw new SandboxAffinityPendingError(prior.sandboxId, retryInMs);
@@ -761,8 +762,8 @@ async function select(
       await remember(() => affinity.replace(sessionId, entry, affinityTtlMs), sessionId, name);
       if (reset) {
         console.warn(
-          `sandbox affinity: session ${sessionId} moved from '${reset.from}' to '${name}' in tier ` +
-            `'${tier}' (${reset.reason}); its workspace starts empty`,
+          `sandbox affinity: session ${forLog(sessionId)} moved from '${forLog(reset.from)}' to '${forLog(name)}' in tier ` +
+            `'${forLog(tier)}' (${reset.reason}); its workspace starts empty`,
         );
       }
       return got;

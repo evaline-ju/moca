@@ -6,6 +6,7 @@ import {
   affinityKey,
   affinityTimings,
   detachedKey,
+  forLog,
   parseSandboxTiers,
   RedisAffinityStore,
   TIER_LABEL,
@@ -36,6 +37,16 @@ describe('keys and constants', () => {
     expect(TIER_LABEL).toBe('moca.dev/tier');
     expect(affinityKey('s-1')).toBe('sh:sandbox:affinity:s-1');
     expect(detachedKey('sbx-1')).toBe('sh:sandbox:detached:sbx-1');
+  });
+});
+
+describe('forLog', () => {
+  it('strips \\r, \\n, \\u001b and keeps ordinary text', () => {
+    expect(forLog('hello')).toBe('hello');
+    expect(forLog('hello\nworld')).toBe('helloworld');
+    expect(forLog('hello\rworld')).toBe('helloworld');
+    expect(forLog('hello\u001b[31mred')).toBe('hello[31mred');
+    expect(forLog('a\u0000b\u001fc')).toBe('abc');
   });
 });
 

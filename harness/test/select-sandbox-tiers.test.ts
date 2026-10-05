@@ -686,4 +686,29 @@ describe('selectPoolSandbox: affinity (P6.3 spec §4 steps 2–6, §5)', () => {
       expect(sel?.sandboxId).toBe('pod-0');
     }
   });
+
+  // CodeQL js/log-injection: a session id / sandbox id containing "\n" must not inject newlines into the log.
+  it('strips control characters from session/sandbox ids in pending warnings', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { lease } = fakeLease();
+    const sessionIdWithNewline = 's\nmalicious';
+    const aff = fakeAffinity(
+      { [sessionIdWithNewline]: { sandboxId: 'm-0', tier: 'microvm' } },
+      { 'm-0': NOW - 1_000 }, // 1 second before now, within the grace
+    );
+    const err = await selectPoolSandbox(
+      tiered,
+      '/h',
+      sessionIdWithNewline,
+      opts({ tier: 'microvm' }),
+      deps([m('m-1')], lease, { affinity: aff.store, ...at }),
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(SandboxAffinityPendingError);
+    const logLine = warn.mock.calls.find((c) => String(c[0]).includes('waits for'));
+    expect(logLine).toBeDefined();
+    const logText = String(logLine?.[0] ?? '');
+    expect(logText).not.toContain('\n');
+    expect(logText).toContain('smalicious'); // newline stripped
+    warn.mockRestore();
+  });
 });
