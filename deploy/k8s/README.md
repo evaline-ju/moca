@@ -876,13 +876,20 @@ Everything the `ocp` target does outside the namespace is skipped or replaced:
 The isolation the base draws from the namespace boundary moves to pod-label NetworkPolicies: the
 default-deny, the sandbox's egress (relay attach port and the public internet only), the relay's
 exec-port rule (supervisor only) are all enforced per pod label. The sandboxes mount no ServiceAccount
-token, so the kube API refuses them even where a cluster-level policy leaves it reachable (§12.3).
+token, so the kube API refuses them even where the egress policy leaves it reachable (§12.3).
 
-Two consequences of the collapse, accepted for a dev/test tenant: the secrets the base keeps out of
-`moca-sandbox` (the exec token, the Redis password, the MU1 keys) share the namespace with the
-sandbox pods -- anyone who can edit the namespace can read them -- and the sandbox workspace and
-home are `emptyDir`s, so they are lost when a sandbox pod restarts (they are container-local in the
-base too).
+Three consequences of the collapse, accepted for a dev/test tenant:
+
+- The secrets the base keeps out of `moca-sandbox` (the exec token, the Redis password, the MU1
+  keys) share the namespace with the sandbox pods -- anyone who can edit the namespace can read
+  them.
+- The control plane's Secret Role (`moca-control-plane-credentials`: get, create, update, patch,
+  delete; no list) is scoped to `moca-credentials` in the base, so it reaches user credentials
+  only. In one namespace it reaches **every** Secret: the relay attach and exec tokens, the Redis
+  password, the MU1 keys. A compromised control plane can read and overwrite platform secrets by
+  name, not just user credentials.
+- The sandbox workspace and home are `emptyDir`s, so they are lost when a sandbox pod restarts
+  (they are container-local in the base too).
 
 ### 12.2 Smoke
 
@@ -893,10 +900,11 @@ K8S_LIVE_SMOKE=1 SMOKE_MODEL_URL=<endpoint> SMOKE_MODEL_TOKEN=<token> \
 
 There is no in-pod mock model on this target (the `kind-ci` one rides the dev.local image), so the
 smoke needs a real model credential, like `--target ocp`. The claims are the container tier's:
-pods up, sandboxes attached, authenticated turns in a sandbox, isolation (redis, relay exec, kube
-API, metadata BLOCKED; relay attach OPEN), drain, Redis-restart persistence, no restarts. The
-namespace is read from the stack's own `moca-setup` ConfigMap, so a custom
-`SH_SINGLE_NAMESPACE` needs no extra flag.
+pods up, sandboxes attached, authenticated turns in a sandbox, isolation (redis, relay exec,
+metadata BLOCKED; relay attach OPEN), drain, Redis-restart persistence, no restarts. The kube API
+probe is reported as a `note`, not a claim (§12.3). For a custom namespace, export the same
+`SH_SINGLE_NAMESPACE` you installed with; without it, smoke reads the `moca-setup` ConfigMap in the
+kubeconfig's current namespace, so it finds the stack only when the context is already set to it.
 
 ### 12.3 Verified
 
@@ -908,9 +916,13 @@ policy (the kube API VIP was the one exception below).
 
 **The kube-API Service VIP was reachable** from the sandbox despite the private-range egress
 blocks, on that cluster only: same-CIDR VIPs (DNS) were blocked, arbitrary private IPs were
-blocked, and other ports on the VIP were blocked -- a cluster-level admission that predates this
-stack. The sandboxes mount no ServiceAccount token, so the API refuses them; treat it as
-defence-in-depth lost, not as an escape.
+blocked, and other ports on the VIP were blocked. The most likely cause is the sandbox's own
+internet-egress rule, not the cluster: OVN-Kubernetes matches `ipBlock` after the Service VIP is
+DNAT'd to its endpoints, so the DNS VIP is blocked (its backends are pod IPs in excepted ranges),
+the VIP's other ports are blocked (no endpoint), and the API port passes if the apiserver endpoint
+lies outside the `except` list, where the `0.0.0.0/0` rule admits it. The endpoint address was not
+confirmed on that tenant. The sandboxes mount no ServiceAccount token, so the API refuses them;
+treat it as defence-in-depth lost, not as an escape.
 
 ### 12.4 What does not work here
 

@@ -49,11 +49,11 @@ kc() { if [[ "$TARGET" == kind* ]]; then kubectl --context kind-moca "$@"; else 
 NS=moca
 SBX=moca-sandbox
 # ocp-single: every workload shares the one namespace the stack was installed in
-# (SH_SINGLE_NAMESPACE, default moca-single). Read from the stack's own moca-setup ConfigMap when
-# possible, so a smoke against a custom namespace needs no extra flag; the default covers a
-# ConfigMap that cannot be read.
+# (SH_SINGLE_NAMESPACE, default moca-single). An exported SH_SINGLE_NAMESPACE wins; otherwise it is
+# read from the moca-setup ConfigMap in the kubeconfig's current namespace (the read needs a
+# namespace to find the one it names), and the default covers a ConfigMap that cannot be read.
 if [[ "$TARGET" == ocp-single ]]; then
-  NS="$(kc get configmap moca-setup -o jsonpath='{.data.SH_SINGLE_NAMESPACE}' 2>/dev/null || true)"
+  NS="${SH_SINGLE_NAMESPACE:-$(kc get configmap moca-setup -o jsonpath='{.data.SH_SINGLE_NAMESPACE}' 2>/dev/null || true)}"
   NS="${NS:-moca-single}"
   SBX="$NS"
 fi
@@ -388,11 +388,11 @@ r="$(probe kubernetes.default.svc 443)"
 if [[ "$TARGET" == ocp ]]; then
   [[ "$r" == BLOCKED ]] || { iso_ok=0; ko "kubernetes.default.svc:443 is $r (want BLOCKED)"; }
 elif [[ "$TARGET" == ocp-single ]]; then
-  # The three-namespace ocp target enforces this; on a shared cluster's single namespace it is
-  # cluster-level admission that decides (the sandbox egress already blocks every private range
-  # and the VIP's other ports; some clusters still admit the kube-API VIP itself). The sandbox
-  # mounts no ServiceAccount token, so the API refuses it either way. README §12.3.
-  note "kubernetes.default.svc:443 is $r (cluster-level admission decides on a shared cluster; the sandbox's egress blocks private ranges, and it holds no ServiceAccount token — README §12.3)"
+  # The three-namespace ocp target enforces this; here the sandbox's own internet-egress rule
+  # (0.0.0.0/0 minus the private ranges) most likely admits it: OVN-Kubernetes matches ipBlock
+  # after the Service VIP is DNAT'd, so an apiserver endpoint outside the excepted ranges passes. The
+  # sandbox mounts no ServiceAccount token, so the API refuses it either way. README §12.3.
+  note "kubernetes.default.svc:443 is $r (the internet-egress ipBlock can admit the apiserver endpoint after DNAT; the sandbox holds no ServiceAccount token — README §12.3)"
 else
   note "kubernetes.default.svc:443 is $r (single-node kind: kindnet does not filter node-local traffic; enforced on OCP — README Troubleshooting)"
 fi
@@ -401,7 +401,7 @@ r="$(probe sandbox-relay-attach.$NS.svc 9443)"
 if [[ "$iso_ok" == 0 ]]; then :; elif [[ "$TARGET" == ocp ]]; then
   ok 'redis, relay exec, kube API and metadata BLOCKED; relay attach OPEN'
 elif [[ "$TARGET" == ocp-single ]]; then
-  ok 'redis, relay exec and metadata BLOCKED; relay attach OPEN (kube API: cluster admission — see note)'
+  ok 'redis, relay exec and metadata BLOCKED; relay attach OPEN (kube API: see note)'
 else
   ok 'redis, relay exec, metadata BLOCKED; relay attach OPEN'
 fi

@@ -134,6 +134,7 @@ preflight() {
   if is_kind; then need="$need kind docker"; elif [[ "$TARGET" != ocp-single ]]; then need="$need oc"; fi
   # ocp-single runs kubectl only: no SCC grant and no Route reads, so oc is never needed.
   for c in $need; do command -v "$c" >/dev/null 2>&1 || missing="$missing $c"; done
+  command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || missing="$missing sha256sum|shasum"
   [[ -z "$missing" ]] || die "missing required commands:$missing"
   if is_kind; then
     # `|| true`: a grep that matches nothing would otherwise end the run here, under set -e and

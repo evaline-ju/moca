@@ -799,7 +799,7 @@ pass 'ocp-single: an invalid, a colliding and a missing namespace are refused, n
 reset_state
 (export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp-single)
 expect_out 'kubectl -n moca-single port-forward svc/moca-supervisor'
-! grep -q 'ocp-single.*https' "$TMP/out" || fail 'ocp-single printed an https URL; it has no Routes'
+! grep -q 'https://' "$TMP/out" || fail 'ocp-single printed an https URL; it has no Routes'
 pass 'ocp-single: access is printed as port-forward commands, never a Route URL'
 
 echo "setup.test.sh: all passed"

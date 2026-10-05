@@ -103,15 +103,12 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s overlays/ocp-single', () => {
     expect(ss.spec.replicas).toBe(2);
     expect(ss.spec.serviceName).toBe('moca-sandbox');
     // SANDBOX_ID from the pod name, so the pool IDs stay unique and stable.
-    const fieldRef = envVar(container(ss, 'sandbox'), 'SANDBOX_ID')?.valueFrom as
-      { fieldRef: { fieldPath: string } } | undefined;
-    expect(fieldRef?.fieldRef.fieldPath).toBe('metadata.name');
+    expect(envVar(container(ss, 'sandbox'), 'SANDBOX_ID')).toMatchObject({
+      valueFrom: { fieldRef: { fieldPath: 'metadata.name' } },
+    });
     // The attach token still comes from the Secret, now same-namespace.
-    const secretRef = envVar(container(ss, 'sandbox'), 'SANDBOX_TOKEN')?.valueFrom as
-      { secretKeyRef: { name: string; key: string } } | undefined;
-    expect(secretRef?.secretKeyRef).toEqual({
-      name: 'moca-relay-attach',
-      key: 'SH_RELAY_TOKEN',
+    expect(envVar(container(ss, 'sandbox'), 'SANDBOX_TOKEN')).toMatchObject({
+      valueFrom: { secretKeyRef: { name: 'moca-relay-attach', key: 'SH_RELAY_TOKEN' } },
     });
     // The Role and RoleBinding collapse into the namespace and still bind.
     find(objs(), 'Role', 'moca-control-plane-credentials', NS);
