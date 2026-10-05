@@ -1,6 +1,7 @@
 # P6 on Kubernetes, slice 3: sandbox tiers and session-to-sandbox affinity — Design
 
-Version: 1.1 — October 2026 (v1.1: corrections from the implementation plan)
+Version: 1.2 — October 2026 (v1.1: corrections from the implementation plan; v1.2: corrections from
+the implementation and its final review)
 Status: Proposed
 Milestone: **P6.3**, registered in [the milestone registry](README.md). This is slice 3 of epic
 rossoctl/moca#426, issue rossoctl/moca#425.
@@ -36,12 +37,20 @@ mocactl change; the deployment paths only set configuration.
 ### 0.1 v1.1 corrections
 
 1. **Durations are integer seconds:** `SH_SANDBOX_AFFINITY_TTL_SECONDS` and `SH_SANDBOX_AFFINITY_GRACE_SECONDS`. The TypeScript side has no Go-duration parser, and the repo's knobs are `*_SECONDS` / `*_MS` integers read through `intEnv`.
-2. **The relay overwrites the detach mark** (plain `SET` with TTL); only the harness uses `SET NX`. Otherwise a stale mark can survive and cause early grace-period expiry.
+2. **The relay overwrites the detach mark** (plain `SET` with TTL); only the harness writes it conditionally (v1.2: also replacing a future mark). Otherwise a stale mark can survive and cause early grace-period expiry.
 3. **Affinity applies only on the records path** (`remoteOn`). The pods-only path stays byte-for-byte unchanged. Pods listed alongside records (`both`) take part in affinity like records.
 4. **Placement is reported at turn end**, from the result, not at turn start: the sandbox is not known when `server.ts` reports `start`.
 5. **§10's first risk is resolved:** mocactl already parses an unknown SSE `event:` as an `UnknownFrame`. Older clients ignore `workspace_reset`. The mocactl contract test requires `KNOWN_FRAME_TYPES` to change in the same PR as the harness union.
 6. **Retiered sandboxes:** an affine sandbox present under another tier falls back immediately (reason `'retiered'`). §4 step 4 covered only "absent".
 7. **`SandboxAffinityPendingError` extends `SandboxPoolSaturatedError`,** so the three leaf paths' existing `instanceof SandboxPoolSaturatedError` checks classify it `saturated` (retryable) with no edit. Its own `name` joins knative-server's `NO_CAPACITY` set.
+
+### 0.2 v1.2 corrections
+
+1. **The JSON turn result (§6)** carries `sandbox?: { id, tier, workspaceReset?: { from, reason } }` (where the turn ran, and the reset if any), not a bare `workspaceReset`; an empty tier is omitted.
+2. **An affinity entry recorded under another tier is honoured, not ignored (§4 step 2).** Every entry written while tiers are unset has tier `''`; ignoring those when tiers are switched on would lose every such session's workspace with no frame, field or log. The entry is followed only to a sandbox in the session's tier, so it never crosses tiers.
+3. **"Retiered" means labelled with another DECLARED tier (§4 step 4).** A record that is unlabelled, or labelled with a name not in `SH_SANDBOX_TIERS` (a typo), takes the grace path, and is excluded from selection with one log line naming its ID and labels (§5).
+4. **A detach mark in the future is replaced by now (§3.5, §4 step 4).** A mark ahead of the harness clock (relay skew, or a huge integer) would otherwise hold the session pending until the key's TTL; replaced, the grace runs from now.
+5. **The store's method names and the relay's write** are corrected to what shipped (§3.2, §3.5, §4, §8), and the concurrency claim at the end of §4 is narrowed.
 
 ## 1. Scope
 
@@ -142,9 +151,15 @@ tiers`), and `''` is stored.
   outliving the workspace is harmless: the session returns to its sandbox and finds an empty
   workspace, which is what a fallback gives it anyway. Affinity expiring first loses a workspace
   that still exists. Container workspaces live until the pod restarts, hence the long default.
-- Served by a new `AffinityStore` (`get`, `setIfAbsent`, `refresh`, `getDetached`,
-  `setDetachedIfAbsent`), memoised and guarded exactly like the lease store
-  (`select-sandbox.ts`, `sharedLease` / `dropMemo`), on the same `REDIS_URL`.
+- Served by a new `AffinityStore`, memoised and guarded exactly like the lease store
+  (`select-sandbox.ts`, `sharedLease` / `dropMemo`), on the same `REDIS_URL`:
+  - `get` — the session's entry, or none (a corrupt value reads as none, and is logged);
+  - `claim` — set the entry unless a valid one exists, refresh the TTL either way, and return the
+    entry in force;
+  - `replace` — overwrite the entry;
+  - `detachedSince` — the relay's detach mark for a sandbox, or else now, written so the grace clock
+    starts at the first turn that noticed. A mark that is not an integer, or is in the future, is
+    replaced by now.
 
 ## 4. The selection algorithm (`selectPoolSandbox`)
 
@@ -157,16 +172,24 @@ The inputs gain `opts.tier?: string`. The no-selector path, the pods path, the l
    its labels, so a misconfigured worker fails loudly instead of serving either tier. When no tiers
    are declared, nothing is filtered. Pods (the `pods` and `both` discovery sources) are container
    tier: they pass the filter only when `opts.tier` is the default tier.
-2. **Read affinity** for `sessionId`. An entry whose `tier` is not `opts.tier` is ignored.
+2. **Read affinity** for `sessionId`. An entry recorded under another tier (for instance `''`,
+   written before tiers were declared) is **not** ignored: if its sandbox is in the filtered set it
+   is used as in step 3 and re-recorded under `opts.tier` (`replace`), with no workspace reset —
+   the workspace is intact. Otherwise it goes through step 4 like any other entry. This never
+   crosses tiers: the entry is only followed to a sandbox in the filtered set.
 3. **The affine sandbox is in the filtered set:** `acquire` that sandbox **only**. If the cap
    refuses it, throw `SandboxPoolSaturatedError` (503). Do not try another sandbox.
-4. **The affine sandbox is absent from the filtered set.** If it is present under **another tier**
-   (an operator re-tiered its worker): continue to step 5 immediately with
-   `workspaceReset = { from: <id>, reason: 'retiered' }` — no detach-key read, no grace. Otherwise
-   read `sh:sandbox:detached:<id>`:
-   - **Missing:** write it now with `SET NX` (`setDetachedIfAbsent`). This starts the grace clock at
-     the first turn that noticed the absence. It covers a relay that restarted, and so never wrote
-     the key, while the host was gone for good. Then treat the sandbox as just detached.
+4. **The affine sandbox is absent from the filtered set.** If it is present labelled with
+   **another declared tier** (an operator re-tiered its worker): continue to step 5 immediately with
+   `workspaceReset = { from: <id>, reason: 'retiered' }` — no detach-key read, no grace. A record that
+   is unlabelled, or labelled with a name not in `SH_SANDBOX_TIERS`, is not "another tier": it is a
+   worker whose `SANDBOX_TIER` is missing or mistyped, and it takes the grace path like an absent
+   one. Otherwise read `sh:sandbox:detached:<id>` (`detachedSince`):
+   - **Missing, not an integer, or in the future:** write it now (`detachedSince`, atomically). This
+     starts the grace clock at the first turn that noticed the absence. It covers a relay that
+     restarted, and so never wrote the key, while the host was gone for good; and a mark ahead of
+     the harness clock, which would otherwise hold the session pending until the key's TTL. Then
+     treat the sandbox as just detached.
    - **Detached for less than `SH_SANDBOX_AFFINITY_GRACE_SECONDS`** (integer seconds, default `60`): throw
      the new **`SandboxAffinityPendingError`** (503, retryable), naming the sandbox and the time left.
    - **Detached for longer:** continue to step 5, carrying
@@ -175,29 +198,33 @@ The inputs gain `opts.tier?: string`. The no-selector path, the pods path, the l
    empty, throw `SandboxPoolEmptyError`, its message naming the tier; if every sandbox is full,
    throw `SandboxPoolSaturatedError`.
 6. **After a successful lease:**
-   - **Without a prior entry:** `setIfAbsent({sandboxId, tier})`. If another turn of the same session
+   - **Without a prior entry:** `claim({sandboxId, tier})`. If another turn of the same session
      won the write and chose a **different** sandbox, release this lease and re-run from step 2 against
      the winner's entry, **once**. A second disagreement throws `SandboxAffinityPendingError`.
-   - **With a prior entry for this sandbox:** `refresh` the TTL.
-   - **After a fallback:** overwrite the entry with the new sandbox.
+   - **With a prior entry for this sandbox:** `claim` it, which refreshes the TTL; if the entry was
+     recorded under another tier, `replace` it with `{sandboxId, opts.tier}` instead.
+   - **After a fallback:** overwrite the entry with the new sandbox (`replace`).
    - `SelectedSandbox` gains `sandboxId`, `tier` and `workspaceReset?`, for §6.
 
-Concurrent turns of one session read the same entry, so they converge on one sandbox. Step 6 closes
-the race between two **first** turns.
+Concurrent **first** turns of one session converge on one sandbox (step 6 closes their race), and
+concurrent turns that find their affine sandbox present all take it. Two concurrent turns that both
+find the affine sandbox gone past the grace may each pick and `replace` a different sandbox, the
+later write winning; the workspace was already reset, so nothing more is lost, but the session's
+next turn may not be on the sandbox either of them reported. Closing that race is a follow-up.
 
 ## 5. Failure modes
 
-| Situation                                                    | Behaviour                                                                                                                                                                                                                                                                                                                                                      |
-| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Relay restart                                                | Every record disappears, then the workers re-Hello under the same IDs. Affinity and detach keys are in Redis and untouched. Turns in the gap get 503: `SandboxAffinityPendingError` for a session with affinity, `SandboxPoolEmptyError` for one without. Each session is back on its own sandbox within seconds.                                              |
-| Worker or pod restart                                        | P4: the workspace is on host disk and survives. Container tier: the pod returns under the same StatefulSet name, but its workspace is container-local and **lost by the existing design** (`deploy/k8s/base/sandbox.yaml`). Affinity still returns the session to the same ID, and no reset is recorded: the harness cannot see that loss. A documented limit. |
-| Host gone for good                                           | 503 for the grace period, then the fallback within the tier, with the reset recorded (§6).                                                                                                                                                                                                                                                                     |
-| The session's tier is empty or saturated                     | 503, as today. A session **never** moves to another tier.                                                                                                                                                                                                                                                                                                      |
-| Reading affinity or the detach key fails                     | The turn fails, as a failed lease read does today. It does not fall back to an unpinned selection: a Redis blip must not scatter sessions across sandboxes.                                                                                                                                                                                                    |
-| Writing affinity fails after the lease was taken             | The turn **proceeds**, with a warning. The lease is held and the sandbox is right. The next turn finds the old entry or none, and selects as in §4.                                                                                                                                                                                                            |
-| The session's tier is removed from `SH_SANDBOX_TIERS`        | The exchange returns the stored tier; nothing matches it; `SandboxPoolEmptyError`, naming the tier. The control plane does not rewrite stored tiers.                                                                                                                                                                                                           |
-| An unlabelled or mislabelled worker                          | Excluded while tiers are declared, with a log line naming its ID and labels.                                                                                                                                                                                                                                                                                   |
-| `SH_SANDBOX_TIERS` differs between control plane and workers | A session's tier may match no record (`SandboxPoolEmptyError`, naming the tier). Every deployment path sets both from one source, and an env-parity test guards it (§7).                                                                                                                                                                                       |
+| Situation                                                    | Behaviour                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Relay restart                                                | On a graceful restart every record disappears (teardown), then the workers re-Hello under the same IDs. Affinity and detach keys are in Redis and untouched. Turns in the gap get 503: `SandboxAffinityPendingError` for a session with affinity, `SandboxPoolEmptyError` for one without. Each session is back on its own sandbox within seconds. A hard-killed relay can leave stale records, which turns may lease until the worker reattaches (pre-existing; not changed by this slice). |
+| Worker or pod restart                                        | P4: the workspace is on host disk and survives. Container tier: the pod returns under the same StatefulSet name, but its workspace is container-local and **lost by the existing design** (`deploy/k8s/base/sandbox.yaml`). Affinity still returns the session to the same ID, and no reset is recorded: the harness cannot see that loss. A documented limit.                                                                                                                               |
+| Host gone for good                                           | 503 for the grace period, then the fallback within the tier, with the reset recorded (§6).                                                                                                                                                                                                                                                                                                                                                                                                   |
+| The session's tier is empty or saturated                     | 503, as today. A session **never** moves to another tier.                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Reading affinity or the detach key fails                     | The turn fails, as a failed lease read does today. It does not fall back to an unpinned selection: a Redis blip must not scatter sessions across sandboxes.                                                                                                                                                                                                                                                                                                                                  |
+| Writing affinity fails after the lease was taken             | The turn **proceeds**, with a warning. The lease is held and the sandbox is right. The next turn finds the old entry or none, and selects as in §4.                                                                                                                                                                                                                                                                                                                                          |
+| The session's tier is removed from `SH_SANDBOX_TIERS`        | The exchange returns the stored tier; nothing matches it; `SandboxPoolEmptyError`, naming the tier. The control plane does not rewrite stored tiers.                                                                                                                                                                                                                                                                                                                                         |
+| An unlabelled or mislabelled worker                          | Excluded while tiers are declared, with one log line per ID naming its ID and labels — for a missing label and for a label not in `SH_SANDBOX_TIERS` alike. An affine session waiting on it takes the grace path, not `retiered`.                                                                                                                                                                                                                                                            |
+| `SH_SANDBOX_TIERS` differs between control plane and workers | A session's tier may match no record (`SandboxPoolEmptyError`, naming the tier). Every deployment path sets both from one source, and an env-parity test guards it (§7).                                                                                                                                                                                                                                                                                                                     |
 
 **Error mapping.** `SandboxAffinityPendingError` joins `turnErrorStatus`'s NO_CAPACITY set (503) and
 stays retryable in `classifyOutcome`, beside `SandboxPoolSaturatedError` and `SandboxPoolEmptyError`.
@@ -250,10 +277,11 @@ stays retryable in `classifyOutcome`, beside `SandboxPoolSaturatedError` and `Sa
 - **Harness, unit.** A table test over `selectPoolSandbox` with fake record, lease and affinity
   stores, one case per row of §5 and per step of §4: tier filtering, unlabelled exclusion, affine
   saturated, affine absent within and past the grace, the harness-started grace clock, the
-  first-turn `SET NX` race (win, lose-and-converge, lose twice), a failed affinity write, a failed
+  first-turn `claim` race (win, lose-and-converge, lose twice), a failed affinity write, a failed
   affinity read, no tiers declared.
-- **Relay, unit.** The detach key is written on teardown only if absent, and deleted on Hello before
-  the presence put. Its failures are logged and change nothing else.
+- **Relay, unit.** The detach key is written on teardown with a plain `SET` (overwriting any earlier
+  mark), and deleted on Hello before the presence put. Its failures are logged and change nothing
+  else.
 - **Workers, Go unit.** `SANDBOX_TIER` → `Hello.labels`, the defaults, and the empty value.
 - **Control plane, unit.** Validation at creation, the stored default surviving a later default
   change, the exchange carrying the tier, an old record getting the default, discovery, the startup
