@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { NO_KUBECTL, REPO_ROOT, container, envNames, find, render } from './render.js';
+import { NO_KUBECTL, REPO_ROOT, container, envNames, envVar, find, render } from './render.js';
 
 /**
  * Every variable a VM env template names -- set (`NAME=`) or offered commented (`#NAME=`) -- must be
@@ -40,6 +40,28 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s env parity with deploy/vm/env', () => {
       (v) => !(v in NOT_ENV_ON_K8S) && !envNames(c).includes(v),
     );
     expect(missing).toEqual([]);
+  });
+
+  it('the control plane and the supervisor read the sandbox tiers from one source (P6.3 spec §7)', () => {
+    const sup = container(
+      find(render('base'), 'Deployment', 'moca-supervisor', 'moca'),
+      'supervisor',
+    );
+    const cp = container(
+      find(render('base'), 'Deployment', 'moca-control-plane', 'moca'),
+      'control-plane',
+    );
+    const supTiers = envVar(sup, 'SH_SANDBOX_TIERS');
+    const cpTiers = envVar(cp, 'SH_SANDBOX_TIERS');
+    const supDefault = envVar(sup, 'SH_SANDBOX_DEFAULT_TIER');
+    const cpDefault = envVar(cp, 'SH_SANDBOX_DEFAULT_TIER');
+
+    expect(supTiers).toBeDefined();
+    expect(cpTiers).toBeDefined();
+    expect(supTiers).toEqual(cpTiers);
+    expect(supDefault).toBeDefined();
+    expect(cpDefault).toBeDefined();
+    expect(supDefault).toEqual(cpDefault);
   });
 
   it('parses the templates it claims to (a guard against a regex that matches nothing)', () => {
