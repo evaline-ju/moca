@@ -56,10 +56,9 @@ import {
 import { requestApprovalExtension } from './request-approval-tool.js';
 import { gzipSync } from 'node:zlib';
 import { createClient } from 'redis';
-import { canonicalTar } from '@moca/config-bundle';
+import { canonicalTar, type BundleRedisLike } from '@moca/config-bundle';
 import { resolvePromotedConfig, type PromotedConfig } from './config-resolver.js';
 import { overlayConfig, buildConfigCleanupScript } from './config-overlay.js';
-import type { BundleRedisLike } from './config-store.js';
 
 /**
  * Recover a verdict from a persisted `verdict` custom session entry (written by

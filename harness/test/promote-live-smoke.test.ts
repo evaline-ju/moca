@@ -2,8 +2,7 @@ import { describe, it, expect, afterAll } from 'vitest';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createClient } from 'redis';
-import { buildBundle } from '@moca/config-bundle';
-import { putBundle, type BundleRedisLike } from '../src/config-store.js';
+import { buildBundle, putBundle, type BundleRedisLike } from '@moca/config-bundle';
 import { runLeaf } from '../src/run-leaf.js';
 
 // harness/package.json is "type": "module", so bare __dirname is undefined here; derive it the

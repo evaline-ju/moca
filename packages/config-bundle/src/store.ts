@@ -1,5 +1,6 @@
 import { gunzipSync, gzipSync } from 'node:zlib';
-import { contentDigest, untar } from '@moca/config-bundle';
+import { contentDigest } from './build.js';
+import { untar } from './tar.js';
 
 /**
  * Minimal structural Redis surface — lets unit tests inject an in-memory fake, exactly as
@@ -14,6 +15,9 @@ export interface BundleRedisLike {
 
 /** Bundles are immutable; a TTL only reclaims space for workflows nobody dispatches any more. */
 export const DEFAULT_BUNDLE_TTL_SECONDS = 60 * 60 * 24 * 30;
+
+/** Largest tar the control plane accepts; the client refuses the same bound before uploading. */
+export const MAX_BUNDLE_BYTES = 8 * 1024 * 1024;
 
 export function bundleKey(digest: string): string {
   return `config:bundle:${digest}`;

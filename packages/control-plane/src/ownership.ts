@@ -8,7 +8,7 @@ import { subjectHash } from './k8s-secret-store.js';
  * session, which is why they are Kubernetes Secrets (k8s-secret-store.ts).
  *
  * Minimal structural Redis surface so unit tests inject an in-memory fake, exactly as
- * harness/src/leaf-result-store.ts and harness/src/config-store.ts do.
+ * harness/src/leaf-result-store.ts and packages/config-bundle/src/store.ts do.
  */
 export interface CpRedisLike {
   hSet(key: string, values: Record<string, string>): Promise<unknown>;

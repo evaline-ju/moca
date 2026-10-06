@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildBundle, canonicalTar, contentDigest, untar } from '@moca/config-bundle';
+import { buildBundle, canonicalTar, contentDigest, untar } from '../src/index.js';
 import {
   bundleKey,
   putBundle,
@@ -7,8 +7,9 @@ import {
   BundleNotFoundError,
   BundleDigestMismatchError,
   DEFAULT_BUNDLE_TTL_SECONDS,
+  MAX_BUNDLE_BYTES,
   type BundleRedisLike,
-} from '../src/config-store.js';
+} from '../src/store.js';
 
 /** In-memory fake, mirroring the RedisLike pattern in leaf-result-store.ts. */
 function fakeRedis(): BundleRedisLike & {
@@ -157,5 +158,11 @@ describe('getBundle', () => {
     r.store.set(bundleKey(digestA), r.store.get(bundleKey(digestB))!);
     // Attempt to retrieve A should fail: bytes are valid but hash to B, not A
     await expect(getBundle(r, digestA)).rejects.toThrow(BundleDigestMismatchError);
+  });
+});
+
+describe('MAX_BUNDLE_BYTES', () => {
+  it('is 8 MiB, the bound the control plane and mocactl both enforce', () => {
+    expect(MAX_BUNDLE_BYTES).toBe(8 * 1024 * 1024);
   });
 });

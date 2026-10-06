@@ -5,11 +5,12 @@ import { createClient } from 'redis';
 import {
   buildBundle,
   hasErrors,
+  putBundle,
   renderPreflight,
   serializeLockfile,
   SecretScanError,
+  type BundleRedisLike,
 } from '@moca/config-bundle';
-import { putBundle, type BundleRedisLike } from './config-store.js';
 import {
   LOCKFILE_OUT,
   parsePromoteArgs,
