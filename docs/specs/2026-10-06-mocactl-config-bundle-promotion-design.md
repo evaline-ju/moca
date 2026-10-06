@@ -133,14 +133,19 @@ POST /v1/config-bundles   auth: api   sessionScoped: false   operationId: 'putCo
 
 - `POST /v1/sessions` body gains an optional `configRef`. The handler validates it with
   `assertValidDigest` (reused, not reimplemented) — a malformed value is a `400 { error:
-  'invalid_configRef' }` at creation time, before any turn is attempted.
+  'configRef_invalid' }` at creation time, before any turn is attempted. Reusing
+  `knative-server`'s existing error code verbatim (not a differently-spelled sibling) is deliberate:
+  it is the same concept — a malformed digest string — surfacing from a second call site.
 - It does **not** check the digest actually exists in Redis at this point — that would add a
   round-trip for a check the harness already performs correctly on first turn (see §3).
 - `SessionRecord` (`ownership.ts`) gains `configRef: string | null`, alongside the existing
   `credentialName`, set once at creation and immutable for the session's lifetime — the same pattern
   `credentialName` already establishes, chosen deliberately (§4 below) over letting a client swap
   bundles mid-session.
-- `createSession` and `getSession` echo `configRef` back in their response bodies.
+- `createSession` and `getSession` echo `configRef` back in their response bodies. The echo is not a
+  liveness signal: it reflects what was recorded at creation, not whether that digest still exists in
+  Redis — a session can echo a `configRef` that has since expired past the 30-day TTL, which surfaces
+  only as a `BundleNotFoundError` on the next turn (see §3), not as a change to `getSession`'s output.
 
 ### 2.5 `mocactl`: shared promote core, two entry points
 
@@ -195,8 +200,9 @@ dropped"), with a way to clear it before confirming. `create()` in `app.tsx` inc
 - **Digest mismatch at upload:** `putBundle` already re-verifies digest vs. tar content server-side;
   a mismatch is `400 digest_mismatch`. Only reachable from a buggy/tampered client, kept as a cheap
   server-side check rather than trusting the caller's claim.
-- **Malformed `configRef` at session creation:** `400 invalid_configRef`, same shape as
-  `knative-server`'s existing `configRef_invalid` for `/v1/turn`, reused at creation time too.
+- **Malformed `configRef` at session creation:** `400 configRef_invalid` — the exact same error code
+  `knative-server` already returns from `/v1/turn`, reused at creation time too, not a
+  differently-spelled sibling for the same concept.
 - **Valid digest, not found/expired (30-day TTL) at turn time:** this surfaces downstream, on the
   harness, not at session creation — the control plane does not check Redis existence when recording
   `configRef` (§2.4). The harness's existing `BundleNotFoundError` already fails the turn loudly
@@ -240,7 +246,7 @@ dropped"), with a way to clear it before confirming. `create()` in `app.tsx` inc
   with the file, behavior unchanged.
 - **control-plane:** the route table's own authz-enumeration test picks up `POST /v1/config-bundles`
   automatically; handler tests for success (`201`, both `uploaded` values), digest mismatch (`400`),
-  and `createSession`/`getSession` round-tripping `configRef` (including `invalid_configRef` and that
+  and `createSession`/`getSession` round-tripping `configRef` (including `configRef_invalid` and that
   audit records are unaffected by the new field).
 - **`mocactl`:** `promoteDirectory` unit tests against a fixture directory with a fake
   `ControlPlaneApi`; CLI exit-code tests for `mocactl promote` mirroring
