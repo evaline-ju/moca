@@ -41,6 +41,7 @@ import type { LeafUsage } from './run-leaf.js';
 import { sseExtension, type TurnStreamFrame } from './turn-stream.js';
 import { promotedLoaderOptions, type PromotedConfig } from './config-resolver.js';
 import { leaseTimings } from './lease-timings.js';
+import { attachPromotedConfig, type AttachedPromotedConfig } from './promoted-config.js';
 
 // Re-exported because they are now part of executeTurn's CONTRACT: since /turn leases from the pool,
 // every caller of executeTurn can be handed these errors and needs to distinguish them from a generic
@@ -693,6 +694,8 @@ export interface ExecuteTurnInput {
   sandbox?: TurnSandbox; // pre-leased sandbox; absent ⇒ resolve from the environment (/turn)
   /** Resolved promoted Claude Code config; absent ⇒ the loader is built exactly as before. */
   promotedConfig?: PromotedConfig;
+  /** A session's config bundle digest (ADR-0038); resolved and overlaid here unless promotedConfig is given. */
+  configRef?: string;
 }
 
 /**
@@ -752,12 +755,28 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
     }, leaseTimings(process.env).heartbeatMs);
   }
 
+  let attached: AttachedPromotedConfig | undefined;
   try {
-    return await executeTurnCore(input, acquired.sandbox, opened);
+    // After the renewal timer is armed: fetching and overlaying a multi-MB bundle can outlast a lease.
+    if (input.configRef && !input.promotedConfig) {
+      const { config: sandboxConfig, transport } = acquired.sandbox;
+      attached = await attachPromotedConfig({
+        digest: input.configRef,
+        sessionId: opened.sessionManager.getSessionId(),
+        sandbox: sandboxConfig ? { config: sandboxConfig, transport } : null,
+        redisUrl: input.config?.redisUrl,
+      });
+    }
+    return await executeTurnCore(
+      attached ? { ...input, promotedConfig: attached.promotedConfig } : input,
+      acquired.sandbox,
+      opened,
+    );
   } finally {
     // Clear first, then release: if release throws, the interval is already gone rather than
     // left running against a lease nobody holds.
     if (leaseRenewal) clearInterval(leaseRenewal);
+    await attached?.detach();
     await acquired.release().catch(() => {});
   }
 }
