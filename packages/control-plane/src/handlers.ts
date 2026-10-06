@@ -182,6 +182,7 @@ async function sessionView(rec: SessionRecord, deps: CpDeps) {
     tenant: rec.tenant,
     createdAt: rec.createdAt,
     state: rec.state,
+    configRef: rec.configRef,
     lastTurnAt: runtime.lastTurnAt ? Number(runtime.lastTurnAt) : null,
     turns: runtime.turns ? Number(runtime.turns) : 0,
   };
@@ -258,6 +259,17 @@ export const HANDLERS: Record<string, Handler> = {
       !descriptors.some((d) => d.consumer === 'inference');
     const credentialName = fallback ? '' : resolveInferenceName(descriptors, requested);
 
+    let configRef: string | null = null;
+    if (body.configRef !== undefined) {
+      if (typeof body.configRef !== 'string') {
+        throw new CpError('configRef_invalid', 'configRef must be a string');
+      }
+      try {
+        configRef = assertValidDigest(body.configRef);
+      } catch {
+        throw new CpError('configRef_invalid', 'configRef must be sha256:<64 lowercase hex>');
+      }
+    }
     const sessionId = deps.newId();
     const rec: SessionRecord = {
       sessionId,
@@ -267,6 +279,7 @@ export const HANDLERS: Record<string, Handler> = {
       state: 'active',
       poolSelector: null, // MU2's tenant-labelled partition fills this (spec §8.2)
       credentialName,
+      configRef,
       tombstone: false,
     };
     await deps.index.create(rec);

@@ -71,6 +71,7 @@ components:
             - session_not_found
             - session_mismatch
             - digest_mismatch
+            - configRef_invalid
             - credential_required
             - credential_ambiguous
             - credential_not_found
@@ -97,6 +98,8 @@ components:
         tenant: { type: string }
         createdAt: { type: integer, description: epoch ms }
         state: { type: string, enum: [active, deleting] }
+        configRef:
+          { type: [string, 'null'], description: recorded at creation; not a liveness signal }
         lastTurnAt: { type: [integer, 'null'] }
         turns: { type: integer }
     CredentialDescriptor:
@@ -294,6 +297,7 @@ paths:
                   type: object
                   properties:
                     inference: { type: string }
+                configRef: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
       responses:
         '201':
           description: created
@@ -541,6 +545,8 @@ paths:
                     { type: string, description: never absent — see endpoint_unresolved }
                   sessionId: { type: string }
                   subject: { type: string }
+                  configRef:
+                    { type: string, description: present only when the session has a config bundle }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }

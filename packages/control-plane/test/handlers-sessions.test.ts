@@ -380,3 +380,43 @@ describe('GET and DELETE /v1/sessions/{id}, POST .../token', () => {
     }
   });
 });
+
+describe('POST /v1/sessions configRef', () => {
+  const digest = 'sha256:' + 'e'.repeat(64);
+
+  it('records configRef and returns it from getSession and listSessions', async () => {
+    const d = makeDeps();
+    await seedCredential(d);
+    await HANDLERS.createSession!(ctx({ principal: alice, body: { configRef: digest } }), d);
+    expect((await d.index.get('sid-fixed'))!.configRef).toBe(digest);
+    const got = await HANDLERS.getSession!(
+      ctx({ principal: alice, params: { id: 'sid-fixed' } }),
+      d,
+    );
+    expect((got.body as { configRef: string | null }).configRef).toBe(digest);
+    const list = await HANDLERS.listSessions!(ctx({ principal: alice }), d);
+    expect((list.body as { sessions: { configRef: string | null }[] }).sessions[0]!.configRef).toBe(
+      digest,
+    );
+  });
+
+  it('records null when no configRef is given', async () => {
+    const d = makeDeps();
+    await seedCredential(d);
+    await HANDLERS.createSession!(ctx({ principal: alice, body: {} }), d);
+    expect((await d.index.get('sid-fixed'))!.configRef).toBeNull();
+  });
+
+  it('refuses a malformed configRef with configRef_invalid and creates nothing', async () => {
+    const d = makeDeps();
+    await seedCredential(d);
+    for (const configRef of ['', 'sha256:short', 42]) {
+      expect(
+        await codeOf(() =>
+          HANDLERS.createSession!(ctx({ principal: alice, body: { configRef } }), d),
+        ),
+      ).toBe('configRef_invalid');
+    }
+    expect(await d.index.get('sid-fixed')).toBeNull();
+  });
+});

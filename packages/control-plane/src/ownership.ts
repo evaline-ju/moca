@@ -44,6 +44,8 @@ export interface SessionRecord {
   poolSelector: string | null;
   /** Which credential this session's turns run on -- chosen once, at creation (plan gap #4). */
   credentialName: string;
+  /** The config bundle this session's turns run with -- chosen once, at creation (ADR-0038). */
+  configRef: string | null;
   tombstone: boolean;
 }
 
@@ -111,6 +113,7 @@ export class OwnershipIndex {
         state: rec.state,
         poolSelector: rec.poolSelector ?? '',
         credentialName: rec.credentialName,
+        configRef: rec.configRef ?? '',
         tombstone: rec.tombstone ? '1' : '0',
       }),
     );
@@ -132,6 +135,7 @@ export class OwnershipIndex {
       state: h.state === 'deleting' ? 'deleting' : 'active',
       poolSelector: h.poolSelector ? h.poolSelector : null,
       credentialName: h.credentialName ?? '',
+      configRef: h.configRef ? h.configRef : null,
       tombstone: h.tombstone === '1',
     };
   }

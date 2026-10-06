@@ -32,6 +32,8 @@ export interface ExchangeResponse {
    * the binding to moca-egress instead.
    */
   authHeader?: Exclude<InferenceAuthHeader, 'authorization'>;
+  /** The session's config bundle digest (ADR-0038). Absent when the session has none. */
+  configRef?: string;
 }
 
 /**
@@ -261,5 +263,6 @@ export async function exchangeCredential(
     // Direct mode only: in placeholder mode the harness sends `Bearer <placeholder>` as it always did,
     // and the injector decides the upstream header.
     ...(mode === 'direct' && authHeader === 'x-api-key' ? { authHeader } : {}),
+    ...(rec.configRef ? { configRef: rec.configRef } : {}),
   };
 }

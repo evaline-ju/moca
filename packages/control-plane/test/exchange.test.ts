@@ -431,3 +431,23 @@ describe('spec §9.2: the credential routes survive a Redis outage, the session 
     ).toBe('redis_unavailable');
   });
 });
+
+describe('exchange carries the session configRef', () => {
+  it('includes configRef only when the session has one', async () => {
+    const digest = 'sha256:' + 'f'.repeat(64);
+    const d = makeDeps();
+    await seedCredential(d);
+    const withRef = await HANDLERS.createSession!(
+      ctx({ principal: alice, body: { configRef: digest } }),
+      { ...d, newId: () => 'with-ref' },
+    );
+    const without = await HANDLERS.createSession!(ctx({ principal: alice, body: {} }), {
+      ...d,
+      newId: () => 'no-ref',
+    });
+    const a = await exchangeCredential((withRef.body as { token: string }).token, d);
+    const b = await exchangeCredential((without.body as { token: string }).token, d);
+    expect(a.configRef).toBe(digest);
+    expect('configRef' in b).toBe(false);
+  });
+});
