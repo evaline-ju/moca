@@ -164,7 +164,9 @@ describe.skipIf(NO_KUBECTL)(
 describe.skipIf(NO_KUBECTL)(
   'the generated ocp-single overlay with Routes (setup.sh write_overlay)',
   () => {
-    const DIR = resolve(K8S_DIR, '.generated/test-ocp-single-routes');
+    // Not overlay-ocp-single-routes.test.ts's .generated/test-ocp-single-routes: vitest runs the two
+    // files in parallel, and each one's afterAll removes its directory under the other's kustomize.
+    const DIR = resolve(K8S_DIR, '.generated/test-generated-ocp-single-routes');
     const DOMAIN = 'example.test';
     const NS = 'moca-tenant-1';
     let objs: K8sObject[] = [];
