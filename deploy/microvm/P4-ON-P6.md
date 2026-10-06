@@ -27,7 +27,20 @@ fresh workspace, and the turn says so (`workspace reset: …`). Design:
 `docs/specs/2026-10-04-p6-on-kubernetes-slice3-design.md`.
 
 Every worker on a tiered host must be P6.3 or later: an older worker advertises no tier and is
-excluded, with a log line naming it.
+excluded, with a log line naming it. On a host with container sandboxes, `setup-microvm.sh` checks
+this before it writes anything: each **running** `sh-sandbox-*` container's presence record in Redis
+must carry `moca.dev/tier=container`. It refuses a container whose record has no tier (a pre-P6.3
+image) or another one, and one that is running but not attached, whose tier it cannot read. It also
+refuses when Redis cannot be reached. A **stopped** container has no record to read: the run warns,
+naming it, and goes on, so that container must already be P6.3 or later. `setup-vm.sh` never pulls:
+its `podman run --replace` reuses the image the host already has, so an older host keeps its old
+image. Upgrade the containers first, with the image P6 was installed with:
+
+```bash
+sudo podman pull ghcr.io/rossoctl/moca-remote-worker:latest  # or your SANDBOX_IMAGE
+cd /opt/serverless-harness && sudo ./deploy/vm/setup-vm.sh     # --replace recreates them
+sudo deploy/microvm/setup-microvm.sh                           # checks the tiers, then tiers
+```
 
 A container counts while it **exists**, running or stopped: `setup-vm.sh` runs them with
 `--restart=always`, and `podman-restart.service` brings a stopped one back at boot. Re-run
@@ -164,7 +177,7 @@ refused. It also checks that `sh-relay.service` is installed and that the golden
 | `sh-relay.service.d/50-moca-microvm.conf`                                                           | `EnvironmentFile=` the relay file above                                                                                                                                                                                                        |
 | `microvm-worker.service.d/50-moca-p6.conf`                                                          | `EnvironmentFile=` the worker file; `After=`/`Wants=sh-relay.service`                                                                                                                                                                          |
 | `microvm-worker.service.d/60-moca-memory.conf`                                                      | only with `MICROVM_MAX_COMMITTED_MB`: the budget, plus `AssertMemory=` reset and re-asserted at 90% of it. The reset clears **every** assertion, so the drop-in also re-states the shipped unit's others, `AssertPathExists=/dev/kvm` included |
-| `/etc/serverless-harness/microvm-tiers.env` (0644)                                                  | only on a host that also has container sandboxes: `SH_SANDBOX_TIERS=container,microvm`, `SH_SANDBOX_DEFAULT_TIER` (`container`, or the run's `SH_SANDBOX_DEFAULT_TIER`). Removed on a P4-only host                                             |
+| `/etc/serverless-harness/microvm-tiers.env` (0644)                                                  | only on a host that also has container sandboxes: `SH_SANDBOX_TIERS=container,microvm`, `SH_SANDBOX_DEFAULT_TIER` (the given value, else the stored one, else `container`). Removed on a P4-only host                                          |
 | `sh-supervisor.service.d/50-microvm-tiers.conf`, `sh-control-plane.service.d/50-microvm-tiers.conf` | with it: `EnvironmentFile=` the tiers file, ONE file for both units so they cannot disagree                                                                                                                                                    |
 
 **The token:**
@@ -252,6 +265,10 @@ S=$(node -pe 'JSON.parse(require("fs").readFileSync("turn1.json","utf8")).sessio
 curl -sS -X POST http://127.0.0.1:8080/turn -H 'content-type: application/json' \
   -d "{\"sessionId\":\"$S\",\"prompt\":\"Show me git log --oneline and the contents of notes.txt.\"}"
 ```
+
+On a tiered host, an unauthenticated `/turn` like these runs in the default tier, `container` unless
+`SH_SANDBOX_DEFAULT_TIER=microvm`, so the microvm-worker journal below shows nothing. Use
+`p4-turn-smoke.sh --auth` instead: it creates its sessions with `sandboxTier=microvm` (below).
 
 **The evidence:** one journal line per Exec. It names the session's workspace and the VM that ran
 it, never the command:

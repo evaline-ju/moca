@@ -14,6 +14,9 @@
 # §7) is made tiered rather than refused: when any sh-sandbox-* container exists, running or stopped,
 # this script writes microvm-tiers.env and drop-ins that load it into sh-supervisor and
 # sh-control-plane, so each session stays in the tier it was created in. A P4-only host stays untiered.
+# Before it writes anything, every RUNNING container sandbox must advertise moca.dev/tier=container
+# in its presence record (a pre-P6.3 image advertises none, and a tiered host would exclude it); a
+# stopped one cannot be checked and is warned about.
 #
 # Usage: sudo ./deploy/microvm/setup-microvm.sh [--remote BUNDLE_DIR]      (re-running changes nothing)
 #
@@ -181,6 +184,43 @@ preflight() {
   # P6.3: a host with both tiers is TIERED rather than refused -- each session stays in the tier it
   # was created in (spec §7; deploy/vm/env/supervisor.env.example, "Sandbox tiers"). install_tiers acts on it.
   [[ -z "${attached// /}" ]] || MIXED=1
+  ((MIXED == 0)) || check_container_tiers "$attached"
+}
+
+# check_container_tiers "<sh-sandbox-* names>": before a host is tiered, every RUNNING container
+# sandbox must advertise moca.dev/tier=container. setup-vm.sh never pulls (`podman run --replace` of
+# the image it already has), so an older host keeps a pre-P6.3 image, whose worker advertises no
+# tier; the tiered harness excludes it, and every container-tier session -- the default tier -- then
+# fails with "no attached sandbox in sandbox tier 'container'". The label is read from the presence
+# record the relay mirrors from the worker's Hello (sh:sandbox:records, keyed by sandbox id), the
+# way start_worker and verify_attached reach Redis. The id is the container's name: setup-vm.sh's
+# start_sandboxes runs `--name sh-sandbox-$i -e SANDBOX_ID=sh-sandbox-$i`. A STOPPED container has
+# no record to read and is only warned about. Nothing is guessed: an unreachable Redis is refused.
+check_container_tiers() {
+  local running name rec tier img bad='' first_bad='' unattached=''
+  running=" $(podman ps --format '{{.Names}}' --filter 'name=^sh-sandbox-' | tr '\n' ' ') "
+  for name in $1; do
+    [[ "$running" == *" $name "* ]] ||
+      log "WARNING: $name is not running, so its tier cannot be checked; it must be P6.3 or later"
+  done
+  [[ -n "${running// /}" ]] || return 0
+  [[ "$(podman exec sh-redis redis-cli PING 2>/dev/null)" == PONG ]] ||
+    die "cannot reach Redis (podman exec sh-redis redis-cli PING) to check the container sandboxes' tier before tiering this host; start sh-redis (deploy/vm/setup-vm.sh) and re-run. Nothing was written"
+  for name in $running; do
+    rec="$(podman exec sh-redis redis-cli HGET sh:sandbox:records "$name")" ||
+      die "cannot reach Redis to read $name's presence record; start sh-redis (deploy/vm/setup-vm.sh) and re-run. Nothing was written"
+    if [[ -z "$rec" ]]; then unattached+=" $name"; continue; fi
+    tier="$(printf '%s' "$rec" | sed -n 's/.*"moca\.dev\/tier":"\([^"]*\)".*/\1/p')"
+    [[ "$tier" == container ]] || { bad+=" $name (tier '${tier:-none}')"; first_bad="${first_bad:-$name}"; }
+  done
+  if [[ -n "$bad" ]]; then
+    # The image the container runs is the one setup-vm.sh was given (SANDBOX_IMAGE, or its default).
+    img="$(podman inspect --format '{{.ImageName}}' "$first_bad" 2>/dev/null)" || img=''
+    img="${img:-${SANDBOX_IMAGE:-ghcr.io/rossoctl/moca-remote-worker:latest}}"
+    die "container sandboxes not advertising moca.dev/tier=container:$bad. A tiered host excludes them, and every container-tier session would fail; no tier at all means a pre-P6.3 image. setup-vm.sh never pulls, so: podman pull $img, then re-run deploy/vm/setup-vm.sh (its podman run --replace recreates the containers on the new image), then re-run this script. Nothing was written"
+  fi
+  [[ -z "$unattached" ]] ||
+    die "${unattached# } is running but not attached to the relay (no record in sh:sandbox:records), so its tier cannot be checked; see podman logs and journalctl -u sh-relay, then re-run. Nothing was written"
 }
 
 # install_if_changed <src> <dst> <mode>: copy only when the content differs, recording dst in CHANGED.
@@ -302,12 +342,15 @@ install_tiers() {
   local sup="$SH_UNIT_DIR/sh-supervisor.service.d/$TIERS_DROPIN"
   local cp="$SH_UNIT_DIR/sh-control-plane.service.d/$TIERS_DROPIN"
   if ((MIXED == 0)); then
-    remove_if_present "$env"; remove_if_present "$sup"; remove_if_present "$cp"
+    # The drop-ins first, then the env file they load: never a unit pointing at a file that is gone.
+    remove_if_present "$sup"; remove_if_present "$cp"; remove_if_present "$env"
     return 0
   fi
   log "two sandbox tiers on this host (container, microvm; default $def): each session stays in the tier it was created in"
   stage="$(mktemp -d)"
   printf 'SH_SANDBOX_TIERS=container,microvm\nSH_SANDBOX_DEFAULT_TIER=%s\n' "$def" >"$stage/tiers.env"
+  # `EnvironmentFile=` WITHOUT systemd's `-` prefix, on purpose: a tiers file deleted by hand makes
+  # both units fail to start, loudly, rather than run untiered on a host that has both tiers.
   printf '[Service]\nEnvironmentFile=%s\n' "$env" >"$stage/tiers.conf"
   install_if_changed "$stage/tiers.env" "$env" 0644
   install_if_changed "$stage/tiers.conf" "$sup" 0644

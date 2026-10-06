@@ -32,7 +32,23 @@ case "$1" in
   ps) [ -n "${MOCK_PODMAN_PS:-}" ] && printf '%s\n' $MOCK_PODMAN_PS
       # Stopped containers are listed only with -a, as podman does.
       [[ " $* " == *" -a "* && -n "${MOCK_PODMAN_PS_STOPPED:-}" ]] && printf '%s\n' $MOCK_PODMAN_PS_STOPPED ;;
-  exec) echo "${MOCK_HEXISTS:-1}" ;; # redis-cli HEXISTS sh:sandbox:records <id>
+  # exec sh-redis redis-cli <cmd> ...: MOCK_REDIS_DOWN=1 is a Redis that cannot be reached. HGET
+  # answers a presence record per MOCK_RECORDS ("<id>=<tier> ..."; "<id>=" is a record with no tier
+  # label, as a pre-P6.3 worker writes); an id not listed has none (not attached), an empty reply.
+  exec)
+    if [ -n "${MOCK_REDIS_DOWN:-}" ]; then echo 'Could not connect to Redis at 127.0.0.1:6379: Connection refused' >&2; exit 1; fi
+    case "$4" in
+      PING) echo PONG ;;
+      HGET)
+        for r in ${MOCK_RECORDS:-}; do
+          [ "${r%%=*}" = "$6" ] || continue
+          if [ -n "${r#*=}" ]; then labels="{\"moca.dev/tier\":\"${r#*=}\"}"; else labels='{}'; fi
+          printf '{"sandboxId":"%s","labels":%s,"capabilities":["bash"],"transport":"grpc"}\n' "$6" "$labels"
+        done ;;
+      HDEL) echo 0 ;;
+      *) echo "${MOCK_HEXISTS:-1}" ;; # HEXISTS sh:sandbox:records <id>
+    esac ;;
+  inspect) echo "${MOCK_IMAGE:-ghcr.io/rossoctl/moca-remote-worker:latest}" ;; # --format '{{.ImageName}}'
 esac
 exit 0
 MOCK
@@ -276,7 +292,7 @@ tiers_files() { echo "$([ -e "$TE" ] && echo env)$([ -e "$TS" ] && echo +sup)$([
 for case in containers stopped-containers; do
   reset_host
   case "$case" in
-    containers) export MOCK_PODMAN_PS="sh-sandbox-0 sh-sandbox-1" ;;
+    containers) export MOCK_PODMAN_PS="sh-sandbox-0 sh-sandbox-1" MOCK_RECORDS="sh-sandbox-0=container sh-sandbox-1=container" ;;
     # I3: a stopped --restart=always container comes back at boot (podman-restart.service), so
     # it counts: the host is mixed again after the next boot.
     stopped-containers) export MOCK_PODMAN_PS_STOPPED="sh-sandbox-0" ;;
@@ -294,10 +310,62 @@ for case in containers stopped-containers; do
   check "mixed host ($case): logged" "$(grep -c 'two sandbox tiers on this host' "$TMP/run.log")" "1"
   check "mixed host ($case): supervisor.env and control-plane.env never written" \
     "$(find "$TMP/etc" -name 'supervisor.env' -o -name 'control-plane.env' | wc -l | tr -d ' ')" "0"
-  unset MOCK_PODMAN_PS MOCK_PODMAN_PS_STOPPED
+  unset MOCK_PODMAN_PS MOCK_PODMAN_PS_STOPPED MOCK_RECORDS
 done
+check "mixed host (stopped-containers): warned that its tier cannot be checked" \
+  "$(grep -c 'sh-sandbox-0 is not running, so its tier cannot be checked; it must be P6.3 or later' "$TMP/run.log")" "1"
+check "mixed host (stopped-containers): Redis not asked about a stopped container" "$(grep -c 'HGET' "$MOCK_LOG")" "0"
 
-export MOCK_PODMAN_PS="sh-sandbox-0 sh-sandbox-1" # still mixed, from the containers case's install
+echo "== a mixed host whose running containers are not P6.3 is refused, writing nothing (I1)"
+# setup-vm.sh never pulls (podman run --replace), so an old host keeps its old image: its containers
+# advertise no moca.dev/tier, the tiered harness excludes them, and every container session fails.
+for case in unlabelled other-tier not-attached redis-down; do
+  reset_host
+  export MOCK_PODMAN_PS="sh-sandbox-0 sh-sandbox-1"
+  case "$case" in
+    unlabelled) export MOCK_RECORDS="sh-sandbox-0=container sh-sandbox-1=" ;;
+    other-tier) export MOCK_RECORDS="sh-sandbox-0=container sh-sandbox-1=microvm" ;;
+    not-attached) export MOCK_RECORDS="sh-sandbox-0=container" ;;
+    redis-down) export MOCK_REDIS_DOWN=1 ;;
+  esac
+  check "$case: exit 1" "$(run)" "1"
+  check "$case: nothing written" "$(find "$TMP/etc" "$TMP/units" "$TMP/usrbin" -name '*microvm*' | wc -l | tr -d ' ')" "0"
+  check "$case: no systemctl" "$(grep -c '^systemctl' "$MOCK_LOG")" "0"
+  case "$case" in
+    unlabelled | other-tier)
+      check "$case: names the container" "$(grep -c 'sh-sandbox-1' "$TMP/run.log")" "1"
+      check "$case: names the pull of its image" \
+        "$(grep -c 'podman pull ghcr.io/rossoctl/moca-remote-worker:latest' "$TMP/run.log")" "1"
+      check "$case: then setup-vm.sh, whose --replace recreates the containers" \
+        "$(grep -c 'deploy/vm/setup-vm.sh.*--replace' "$TMP/run.log")" "1"
+      check "$case: the image is read from that container" \
+        "$(grep -c '^podman inspect --format {{.ImageName}} sh-sandbox-1$' "$MOCK_LOG")" "1" ;;
+    not-attached)
+      check "$case: says it is not attached, so its tier cannot be checked" \
+        "$(grep -c 'sh-sandbox-1 is running but not attached.*tier cannot be checked' "$TMP/run.log")" "1" ;;
+    redis-down)
+      check "$case: says Redis cannot be reached" "$(grep -c 'cannot reach Redis' "$TMP/run.log")" "1" ;;
+  esac
+  unset MOCK_PODMAN_PS MOCK_RECORDS MOCK_REDIS_DOWN
+done
+reset_host
+got="$(MOCK_PODMAN_PS="sh-sandbox-0" MOCK_RECORDS="sh-sandbox-0=" MOCK_IMAGE=registry.example/moca-worker:v6.2 run)"
+check "an image other than the default: exit 1, and the pull names the image the container runs" \
+  "$got $(grep -c 'podman pull registry.example/moca-worker:v6.2,' "$TMP/run.log")" "1 1"
+reset_host
+export MOCK_PODMAN_PS="sh-sandbox-0" MOCK_PODMAN_PS_STOPPED="sh-sandbox-1" MOCK_RECORDS="sh-sandbox-0=container"
+check "one running (labelled), one stopped: exit 0, tiered" "$(run)" "0"
+check "one running (labelled), one stopped: tiers env" "$(val SH_SANDBOX_TIERS "$TE")" "container,microvm"
+check "one running (labelled), one stopped: the stopped one is named in a warning" \
+  "$(grep -c 'sh-sandbox-1 is not running, so its tier cannot be checked' "$TMP/run.log")" "1"
+check "one running (labelled), one stopped: only the running one is looked up" \
+  "$(grep -c 'HGET sh:sandbox:records sh-sandbox-0$' "$MOCK_LOG") $(grep -c 'HGET sh:sandbox:records sh-sandbox-1' "$MOCK_LOG")" "1 0"
+unset MOCK_PODMAN_PS MOCK_PODMAN_PS_STOPPED MOCK_RECORDS
+reset_host
+check "a P4-only host never asks Redis about containers: exit 0" "$(run)" "0"
+check "a P4-only host never asks Redis about containers: no HGET, no PING" "$(grep -cE 'HGET|PING' "$MOCK_LOG")" "0"
+
+export MOCK_PODMAN_PS="sh-sandbox-0 sh-sandbox-1" MOCK_RECORDS="sh-sandbox-0=container sh-sandbox-1=container" # mixed
 reset_host; run >/dev/null
 before="$(hash_tree)"; : >"$MOCK_LOG"
 check "mixed re-run: exit 0" "$(run)" "0"
@@ -327,9 +395,13 @@ check "SH_SANDBOX_DEFAULT_TIER= (set, empty): cleared to container" "$(val SH_SA
 check "SH_SANDBOX_DEFAULT_TIER= (set, empty): both units try-restarted" \
   "$(grep -cE '^systemctl try-restart sh-(supervisor|control-plane)\.service$' "$MOCK_LOG")" "2"
 
-unset MOCK_PODMAN_PS; : >"$MOCK_LOG"
+unset MOCK_PODMAN_PS MOCK_RECORDS; : >"$MOCK_LOG"
 check "back to P4-only: exit 0" "$(run)" "0"
 check "back to P4-only: the tiers env and both drop-ins are gone" "$(tiers_files)" ""
+# M4: the drop-ins go first, so no unit is ever left loading an env file that is already gone.
+check "back to P4-only: both drop-ins removed before the env file they load" \
+  "$(grep '^==> changed: ' "$TMP/run.log" | tr ' ' '\n' | grep -E 'microvm-tiers\.(env|conf)$' | sed 's|.*/||' | tr '\n' ' ')" \
+  "50-microvm-tiers.conf 50-microvm-tiers.conf microvm-tiers.env "
 check "back to P4-only: daemon-reload (the drop-ins went)" "$(grep -c '^systemctl daemon-reload$' "$MOCK_LOG")" "1"
 check "back to P4-only: supervisor try-restarted" "$(grep -c '^systemctl try-restart sh-supervisor.service$' "$MOCK_LOG")" "1"
 check "back to P4-only: control plane try-restarted" "$(grep -c '^systemctl try-restart sh-control-plane.service$' "$MOCK_LOG")" "1"
@@ -472,17 +544,17 @@ check "local: attach verified against the local presence records" "$(grep -c 'HE
 check "local: no token on any argv" "$(grep -cE "$BTOK|$ltok" "$MOCK_LOG")" "0"
 
 echo "== a P6 installed before the control plane (#366): try-restart only the units that exist"
-reset_host; rm -f "$TMP/units/sh-control-plane.service"; export MOCK_PODMAN_PS="sh-sandbox-0"
+reset_host; rm -f "$TMP/units/sh-control-plane.service"; export MOCK_PODMAN_PS="sh-sandbox-0" MOCK_RECORDS="sh-sandbox-0=container"
 check "no control-plane unit: exit 0" "$(run)" "0"
 check "no control-plane unit: the supervisor try-restarted" "$(grep -c '^systemctl try-restart sh-supervisor.service$' "$MOCK_LOG")" "1"
 check "no control-plane unit: no try-restart of the missing unit" "$(grep -c 'try-restart sh-control-plane' "$MOCK_LOG")" "0"
 check "no control-plane unit: the worker started" "$(grep -c '^systemctl start microvm-worker.service$' "$MOCK_LOG")" "1"
 check "no control-plane unit: its drop-in is still written, for a later setup-vm.sh install" \
   "$(grep -c "^EnvironmentFile=$TE$" "$TC")" "1"
-unset MOCK_PODMAN_PS
+unset MOCK_PODMAN_PS MOCK_RECORDS
 
 echo "== a bad default stored in microvm-tiers.env is refused, writing nothing"
-reset_host; export MOCK_PODMAN_PS="sh-sandbox-0"
+reset_host; export MOCK_PODMAN_PS="sh-sandbox-0" MOCK_RECORDS="sh-sandbox-0=container"
 run >/dev/null
 sed -i.bak 's/^SH_SANDBOX_DEFAULT_TIER=.*/SH_SANDBOX_DEFAULT_TIER=gpu/' "$TE" && rm -f "$TE.bak"
 before="$(hash_tree)"; : >"$MOCK_LOG"
@@ -494,7 +566,7 @@ check "stored garbage: the refusal names the value and the file" \
 : >"$MOCK_LOG"
 check "stored garbage, an explicit value overrides it: exit 0" "$(SH_SANDBOX_DEFAULT_TIER=microvm run)" "0"
 check "stored garbage, an explicit value overrides it: written" "$(val SH_SANDBOX_DEFAULT_TIER "$TE")" "microvm"
-unset MOCK_PODMAN_PS
+unset MOCK_PODMAN_PS MOCK_RECORDS
 
 echo "== --remote leaves the sandbox tiers to the cluster's setup.sh (P6.3, spec §7)"
 reset_remote_host; mkbundle "$B"
@@ -506,13 +578,13 @@ check "remote, bad SH_SANDBOX_DEFAULT_TIER: exit 1 (preflight checks it on both 
   "$(SH_SANDBOX_DEFAULT_TIER=gpu runr "$B")" "1"
 check "remote, bad SH_SANDBOX_DEFAULT_TIER: no microvm env files" "$(find "$TMP/etc" -name '*microvm*' | wc -l | tr -d ' ')" "0"
 check "remote, bad SH_SANDBOX_DEFAULT_TIER: no systemctl" "$(grep -c '^systemctl' "$MOCK_LOG")" "0"
-reset_host; export MOCK_PODMAN_PS="sh-sandbox-0"
+reset_host; export MOCK_PODMAN_PS="sh-sandbox-0" MOCK_RECORDS="sh-sandbox-0=container"
 check "a mixed local install: exit 0" "$(run)" "0"
 tiers_before="$(cksum "$TE" "$TS" "$TC")"; : >"$MOCK_LOG"
 check "then --remote: exit 0" "$(runr "$B")" "0"
 check "then --remote: the mixed run's tiers files are left in place, unchanged" "$(cksum "$TE" "$TS" "$TC" 2>&1)" "$tiers_before"
 check "then --remote: neither unit try-restarted" "$(grep -cE 'restart sh-(supervisor|control-plane)' "$MOCK_LOG")" "0"
-unset MOCK_PODMAN_PS
+unset MOCK_PODMAN_PS MOCK_RECORDS
 
 if [ "$fails" -eq 0 ]; then echo "PASS"; else echo "FAIL ($fails)"; fi
 exit "$fails"
