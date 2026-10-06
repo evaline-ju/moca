@@ -81,6 +81,7 @@ export function SessionsOverlay({
         const detail = [
           formatRelative(s.lastTurnAt ?? s.createdAt, now()),
           `${s.turns} turn${s.turns === 1 ? '' : 's'}`,
+          s.sandboxTier ? sanitizeRemote(s.sandboxTier) : undefined,
           transcripts?.has(s.sessionId) ? 'local history' : undefined,
           s.sessionId === currentSessionId ? 'current' : undefined,
         ]

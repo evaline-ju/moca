@@ -99,6 +99,13 @@ components:
         state: { type: string, enum: [active, deleting] }
         lastTurnAt: { type: [integer, 'null'] }
         turns: { type: integer }
+        sandboxTier:
+          type: [string, 'null']
+          description: |
+            the sandbox tier the session runs in (P6.3): the tier recorded at creation; for a
+            session that recorded none (created before P6.3, or while the deployment declared no
+            tiers), today's deployment default, which the data plane applies; null only when the
+            deployment declares no tiers
     CredentialDescriptor:
       type: object
       required: [name, kind, consumer, destination, binding]
@@ -177,6 +184,7 @@ paths:
         URL is the only address a user has to know. `harnessUrl` is the harness base URL as a
         client reaches it, set by the operator with SH_PUBLIC_HARNESS_URL. It is `null` when the
         deployment advertises none; a 404 means a control plane that predates this route.
+        `sandboxTiers` (P6.3) is always present; a control plane that predates P6.3 omits it.
       security: []
       responses:
         '200':
@@ -185,11 +193,20 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [harnessUrl]
+                required: [harnessUrl, sandboxTiers]
                 properties:
                   harnessUrl:
                     type: [string, 'null']
                     description: absolute http(s) URL, no trailing slash
+                  sandboxTiers:
+                    type: [object, 'null']
+                    description: |
+                      the tiers a session may ask for at creation (SH_SANDBOX_TIERS) and the
+                      default; null when none are declared
+                    required: [names, default]
+                    properties:
+                      names: { type: array, items: { type: string } }
+                      default: { type: string }
   /v1/auth/device:
     post:
       operationId: startDeviceAuth
@@ -287,6 +304,10 @@ paths:
         Resolves the inference credential AT CREATION and records the choice: a missing key must fail
         here, not three turns in (spec §6.4). Returns `credential_required` when the subject has none
         and `credential_ambiguous` when it has several and named none -- never a silent pick.
+
+        `sandbox.tier` must be one of the tiers `/v1/discovery` advertises; omitted, the deployment
+        default is recorded. A 400 `invalid_request` names the declared tiers. `sandbox`, when
+        present, must be an object; any tier is a 400 on a deployment that declares none.
       security: [{ sessionToken: [] }]
       requestBody:
         required: false
@@ -299,6 +320,10 @@ paths:
                   type: object
                   properties:
                     inference: { type: string }
+                sandbox:
+                  type: object
+                  properties:
+                    tier: { type: string }
       responses:
         '201':
           description: created
@@ -393,11 +418,39 @@ paths:
                 type: object
                 required: [session, harness, sandbox]
                 properties:
-                  session: { type: object }
+                  session:
+                    type: object
+                    required: [id, state, createdAt, lastTurnAt, turns, sandboxTier]
+                    properties:
+                      id: { type: string }
+                      state: { type: string, enum: [active, deleting] }
+                      createdAt: { type: integer, description: epoch ms }
+                      lastTurnAt: { type: [integer, 'null'], description: epoch ms }
+                      turns: { type: integer }
+                      sandboxTier:
+                        type: [string, 'null']
+                        description: |
+                          the sandbox tier the session runs in (P6.3), by the same rule as
+                          Session.sandboxTier; from the control plane's own record, never from the
+                          self-reported runtime hash
                   harness: { type: object }
                   sandbox: { type: object }
                   lease: { type: [object, 'null'] }
                   queue: { type: [object, 'null'] }
+                  placement:
+                    type: [object, 'null']
+                    description: where the last leased turn ran; null until one has
+                    required: [sandboxId, tier, workspaceReset]
+                    properties:
+                      sandboxId: { type: string }
+                      tier: { type: [string, 'null'] }
+                      workspaceReset:
+                        type: [object, 'null']
+                        description: when, and from which sandbox, the session last lost its workspace
+                        required: [at, from]
+                        properties:
+                          at: { type: number, description: epoch ms }
+                          from: { type: string, description: the sandbox the session left }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
   /v1/sessions/{id}/token:
@@ -515,6 +568,12 @@ paths:
                     { type: string, description: never absent — see endpoint_unresolved }
                   sessionId: { type: string }
                   subject: { type: string }
+                  sandboxTier:
+                    type: string
+                    description: |
+                      the tier the session's turn runs in (P6.3): the recorded tier, or today's
+                      default for a session that recorded none; absent only when the deployment
+                      declares no tiers
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }

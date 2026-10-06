@@ -114,6 +114,21 @@ describe('configFromEnv', () => {
       );
     }
   });
+
+  it('reads SH_SANDBOX_TIERS, and refuses to boot on a tier list it cannot serve', () => {
+    const base = baseEnv;
+    expect(configFromEnv(base).sandboxTiers).toBeNull();
+    expect(
+      configFromEnv({
+        ...base,
+        SH_SANDBOX_TIERS: 'container,microvm',
+        SH_SANDBOX_DEFAULT_TIER: 'microvm',
+      }).sandboxTiers,
+    ).toEqual({ names: ['container', 'microvm'], default: 'microvm' });
+    expect(() => configFromEnv({ ...base, SH_SANDBOX_TIERS: 'container,microvm' })).toThrow(
+      'SH_SANDBOX_DEFAULT_TIER is required',
+    );
+  });
 });
 
 describe('verifyKeysFromEnv', () => {

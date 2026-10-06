@@ -222,6 +222,56 @@ describe('the one rule /turn enforces', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.url).toBe('http://cp.default.svc:8080/internal/credentials');
   });
+
+  it('carries the session tier from the exchange, and omits it when there is none (P6.3)', async () => {
+    const withTier = deps({
+      fetchImpl: fakeExchange({
+        status: 200,
+        body: {
+          mode: 'direct',
+          anthropicAuthToken: 'sk-alice', // notsecret
+          anthropicBaseUrl: 'https://litellm.internal/v1',
+          sessionId: 'sid-1',
+          subject: 'github:1234',
+          sandboxTier: 'microvm',
+        },
+      }).fetchImpl,
+    });
+    const auth = await resolveTurnAuth(
+      { authorization: `Bearer ${sessionToken()}` },
+      { sessionId: 'sid-1' },
+      withTier,
+    );
+    expect(auth?.sandboxTier).toBe('microvm');
+    const plain = await resolveTurnAuth(
+      { authorization: `Bearer ${sessionToken()}` },
+      { sessionId: 'sid-1' },
+      deps(),
+    );
+    expect(plain).not.toHaveProperty('sandboxTier');
+  });
+
+  it('ignores a non-string tier rather than trusting its shape', async () => {
+    const odd = deps({
+      fetchImpl: fakeExchange({
+        status: 200,
+        body: {
+          mode: 'direct',
+          anthropicAuthToken: 'sk-alice', // notsecret
+          anthropicBaseUrl: 'https://litellm.internal/v1',
+          sessionId: 'sid-1',
+          subject: 'github:1234',
+          sandboxTier: 7,
+        },
+      }).fetchImpl,
+    });
+    const auth = await resolveTurnAuth(
+      { authorization: `Bearer ${sessionToken()}` },
+      { sessionId: 'sid-1' },
+      odd,
+    );
+    expect(auth).not.toHaveProperty('sandboxTier');
+  });
 });
 
 describe('authorizeRunRead (MI1 R7)', () => {
@@ -623,9 +673,11 @@ describe('runtimeFieldsForTurn', () => {
       workspaceResetFrom: 'm-0',
     });
     expect(Number(end.workspaceResetAt)).toBeGreaterThan(0);
+    // An untiered turn still writes the tier, as '': the runtime hash write merges, so leaving it
+    // out would keep a previous turn's tier beside this turn's sandboxId.
     const plain = runtimeFieldsForTurn({}, 'end', { id: 'c-0', tier: '' });
     expect(plain.sandboxId).toBe('c-0');
-    expect(plain.sandboxTier).toBeUndefined();
+    expect(plain.sandboxTier).toBe('');
     expect(plain.workspaceResetFrom).toBeUndefined();
   });
 });

@@ -548,11 +548,14 @@ interface SessionOptionField<T = unknown> {
 }
 ```
 
-Today the list has one field, `inferenceCredential`, whose `toRequest` sets
-`credentials.inference`. The New Session form, presets, and the `run --option` flags (§7.5) are all
-generated from this list. When the backend grows a session-time `model` or sandbox selector (§13),
-supporting it is **one new field entry** — its choices source, its request mapping — and the form,
-presets, and CLI flags all gain it with no other change.
+Today the list has two fields. `inferenceCredential`'s `toRequest` sets `credentials.inference`.
+`sandboxTier` (P6.3) sets `sandbox.tier`: its choices come from `/v1/discovery`'s `sandboxTiers`,
+the server's default is preselected, and a non-interactive `run --new` that names none leaves it
+to the server (`serverDefaults`) rather than refusing. The New Session form, presets, and the
+`run --option` flags (§7.5) are all generated from this list. When the backend grows another
+session-time selector such as a `model` (§13), supporting it is **one new field entry** — its
+choices source, its request mapping — and the form, presets, and CLI flags all gain it with no
+other change.
 
 **Presets** are named, saved values for these fields (`config.json` → `presets`). Picking a preset
 skips the form; a preset that names a field the server no longer accepts is shown as stale, not

@@ -120,14 +120,22 @@ export async function cmdRun(rt: Runtime, io: Io, opts: RunOptions): Promise<num
         SESSION_OPTION_FIELDS,
         opts.options,
         rt.config.lastUsed,
+        { interactive: false },
       );
       if (r.status === 'blocked') {
         io.err(`cannot start a session: ${r.field.emptyHint}`);
         return 2;
       }
       if (r.status === 'needs-input') {
+        const label = r.field.label.toLowerCase();
+        const declared = r.choices.map((c) => sanitizeRemote(c.value)).join(', ');
+        const given = opts.options[r.field.key];
+        // A value given with --option but not among the choices is named as rejected, not asked for
+        // again as though none had been given. It is user input echoed to a terminal, so sanitized.
         io.err(
-          `choose the ${r.field.label.toLowerCase()} with --option ${r.field.key}=<value>: ${r.choices.map((c) => c.value).join(', ')}`,
+          given !== undefined
+            ? `unknown ${label} '${sanitizeRemote(given)}'; declared: ${declared}`
+            : `choose the ${label} with --option ${r.field.key}=<value>: ${declared}`,
         );
         return 2;
       }

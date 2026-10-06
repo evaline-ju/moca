@@ -18,6 +18,7 @@ const rec = (over: Partial<SessionRecord> = {}): SessionRecord => ({
   state: 'active',
   poolSelector: null,
   credentialName: 'my-anthropic',
+  sandboxTier: '',
   tombstone: false,
   ...over,
 });
@@ -110,6 +111,21 @@ describe('create and get', () => {
     expect(f.zsets.get(ownerKey('github:1234'))).toEqual([
       { score: 1_757_000_000_000, value: 'sid-1' },
     ]);
+  });
+
+  it('reads a record written before P6.3 (no sandboxTier field) as undefined, not ""', async () => {
+    const fake = fakeRedis();
+    const oldIndex = new OwnershipIndex(fake.redis);
+    await fake.redis.hSet(sessionKey('old'), {
+      owner: 'github:1',
+      tenant: 'github:1',
+      createdAt: '1',
+      state: 'active',
+      poolSelector: '',
+      credentialName: '',
+      tombstone: '0',
+    });
+    expect((await oldIndex.get('old'))?.sandboxTier).toBeUndefined();
   });
 });
 
@@ -234,6 +250,32 @@ describe('runtime hash', () => {
     // the field was dropped on write, not merely hidden on read.
     expect(f.hashes.get(runtimeKey('sid-1'))).not.toHaveProperty('owner');
     expect(await index.getRuntime('sid-1')).not.toHaveProperty('owner');
+  });
+
+  it("keeps the data plane's P6.3 placement fields (spec §6), which the resources view reads", async () => {
+    // The knative-server reporter writes through this same putRuntime: a field missing from the
+    // allow-list is silently dropped on write, and the resources view's placement stays null forever.
+    const f = fakeRedis();
+    const index = new OwnershipIndex(f.redis);
+    const placement = {
+      sandboxId: 'm-1',
+      sandboxTier: 'microvm',
+      workspaceResetAt: '1757000002000',
+      workspaceResetFrom: 'm-0',
+    };
+    await index.putRuntime('sid-1', placement);
+    expect(f.hashes.get(runtimeKey('sid-1'))).toEqual(placement);
+    expect(await index.getRuntime('sid-1')).toEqual(placement);
+  });
+
+  it("stores an empty sandboxTier, so an untiered turn clears the last turn's tier", async () => {
+    // hSet merges: were '' dropped on write, a turn after tiers are switched off would leave the
+    // old tier next to its new sandboxId.
+    const f = fakeRedis();
+    const index = new OwnershipIndex(f.redis);
+    await index.putRuntime('sid-1', { sandboxId: 'm-1', sandboxTier: 'microvm' });
+    await index.putRuntime('sid-1', { sandboxId: 'c-0', sandboxTier: '' });
+    expect(await index.getRuntime('sid-1')).toEqual({ sandboxId: 'c-0', sandboxTier: '' });
   });
 });
 

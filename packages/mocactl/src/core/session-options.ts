@@ -1,4 +1,4 @@
-import type { ControlPlaneApi, CreateSessionRequest } from '../api/types.js';
+import type { ControlPlaneApi, CreateSessionRequest, Discovery } from '../api/types.js';
 import type { Preset } from '../config.js';
 import { ApiError } from '../api/errors.js';
 import { sanitizeRemote } from './sanitize.js';
@@ -9,6 +9,8 @@ import { sanitizeRemote } from './sanitize.js';
 export interface Choice {
   value: string;
   label: string;
+  /** The server's own default (P6.3's sandbox tier): preselected when nothing was used last. */
+  isDefault?: boolean;
 }
 
 export interface SessionOptionField {
@@ -17,10 +19,20 @@ export interface SessionOptionField {
   emptyHint: string;
   /**
    * With no choice to offer, leave the field unset and let the server decide rather than block: the
-   * control plane may have a default (the operator fallback, #368). A server refusal comes back as
-   * `credential_required` and is mapped to `emptyHint` by fieldRefusedByServer.
+   * control plane may have a default of its own (the operator fallback credential, #368; no tier on
+   * an untiered deployment).
    */
   serverMayResolve?: boolean;
+  /**
+   * The error code with which the server refuses a session that left this field unset; such a
+   * refusal is mapped back to this field's `emptyHint` by fieldRefusedByServer.
+   */
+  refusalCode?: string;
+  /**
+   * The server has its own default for this field (P6.3's sandbox tier): a non-interactive caller
+   * that did not choose leaves it unset instead of being refused with "choose with --option".
+   */
+  serverDefaults?: boolean;
   source(api: ControlPlaneApi): Promise<Choice[]>;
   toRequest(value: string, req: CreateSessionRequest): CreateSessionRequest;
 }
@@ -30,6 +42,7 @@ export const inferenceCredentialField: SessionOptionField = {
   label: 'Inference credential',
   emptyHint: 'add an inference credential to start',
   serverMayResolve: true,
+  refusalCode: 'credential_required',
   async source(api) {
     return (await api.listCredentials())
       .filter((c) => c.consumer === 'inference')
@@ -46,7 +59,46 @@ export const inferenceCredentialField: SessionOptionField = {
   toRequest: (value, req) => ({ ...req, credentials: { ...req.credentials, inference: value } }),
 };
 
-export const SESSION_OPTION_FIELDS: readonly SessionOptionField[] = [inferenceCredentialField];
+export const sandboxTierField: SessionOptionField = {
+  key: 'sandboxTier',
+  label: 'Sandbox tier',
+  emptyHint: 'this deployment declares no sandbox tiers',
+  serverMayResolve: true,
+  serverDefaults: true,
+  async source(api) {
+    let tiers: Discovery['sandboxTiers'];
+    try {
+      tiers = (await api.discovery()).sandboxTiers;
+    } catch (err) {
+      // A control plane that predates /v1/discovery (used with --harness-url, api/discovery.ts)
+      // predates tiers too: offer none, so the field is skipped. Any other failure is real.
+      if (err instanceof ApiError && err.status === 404) return [];
+      throw err;
+    }
+    // A remote body: anything but { names: string[], default: string } counts as no tiers, so a
+    // malformed discovery skips the field rather than breaking session creation with a TypeError.
+    if (!isSandboxTiers(tiers)) return [];
+    return tiers.names.map((n) => ({
+      value: n,
+      label: sanitizeRemote(n),
+      ...(n === tiers.default ? { isDefault: true } : {}),
+    }));
+  },
+  toRequest: (value, req) => ({ ...req, sandbox: { ...req.sandbox, tier: value } }),
+};
+
+function isSandboxTiers(v: unknown): v is NonNullable<Discovery['sandboxTiers']> {
+  if (typeof v !== 'object' || v === null) return false;
+  const { names, default: def } = v as Record<string, unknown>;
+  return (
+    Array.isArray(names) && names.every((n) => typeof n === 'string') && typeof def === 'string'
+  );
+}
+
+export const SESSION_OPTION_FIELDS: readonly SessionOptionField[] = [
+  inferenceCredentialField,
+  sandboxTierField,
+];
 
 export type Resolution =
   | { status: 'ready'; values: Record<string, string>; request: CreateSessionRequest }
@@ -64,6 +116,7 @@ export async function resolveSessionOptions(
   fields: readonly SessionOptionField[],
   given: Record<string, string>,
   lastUsed: Record<string, string>,
+  opts: { interactive?: boolean } = {},
 ): Promise<Resolution> {
   const values: Record<string, string> = {};
   for (const field of fields) {
@@ -81,12 +134,16 @@ export async function resolveSessionOptions(
       values[field.key] = choices[0].value;
       continue;
     }
+    // A field the server defaults (the sandbox tier) is not a question for a script: leave it unset.
+    if (opts.interactive === false && field.serverDefaults && wanted === undefined) continue;
     const last = lastUsed[field.key];
     return {
       status: 'needs-input',
       field,
       choices,
-      defaultValue: choices.some((c) => c.value === last) ? last : undefined,
+      defaultValue: choices.some((c) => c.value === last)
+        ? last
+        : choices.find((c) => c.isDefault)?.value,
       values,
     };
   }
@@ -99,14 +156,15 @@ export async function resolveSessionOptions(
 
 /**
  * The field a `POST /v1/sessions` refusal is about, when the server declined to resolve one the
- * client left to it (serverMayResolve): the caller then shows that field's emptyHint, as if blocked.
+ * client left to it (matched on its refusalCode): the caller then shows that field's emptyHint, as
+ * if blocked.
  */
 export function fieldRefusedByServer(
   err: unknown,
   fields: readonly SessionOptionField[],
 ): SessionOptionField | undefined {
-  if (!(err instanceof ApiError) || err.code !== 'credential_required') return undefined;
-  return fields.find((f) => f.serverMayResolve);
+  if (!(err instanceof ApiError)) return undefined;
+  return fields.find((f) => f.refusalCode !== undefined && f.refusalCode === err.code);
 }
 
 export function checkPreset(
