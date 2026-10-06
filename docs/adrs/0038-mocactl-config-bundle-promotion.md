@@ -1,6 +1,6 @@
 # ADR-0038: Promote config bundles through the control plane, not a direct Redis tunnel
 
-- **Status:** Proposed <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
+- **Status:** Proposed, amended 2026-10-06 (see Amendments below) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
 - **Date:** 2026-10-06
 - **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-10-06-mocactl-config-bundle-promotion-design.md`](../specs/2026-10-06-mocactl-config-bundle-promotion-design.md)
@@ -9,75 +9,96 @@
 
 ADR-0030 built config-bundle promotion — build a Claude-Code-shaped `.claude/skills` +
 `.claude/commands` directory into a content-addressed tar, preflight/secret-scan it, upload to Redis,
-reference it from a turn as `configRef: sha256:…`. The only shipped uploader is a Claude Code slash
-command that shells out to `pnpm --dir <harness> promote`, which writes to the cluster's Redis
-directly over a `kubectl port-forward` tunnel the caller holds open. That fits the one developer who
-already has `kubectl` access to the cluster.
+reference it as `configRef: sha256:…`. The only shipped uploader is a Claude Code slash command that
+shells out to `pnpm --dir <harness> promote`, which writes to the cluster's Redis directly over a
+`kubectl port-forward` tunnel the caller holds open, and the only consumer is the batch `/runs` path.
+That fits the one developer who already has `kubectl` access to the cluster.
 
 ADR-0037 and the P6-on-Kubernetes slices stand up an always-on, multi-user control plane (ADR-0033)
 that ordinary users reach only over its public `/v1` HTTP API — device-flow login, an API token, no
 `kubectl` context, no Redis credentials. `mocactl` (ADR-0036) is that API's terminal client, and it
-already creates sessions and streams turns against the harness. But there is no way for a `mocactl`
-user to get their own skills into a session: the only promotion path requires exactly the cluster
-access MU1 exists to avoid handing out, and neither `POST /v1/sessions` nor `mocactl`'s turn call
-carries a `configRef` at all today, even though the harness side already fully supports one.
+already creates sessions and streams turns against the harness. But a `mocactl` user has no way to
+get their own skills into a session: the only promotion path needs cluster access, nothing on a
+session records a bundle, and the interactive `/v1/turn` path ignores `configRef` entirely.
 
 Separately, `buildBundle` requires an `entry` (one `.claude/commands/<name>.md` prompt), because
-ADR-0030 was designed around headless/batch dispatch where one fixed prompt is "the task." `mocactl`
-sessions are interactive chat with no such fixed first prompt, so that requirement doesn't transfer.
+ADR-0030 was designed around batch dispatch where one fixed prompt is "the task." `mocactl` sessions
+are interactive chat with no such fixed first prompt.
 
 ## Decision
 
 We will add a control-plane-mediated upload for the **same** bundle ADR-0030 already defines — no
-format, preflight, secret-scan, or sandbox-materialization change — and wire the resulting digest
-through `mocactl`'s session lifecycle:
+format, preflight, secret-scan, or sandbox-materialization change — record the digest on the session,
+and apply it on the interactive turn path:
 
-1. **`POST /v1/config-bundles`** (new control-plane route, `auth: api`): accepts a client-built
-   `{ digest, tar }` (base64), re-verifies the digest against the tar server-side, and stores it in
-   Redis via the existing `putBundle` logic — relocated from `harness/src/config-store.ts` into
-   `@moca/config-bundle` so control-plane can call it without depending on the harness package.
-2. **`configRef` becomes an optional field on `POST /v1/sessions`**, validated and recorded once on
-   `SessionRecord` at creation (mirroring `credentialName`'s existing immutable-per-session design),
-   and echoed back by `createSession`/`getSession`.
-3. **`mocactl` builds the bundle client-side** (`@moca/config-bundle`, same preflight/secret-scan gate
-   as ADR-0030's CLI) via a shared `promoteDirectory` core used by a new `mocactl promote <dir>` CLI
-   command, a new `mocactl session new --config <digest>` flag, and a new in-app `/promote <dir>`
-   command that feeds the digest into the new-session overlay.
-4. **`entry` becomes optional** in `BuildBundleInput`/`buildBundle` — omitting it skips only the
-   entry-specific preflight checks; a bundle with no entry may legitimately carry zero prompt
-   templates, which is the normal case for an interactive-only promotion.
-5. **No bundle ownership record.** A digest stays a bare content-addressed key, exactly as it is in
-   Redis today; any session token that knows a digest may reference it. The control plane mediates
-   the write so a user never needs cluster credentials — it does not become a new authorization
-   boundary over bundle contents.
+1. **`POST /v1/config-bundles`** (new control-plane route, `auth: api`, its own 12 MiB body limit,
+   8 MiB tar cap): accepts a client-built `{ digest, tar }`, re-verifies the digest server-side, and
+   stores it via the existing `putBundle` — relocated from `harness/src/config-store.ts` into
+   `@moca/config-bundle` so the control plane can call it without depending on the harness.
+2. **`configRef` is set once, at session creation** (`POST /v1/sessions`), recorded on
+   `SessionRecord` like `credentialName`, and **delivered to the harness by the control plane** in
+   the per-turn credential exchange it already performs. The client never sends `configRef` to the
+   harness, so it cannot change a session's bundle.
+3. **The harness's `/v1/turn` applies it**, using the resolve/overlay/cleanup code lifted out of
+   `run-leaf.ts` into one helper both paths share. A missing or expired bundle fails the turn with
+   `410 config_bundle_not_found`; it never runs the turn without its skills.
+4. **`mocactl` builds the bundle client-side** with `@moca/config-bundle`, behind a shared
+   `promoteDirectory` used by `mocactl promote <dir>`, `mocactl run --config <digest>`, and an in-app
+   `/promote <dir>` whose result attaches to the next session created. This is a **named exception to
+   ADR-0036's no-`@moca/*`-dependency rule**, for exactly that package, enforced as a one-entry
+   allow-list in `layering.test.ts`.
+5. **`entry` becomes optional** in `buildBundle`; omitting it skips only the entry-specific checks.
+6. **No bundle ownership record.** A digest stays a bare content-addressed key; the control plane
+   mediates the write so a user never needs cluster credentials, and does not become a new
+   authorization boundary over bundle contents.
 
 ### Alternatives considered
 
-- **Server-side bundle building** (control plane runs `buildBundle` from uploaded raw files) — rejected: unscanned file contents would cross the network before any secret-scan runs, breaking ADR-0030's "nothing sensitive leaves the machine until preflight passes" property.
-- **Owned bundles, like credentials** (uploader identity recorded, ownership checked per session) — deferred, not rejected outright: more consistent with MU1/MU2's per-tenant model, but adds a new store and a check on every turn for a resource that is already an unguessable hash and already kept secret-free by preflight.
-- **Per-turn client-supplied `configRef`** (no session schema change; resend the digest on every `/v1/turn` call) — rejected: nothing would stop a client bug from swapping bundles mid-session, and the control plane would have no record of what a session is running.
-- **A synthetic/placeholder `entry`** to satisfy the existing validation unchanged — rejected in favor of making `entry` genuinely optional, since a placeholder would be dead weight carried through the lockfile and digest forever.
+- **Server-side bundle building** — rejected: unscanned file contents would cross the network before any secret-scan runs, breaking ADR-0030's "nothing sensitive leaves the machine until preflight passes".
+- **Owned bundles, like credentials** — deferred: more consistent with MU1/MU2's per-tenant model, but a new store and a per-turn check for a resource that is already an unguessable hash kept secret-free by preflight.
+- **Per-turn client-supplied `configRef`** — rejected: a client bug could swap bundles mid-session, and the record on the control plane would not be what actually ran.
+- **`configRef` as a session-token claim** — rejected: the exchange already reads the session record every turn, so a claim would duplicate the fact and every re-mint would have to carry it.
+- **Vendoring `@moca/config-bundle` into `mocactl`** to keep ADR-0036 absolute — rejected: a stale copy of the secret scanner in the client is exactly the drift that matters.
+- **A synthetic/placeholder `entry`** — rejected: dead weight in every lockfile and digest, for a check that means nothing without a batch entry point.
 
 ## Consequences
 
 - Positive: a `mocactl` user on a P6-on-Kubernetes deployment can promote and use their own skills
-  with zero cluster credentials — the gap this decision closes — while the bundle mechanism itself
-  (format, preflight, secret-scan, digest, sandbox materialization) stays exactly as ADR-0030 proved
+  with zero cluster credentials, while the bundle mechanism itself stays exactly as ADR-0030 proved
   it.
-- Positive: `configRef` set once at session creation, immutable for the session's life, follows the
-  same shape `credentialName` already established — no new session-lifecycle concept.
-- Negative / accepted cost: a bundle digest is a bearer capability with no per-tenant ownership check
-  — any session token that knows a digest can reference it. Accepted because preflight already keeps
-  real secrets out and a digest isn't guessable; revisit if cross-tenant bundle reuse becomes a real
-  incident rather than a theoretical one.
-- Negative / accepted cost: "read a Claude-Code-shaped directory into `BuildBundleInput`" now has two
-  independent implementations — the harness CLI's (tangled with argv parsing and
-  harness-module-relative inventory lookup) and `mocactl`'s (a single flat scope, no inventory, no
-  entry). Acceptable for two callers; a third should prompt factoring the shared mapping into
-  `@moca/config-bundle` itself.
+- Positive: a session's bundle is fixed at creation and enforced by the control plane, not by client
+  good behaviour — the same shape `credentialName` already established.
+- Positive: `/runs` and `/v1/turn` share one overlay implementation instead of two.
+- Negative / accepted cost: a bundle digest is a bearer capability — any session token that knows a
+  digest can reference it. Revisit if cross-tenant bundle reuse becomes a real incident.
+- Negative / accepted cost: every turn on a promoted session fetches its bundle and refreshes the
+  sandbox overlay. The pod-side unpack is digest-cached and the overlay refcounted, but the cold-turn
+  delta is unmeasured.
+- Negative / accepted cost: ADR-0036's dependency rule is no longer absolute. The exception is
+  justified by what the rule protects (no pi, no server internals, no substrate assumptions — none of
+  which `@moca/config-bundle` carries) and kept from spreading by the allow-list test.
+- Negative / accepted cost: "read a Claude-Code-shaped directory into `BuildBundleInput`" has two
+  implementations (the harness CLI's and `mocactl`'s). A third caller should factor it into
+  `@moca/config-bundle`.
 - Follow-up owed: `GET /v1/config-bundles/{digest}` (metadata only) if bundle reuse across sessions
-  turns out to matter enough that "the thing I just built" isn't a good enough affordance in the
-  in-app `/promote` flow.
+  turns out to matter.
+
+## Amendments
+
+**2026-10-06, during planning.** Amended in place rather than superseded, because this ADR is still
+`Proposed` (`docs/adrs/README.md` Rule 1). Reading the code against the first version found that:
+
+1. **`/v1/turn` never applied `configRef`.** The first version assumed it did, and wired the digest
+   only from the client. Decision 3 (harness work) is new.
+2. **The first version contradicted itself** — it rejected a per-turn client-supplied `configRef`,
+   then had `mocactl` send one on every turn. Decision 2 now has the control plane deliver it through
+   the exchange.
+3. **The control plane's 64 KiB body cap** would have refused every upload; decision 1 now carries a
+   per-route limit and an explicit bundle cap.
+4. **ADR-0036 forbade the `@moca/config-bundle` dependency** decision 4 relies on; the exception is
+   now stated and test-enforced rather than implicit.
+
+The spec's amendment note carries the code references.
 
 ---
 

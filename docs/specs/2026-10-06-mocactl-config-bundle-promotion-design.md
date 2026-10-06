@@ -1,6 +1,6 @@
 # `mocactl promote` — config-bundle promotion through the control plane — Design
 
-**Date:** 2026-10-06 · **Status:** Proposed · **ADR:** [ADR-0038](../adrs/0038-mocactl-config-bundle-promotion.md)
+**Date:** 2026-10-06 · **Status:** Proposed (amended 2026-10-06, see below) · **ADR:** [ADR-0038](../adrs/0038-mocactl-config-bundle-promotion.md)
 **Builds on (reuse, no redesign):** [ADR-0030](../adrs/0030-claude-code-workflow-promotion.md) /
 [claude-code-workflow-promotion-design](2026-09-02-claude-code-workflow-promotion-design.md) (the
 bundle format, preflight, secret-scan, digest, and sandbox-overlay materialization — unchanged);
@@ -13,11 +13,34 @@ itself, its `SESSION_OPTION_FIELDS` session-creation model, its command/overlay 
 [slice2](2026-10-04-p6-on-kubernetes-slice2-design.md) (the deployment this is motivated by: ordinary
 users reaching a cluster-hosted control plane with no `kubectl`/Redis access of their own).
 
-> **The one-sentence thesis.** The config-bundle mechanism ADR-0030 built already does everything
-> this needs — build, preflight, scan, digest, materialize — it was just wired to a direct
-> `kubectl port-forward` + Redis tunnel that assumes a developer sitting on the cluster. This design
-> moves the upload hop behind the control plane's existing `/v1` HTTP API so any `mocactl` user can
-> promote a skills directory and start a session with it, with no cluster credentials at all.
+> **Amendment, 2026-10-06 — four corrections found by reading the code while planning.** Each had
+> been stated as fact in the first version:
+>
+> 1. **`/v1/turn` does NOT apply `configRef` today.** `handleTurn`
+>    (`packages/knative-server/src/server.ts:141`) parses only `sessionId` and `prompt`; the only code
+>    that resolves a bundle and overlays it into a sandbox is `run-leaf.ts` (the batch `/runs` path).
+>    The interactive path therefore needs real harness work (§2.6), not just a client-side field.
+> 2. **The first version contradicted itself on where `configRef` travels.** §4 rejected a per-turn,
+>    client-supplied `configRef`, yet §2.5 had `mocactl` send it in every `/v1/turn` body. The harness
+>    now learns `configRef` from the control plane's per-turn credential exchange, which already reads
+>    the `SessionRecord` (§2.4); `mocactl` never sends it to the harness.
+> 3. **The control plane caps every request body at 64 KiB** (`packages/control-plane/src/server.ts:10`),
+>    which a base64 bundle exceeds. Routes now declare their own body limit, and bundles get an
+>    explicit size cap (§2.3).
+> 4. **ADR-0036 forbids any `@moca/*` dependency in `mocactl`**, enforced by
+>    `packages/mocactl/test/layering.test.ts`. Client-side building needs `@moca/config-bundle`; this
+>    design takes a narrow, named exception for exactly that package (§2.5).
+>
+> Also corrected: there is no `mocactl session new` command — headless session creation is
+> `mocactl run`, so the flag is `mocactl run --config <digest>` (§2.5).
+
+> **The one-sentence thesis.** The config-bundle mechanism ADR-0030 built already does almost
+> everything this needs — build, preflight, scan, digest, materialize — but it was wired to a direct
+> `kubectl port-forward` + Redis tunnel that assumes a developer sitting on the cluster, and only to
+> the batch `/runs` path. This design moves the upload hop behind the control plane's `/v1` HTTP API,
+> records the digest on the session, and teaches the interactive `/v1/turn` path to apply it, so any
+> `mocactl` user can promote a skills directory and start a session with it, with no cluster
+> credentials at all.
 
 ---
 
@@ -36,24 +59,25 @@ context and no Redis credentials for the cluster at all. There is today no way f
 get their own skills in front of a session: the only promotion path requires exactly the cluster
 access MU1 was built to avoid handing out.
 
-Two smaller gaps compound this:
+Three smaller gaps compound this:
 
 - `buildBundle` requires an `entry` — one `.claude/commands/<name>.md` prompt name — because
   ADR-0030 was designed around headless/batch dispatch (`run-leaf.ts`), where one fixed prompt
   template is "the task." `mocactl` sessions are interactive chat with no such fixed first prompt.
-- `mocactl` creates sessions and streams turns against the harness already (ADR-0036), but neither
-  `POST /v1/sessions` nor `POST /v1/turn`'s client-side call site carries a `configRef` today, even
-  though the harness side (`knative-server`'s `/v1/turn` validation, `config-resolver.ts`'s unpack)
-  already fully supports one — it was built for `run-leaf.ts`'s envelope and never wired to the
-  interactive path.
+- Neither `POST /v1/sessions` nor anything on the session record carries a `configRef`, so there is
+  nowhere to say which bundle an interactive session runs on.
+- The harness's interactive `/v1/turn` path ignores `configRef` entirely. `executeTurn`
+  (`harness/src/run-turn.ts`) can accept an already-resolved `promotedConfig`, but fetching the
+  bundle, overlaying it into the turn's sandbox and tearing that overlay down again lives only in
+  `run-leaf.ts`.
 
 ## 2. Decision
 
 We will add a **control-plane-mediated upload path** for the exact same content-addressed bundle
-ADR-0030 already defines, and wire the resulting digest through `mocactl`'s existing session
-lifecycle as `configRef`. Nothing about the bundle format, preflight, secret-scan, or sandbox
-materialization changes — only how the tar gets from a user's machine into the same Redis store, and
-how a `mocactl` session comes to reference it.
+ADR-0030 already defines, record the resulting digest on the session at creation, hand it to the
+harness through the per-turn credential exchange the harness already performs, and apply it on the
+interactive `/v1/turn` path with the same resolve-and-overlay mechanism `/runs` uses. Nothing about
+the bundle format, preflight, secret-scan, or sandbox materialization changes.
 
 ```
 mocactl promote <dir>  ──┐
@@ -61,38 +85,38 @@ mocactl promote <dir>  ──┐
 /promote <dir> (in-app) ─┤  run on the CLIENT, same as ADR-0030's /promote
                           │
                           ▼
-                 POST /v1/config-bundles   (control plane, auth: api)   ← NEW
-                          │  re-verifies digest, stores tar in Redis (putBundle, unchanged logic)
+                 POST /v1/config-bundles   (control plane, auth: api)          ← NEW
+                          │  size cap, re-verifies digest, stores tar in Redis (putBundle)
                           ▼
                      { digest, uploaded }
                           │
                           ▼
-        POST /v1/sessions { configRef: digest }   (control plane)       ← NEW optional field
+        POST /v1/sessions { configRef: digest }   (control plane)              ← NEW optional field
                           │  records configRef on SessionRecord, like credentialName
                           ▼
-            mocactl holds { sessionId, token, configRef }
+            mocactl holds { sessionId, token }      (it never sends configRef to the harness)
                           │
                           ▼
-   POST /v1/turn { sessionId, prompt, configRef }   (straight to the harness — unchanged route)
+   POST /v1/turn { sessionId, prompt }   (straight to the harness — body unchanged)
                           │
                           ▼
-   harness unpacks the digest's skills into the sandbox (config-resolver.ts — unchanged, already works)
+   harness → POST /internal/credentials (exchange, every authenticated turn — already exists)
+                          │  response now also carries the session's configRef         ← NEW field
+                          ▼
+   executeTurn: fetch bundle, overlay into the turn's sandbox, run, tear the overlay down  ← NEW
+                (the resolve/overlay/cleanup code is lifted out of run-leaf.ts and shared)
 ```
-
-The only new wire surface is `POST /v1/config-bundles` and an optional `configRef` on
-`POST /v1/sessions`. Everything from "harness receives a turn carrying `configRef`" downward already
-works today for the batch path; this design only extends who can produce a valid `configRef` and how
-it reaches an interactive session.
 
 ### 2.1 `@moca/config-bundle`: `entry` becomes optional
 
 - `BuildBundleInput.entry` changes from `string` to `string | undefined`.
-- When omitted, `checkEntry` and `checkExcludedPrompts` are skipped entirely — no `unknown_entry` /
-  `entry_excluded` findings — and `BundleLockfile.entry` is written as `''` rather than the field
-  being made optional there, so every existing reader of the lockfile keeps a plain `string`.
-- Preflight otherwise runs exactly as before (classification, secret-scan, binary checks): omitting
-  `entry` only removes the one check that is meaningless without a fixed first prompt. A bundle built
-  this way may legitimately carry zero prompt templates.
+- When omitted, `checkEntry` is skipped and `checkExcludedPrompts` skips its `entry_excluded`
+  branch — no `unknown_entry` / `entry_excluded` findings. Its `prompt_excluded` /
+  `prompt_exclude_unmatched` warnings still run, because they are about exclusions, not the entry.
+  `BundleLockfile.entry` is written as `''` rather than the field being made optional there, so every
+  existing reader of the lockfile keeps a plain `string`.
+- Preflight otherwise runs exactly as before (classification, secret-scan, binary checks). A bundle
+  built this way may legitimately carry zero prompt templates.
 - `harness/src/promote-cli.ts` (ADR-0030's CLI) keeps `--entry` **required** — that path is still
   headless/batch dispatch, where an entry prompt is the task. Only the new client-side path in
   `mocactl` omits it.
@@ -100,14 +124,14 @@ it reaches an interactive session.
 ### 2.2 Moving the bundle store so the control plane can use it
 
 `putBundle` / `getBundle` / `BundleRedisLike` / `bundleKey` and their errors currently live in
-`harness/src/config-store.ts` — a harness-internal module `@moca/config-bundle` doesn't own.
-Control-plane needs that exact logic (digest re-verification, gzip/base64, Redis storage) for the new
-endpoint. Duplicating it would let the two copies drift; depending on `@moca/harness` from
-`@moca/control-plane` runs the dependency the wrong way (control plane is the lower-level service).
+`harness/src/config-store.ts`. The control plane needs that exact logic (digest re-verification,
+gzip/base64, Redis storage) for the new endpoint. Duplicating it would let the two copies drift;
+depending on `@moca/harness` from `@moca/control-plane` runs the dependency the wrong way.
 
 We move `config-store.ts` unchanged into `@moca/config-bundle` (which already owns `contentDigest`
-and `untar`, the two functions it calls). `harness/src/config-resolver.ts` updates its import; no
-behavior changes.
+and `untar`, the two functions it calls). Harness modules import it from there; the harness's
+`./config-store` package export is removed (nothing outside the harness imports it). One constant is
+added beside it: `MAX_BUNDLE_BYTES = 8 MiB`, the largest tar the control plane accepts (§2.3).
 
 ### 2.3 Control plane: `POST /v1/config-bundles`
 
@@ -115,21 +139,27 @@ New route, declared in `routes.ts` like every other:
 
 ```
 POST /v1/config-bundles   auth: api   sessionScoped: false   operationId: 'putConfigBundle'
+                          maxBodyBytes: 12 MiB
 ```
 
-- **Request:** `{ digest: string, tar: string }` — `tar` base64-encoded, matching the encoding
-  `putBundle` already uses internally. No multipart handling needed.
-- **Handler:** decode base64 → `Buffer`; call `putBundle(redisClient, digest, buffer)` using the same
-  Redis client `main.ts` already constructs for `OwnershipIndex`. `putBundle` already re-verifies the
-  claimed digest against the tar's actual content before writing — a mismatch surfaces as
-  `BundleDigestMismatchError`, mapped to `400 { error: 'digest_mismatch' }`.
+- **Per-route body limit.** `RouteSpec` gains an optional `maxBodyBytes`; the router's `readBody`
+  uses it, defaulting to the existing 64 KiB. Only this route raises it. 12 MiB holds the base64 of a
+  `MAX_BUNDLE_BYTES` tar (≈10.7 MiB) plus the JSON wrapper.
+- **Request:** `{ digest: string, tar: string }` — `tar` base64-encoded.
+- **Handler:** require the principal first (the route-enumeration test asserts every api route
+  refuses a missing principal before reading its body); validate `digest` with `assertValidDigest`
+  (`invalid_request` otherwise); decode base64 and refuse a decoded tar over `MAX_BUNDLE_BYTES`
+  (`invalid_request`, message names the cap); call `putBundle(deps.bundles, digest, tar)`.
+  `BundleDigestMismatchError` maps to `400 { error: 'digest_mismatch' }`.
 - **Response:** `201 { digest, uploaded }` — `uploaded: false` means the digest already existed and
-  only its TTL was refreshed, exactly the semantics `promote-cli.ts` already prints today.
-- **No ownership record.** Per the scoping decision below, this is intentionally just
-  content-addressed storage, structurally identical to what direct Redis access does today — the
-  control plane is a mediator for the write, not a new authorization boundary over bundle contents.
+  only its TTL was refreshed.
+- **Redis:** `CpDeps` gains `bundles: BundleRedisLike`, wired in `main.ts` to the same node-redis
+  client `OwnershipIndex` already uses.
+- **No ownership record.** Intentionally just content-addressed storage, structurally identical to
+  what direct Redis access does today — the control plane mediates the write, it does not become a
+  new authorization boundary over bundle contents.
 
-### 2.4 Control plane: `configRef` on session creation
+### 2.4 Control plane: `configRef` on the session and in the exchange
 
 - `POST /v1/sessions` body gains an optional `configRef`. The handler validates it with
   `assertValidDigest` (reused, not reimplemented) — a malformed value is a `400 { error:
@@ -137,146 +167,169 @@ POST /v1/config-bundles   auth: api   sessionScoped: false   operationId: 'putCo
   `knative-server`'s existing error code verbatim (not a differently-spelled sibling) is deliberate:
   it is the same concept — a malformed digest string — surfacing from a second call site.
 - It does **not** check the digest actually exists in Redis at this point — that would add a
-  round-trip for a check the harness already performs correctly on first turn (see §3).
+  round-trip for a check the harness performs on every turn anyway (see §3).
 - `SessionRecord` (`ownership.ts`) gains `configRef: string | null`, alongside the existing
-  `credentialName`, set once at creation and immutable for the session's lifetime — the same pattern
-  `credentialName` already establishes, chosen deliberately (§4 below) over letting a client swap
-  bundles mid-session.
-- `createSession` and `getSession` echo `configRef` back in their response bodies. The echo is not a
-  liveness signal: it reflects what was recorded at creation, not whether that digest still exists in
-  Redis — a session can echo a `configRef` that has since expired past the 30-day TTL, which surfaces
-  only as a `BundleNotFoundError` on the next turn (see §3), not as a change to `getSession`'s output.
+  `credentialName`, set once at creation and immutable for the session's lifetime.
+- `createSession`, `getSession` and `listSessions` return `configRef` (`null` when none). The echo
+  is not a liveness signal: it reflects what was recorded at creation, not whether that digest still
+  exists in Redis — a session can echo a `configRef` that has since expired past the 30-day TTL,
+  which surfaces only as `config_bundle_not_found` on the next turn (see §3).
+- **The exchange carries it to the harness.** `exchangeCredential` already loads the `SessionRecord`
+  on every authenticated turn; its `ExchangeResponse` gains `configRef?: string`, present only when
+  the session has one. This is what makes "set once at creation" a guarantee rather than a record:
+  the harness takes `configRef` from the control plane, never from the request body.
 
-### 2.5 `mocactl`: shared promote core, two entry points
+### 2.5 `mocactl`: shared promote core, three entry points
 
-A single function, `promoteDirectory(dir, cp): Promise<PromoteResult>` (`packages/mocactl/src/core/promote.ts`),
-used by both callers below:
+**Dependency exception to ADR-0036.** `mocactl` gains exactly one workspace dependency,
+`@moca/config-bundle`. ADR-0036's rule exists to keep `mocactl` free of pi, server internals and
+substrate assumptions; `@moca/config-bundle` is pure Node with zero runtime dependencies and none of
+those. `layering.test.ts` changes from "no `@moca/*`" to an allow-list of that one package, so a
+second exception still fails CI.
 
-- Treats `<dir>` as **one scope**, not a project/user split: `roots: { userDir: join(dir, '.claude') }`,
-  `promptsDir: join(dir, '.claude', 'commands')`. ADR-0030's project-vs-`~/.claude` distinction exists
-  because that path reuses a real developer checkout's two real scopes; "a set of skills in a
-  directory" is one scope, and passing the same path as both `projectDir` and `userDir` would risk
-  double-counting skills by name across scopes for no benefit.
-- Omits `entry` (§2.1), `memoryDir`, and `contextFiles` — there is no live Claude Code project memory
-  or `CLAUDE.md` chain to carry for a bare skills directory.
-- Omits `inventory` — `mocactl` is a standalone client (ADR-0036) that may run far from any `moca`
-  checkout, so there is no local `deploy/knative/sandbox-inventory/` to read. Preflight already
-  degrades this to a warning ("cannot verify binaries"), not an error, exactly as it does today when
-  no inventory file is found.
-- Runs `buildBundle` — same preflight/secret-scan gate as ADR-0030, unchanged. A structural credential
-  match or a blocking finding aborts before any network call is made.
-- POSTs `{ digest, tar: base64 }` to the new endpoint via a `putConfigBundle()` method added to
-  `ControlPlaneApi` (`api/control-plane.ts`), alongside the existing `createSession` etc.
-- Returns `{ digest, uploaded, skillCount, droppedSkills, warnings }` for both callers to render.
+A single function, `promoteDirectory(dir, cp)` (`packages/mocactl/src/core/promote.ts`), used by all
+callers below:
 
-**`mocactl promote <dir>`** — new top-level CLI command. Calls `promoteDirectory`, prints the same
-kind of summary (skills travelling/dropped and why, secret-scan warnings, digest), and exits with the
-same codes ADR-0030 already established (2 = preflight errors, 3 = a structural credential match).
+- **Directory resolution.** `~` and relative paths are expanded against the home directory and the
+  process's working directory. If `<dir>/.claude` exists it is the config root (a project, as Claude
+  Code lays it out); otherwise, if `<dir>/skills` or `<dir>/commands` exists, `<dir>` itself is the
+  config root (the user pointed at a `.claude` directory). Anything else is refused before building:
+  "no .claude/skills or .claude/commands under <dir>".
+- Treats the config root as **one scope**: `roots: { userDir: <root> }`, `promptsDir:
+  <root>/commands`. No `projectDir` and no `pluginDirs` — passing the same path as two scopes would
+  double-count skills by name, and plugins are outside "a set of skills in a directory."
+- Omits `entry` (§2.1), `memoryDir`, and `contextFiles`.
+- Omits `inventory` — `mocactl` may run far from any `moca` checkout; preflight already degrades this
+  to a warning.
+- Runs `buildBundle` — same preflight/secret-scan gate as ADR-0030. A structural credential match or
+  a blocking finding aborts before any network call. A bundle with zero skills and zero prompts is
+  refused ("nothing to promote") rather than uploaded. A tar over `MAX_BUNDLE_BYTES` is refused
+  locally with the same message the server would give.
+- POSTs `{ digest, tar: base64 }` via a new `ControlPlaneApi.putConfigBundle()`.
 
-**`mocactl session new --config <digest>`** — new flag on headless/scripted session creation, passed
-straight through as `CreateSessionRequest.configRef`.
+**`mocactl promote <dir>`** — new top-level CLI command. Prints the summary (skills travelling,
+dropped and why, warnings, digest) and exits with ADR-0030's codes: 2 = preflight errors, 3 = a
+structural credential match, 1 = anything else.
 
-**In-app `/promote <dir>`** — a new builtin `Command` (`commands/builtin.ts`), **not** gated by
-`inSession`: you promote before a session necessarily exists. `run(h, arg)` calls
-`h.promoteBundle(arg)`. On success it stores the digest as **pending, client-side-only state** —
-deliberately not folded into the `SESSION_OPTION_FIELDS` abstraction (`session-options.ts`), because
-that abstraction is "pick one of several server-known choices" (today: inference credentials) and a
-freshly-built bundle has no server-side "list of my bundles" to pick from; it is simply "the thing I
-just built." It shows a notification with the digest/skill-count summary and opens the `new-session`
-overlay with that pending digest pre-filled as an info line ("Config bundle: `sha256:…` — N skills, M
-dropped"), with a way to clear it before confirming. `create()` in `app.tsx` includes `configRef` in
-`CreateSessionRequest` whenever a pending digest is set.
+**`mocactl run "prompt" --config <digest>`** — the existing headless command gains `--config`, passed
+as `CreateSessionRequest.configRef`. It applies only when `run` creates a session; combined with
+`--session` it is a usage error, because a resumed session's bundle was fixed at its creation.
 
-**Turn wiring:** `ActiveSession` (`core/session-manager.ts`) stores the `configRef` returned by
-`createSession`/`getSession` and includes it on every `streamTurn` call's body —
-`HarnessClient.streamTurn` gains a `configRef` parameter sent alongside `sessionId`/`prompt`.
-`/v1/turn` already accepts and validates it (`configRefValid`, unchanged).
+**In-app `/promote <dir>`** — a new builtin `Command`, **not** gated by `inSession`. On success it
+stores the result as **pending, client-side-only state** and opens the `new-session` overlay, which
+shows it as an info line ("config bundle sha256:… — N skills, M dropped"). The pending bundle applies
+to the **next session created and is then cleared**: a bundle silently attaching to every later
+session would be the surprise. `/promote --clear` drops it without creating a session. It is not
+folded into `SESSION_OPTION_FIELDS`, which is "pick one of several server-known choices"; a freshly
+built bundle has no server-side list to pick from.
+
+**No turn-path change in `mocactl`.** `ActiveSession` and `HarnessClient.streamTurn` are untouched:
+the harness learns `configRef` from the exchange (§2.4).
+
+### 2.6 Harness: `/v1/turn` applies the session's `configRef`
+
+- **Shared helper.** The resolve/overlay/cleanup sequence in `run-leaf.ts` (`runPromptLeaf`) moves,
+  with its comments, into `harness/src/promoted-config.ts` as `attachPromotedConfig({ digest,
+  sessionId, sandbox, redisUrl, deps })`, returning `{ promotedConfig, detach() }`. The memoised
+  `getBundleRedis` client moves with it. `run-leaf.ts` calls the helper; its existing tests
+  (`run-leaf-promoted.test.ts`) are the regression guard for the move.
+  - Semantics carried over exactly: no sandbox ⇒ resolve only (pi's tools then run in this pod, where
+    the pod-side path is the right one); a sandbox ⇒ overlay with the leased transport or a
+    `KubectlTransport` built for the purpose; the overlay is considered **attempted** before the
+    call, so a partial overlay is still torn down; teardown is best-effort and idempotent.
+- **`executeTurn`** gains an optional `configRef`. After the sandbox is acquired and
+  `assertServerSandbox` passes, and only when no pre-resolved `promotedConfig` was passed (the
+  `/runs` path already resolves its own), it calls `attachPromotedConfig` and passes the result to the
+  core; `detach()` runs in the existing `finally`, before the lease is released.
+- **`knative-server`.** `TurnAuth` gains `configRef?: string`, taken from the exchange response
+  (a present-but-non-string value is a control-plane fault: `credential_unavailable`). Both the sync
+  and the SSE branches of `handleTurn` pass `configRef: auth?.configRef` to `executeTurn`. The
+  unauthenticated `/turn` path has no session record and therefore never applies a bundle.
+- The bundle is fetched before the first frame is streamed, so a missing bundle always surfaces as
+  a plain HTTP error, never mid-stream.
 
 ## 3. Error handling
 
-- **Preflight / secret-scan block (client-side, both callers):** unchanged from ADR-0030 — a
-  structural credential match throws before any network call; blocking findings abort with the same
-  exit code / "promote BLOCKED" messaging the existing CLI already uses.
-- **Digest mismatch at upload:** `putBundle` already re-verifies digest vs. tar content server-side;
-  a mismatch is `400 digest_mismatch`. Only reachable from a buggy/tampered client, kept as a cheap
-  server-side check rather than trusting the caller's claim.
-- **Malformed `configRef` at session creation:** `400 configRef_invalid` — the exact same error code
-  `knative-server` already returns from `/v1/turn`, reused at creation time too, not a
-  differently-spelled sibling for the same concept.
-- **Valid digest, not found/expired (30-day TTL) at turn time:** this surfaces downstream, on the
-  harness, not at session creation — the control plane does not check Redis existence when recording
-  `configRef` (§2.4). The harness's existing `BundleNotFoundError` already fails the turn loudly
-  rather than silently dropping to no-skills; the one new piece is mapping that error text in
-  `mocactl`'s `api/errors.ts` to a clear message ("config bundle expired or not found — re-run
-  `/promote`") instead of a generic turn failure.
-- **In-app `/promote` failure** (bad directory, no `.claude/skills` found, network error reaching the
-  control plane): reported via `h.notify(...)`, same as other command failures. No pending digest is
-  set, so a stale or empty state cannot silently flow into the next session.
+- **Preflight / secret-scan block (client-side, all callers):** unchanged from ADR-0030 — nothing is
+  uploaded.
+- **Bundle too large:** refused client-side, and server-side as `400 invalid_request` naming the
+  cap. A body beyond the route's `maxBodyBytes` is the router's existing `invalid_request`.
+- **Digest mismatch at upload:** `400 digest_mismatch`. Only reachable from a buggy/tampered client.
+- **Malformed `configRef` at session creation:** `400 configRef_invalid` — the exact code
+  `knative-server` already returns.
+- **Valid digest, not found/expired (30-day TTL) at turn time:** the harness's `BundleNotFoundError`
+  maps to **`410 { error: 'config_bundle_not_found' }`** on both the sync and SSE paths (410: it
+  existed and is gone). It fails the turn loudly rather than running it without its skills. `mocactl`
+  maps that code to "this session's config bundle has expired — promote it again and start a new
+  session" (a new session, because a session's bundle is fixed at creation).
+- **A corrupt stored bundle** (`BundleDigestMismatchError` on read) stays a 500: it is an operator
+  fault, not something the user can fix.
+- **In-app `/promote` failure:** reported via `h.notify(...)`; no pending bundle is set.
 
 ## 4. Alternatives considered
 
-- **Server-side bundle building** (control plane runs `buildBundle` from uploaded raw files) —
-  rejected: unscanned file contents would cross the network before any preflight/secret-scan runs,
-  and control plane would need the full `@moca/config-bundle` classification/scan dependency it has
-  no other reason to carry. Client-side building keeps ADR-0030's "nothing sensitive leaves the
-  machine until preflight passes" property intact.
-- **Owned bundles, like credentials** (record uploader identity, check ownership before a session may
-  reference a digest) — rejected for this slice: it is more consistent with MU1/MU2's per-tenant
-  model, but adds a new ownership store and a check on every turn for a resource that is already an
-  unguessable content hash and that preflight already keeps free of real secrets. Deferred as a
-  follow-up if bundle sharing/leakage across tenants becomes a real concern.
-- **Per-turn client-supplied `configRef`** (no control-plane session schema change; `mocactl` just
-  resends the digest on every `/v1/turn` call) — rejected: nothing would stop a buggy client from
-  switching bundles mid-session, and the control plane would have no record of what a session is
-  actually running. Session-level, set-once-at-creation mirrors `credentialName`'s existing design and
-  closes both gaps for one small schema addition.
-- **Session-scoped upload endpoint** (`POST /v1/sessions/{id}/config-bundle`) — rejected: ties upload
-  to a session that doesn't exist yet at the point you'd want to promote, and makes reusing one
-  promoted bundle across multiple session starts awkward.
-- **A synthetic/placeholder `entry`** just to satisfy `buildBundle`'s existing validation — rejected in
-  favor of making `entry` genuinely optional (§2.1): a placeholder would be dead weight carried
-  through the lockfile and digest forever, for a check that is meaningless without a real headless
-  entry point.
+- **Server-side bundle building** — rejected: unscanned file contents would cross the network before
+  any preflight/secret-scan runs, and the control plane would carry the classification/scan code for
+  no other reason.
+- **Owned bundles, like credentials** — rejected for this slice: more consistent with MU1/MU2's
+  per-tenant model, but a new store and a check on every turn for a resource that is already an
+  unguessable content hash kept free of real secrets by preflight. Deferred.
+- **Per-turn client-supplied `configRef`** — rejected: nothing would stop a buggy client from
+  switching bundles mid-session. The harness reads it from the exchange instead.
+- **Putting `configRef` in the session token's claims** — rejected: the exchange already reads the
+  session record on every turn, so a token claim would be a second copy of the same fact, and every
+  re-minted token would have to carry it.
+- **Session-scoped upload endpoint** (`POST /v1/sessions/{id}/config-bundle`) — rejected: you promote
+  before the session exists, and one bundle should be reusable across sessions.
+- **A synthetic/placeholder `entry`** — rejected in favor of making `entry` genuinely optional.
+- **Vendoring `@moca/config-bundle` into `mocactl`** to keep ADR-0036 absolute — rejected: a stale
+  copy of the secret scanner in the client is exactly the drift that matters.
 
 ## 5. Testing
 
 - **`@moca/config-bundle`:** `buildBundle` with no `entry` produces no `unknown_entry`/
-  `entry_excluded` findings and a lockfile with `entry: ''`; existing required-entry tests for the
-  harness CLI path stay green. The relocated `config-store.ts` tests (fake `BundleRedisLike`) move
-  with the file, behavior unchanged.
-- **control-plane:** the route table's own authz-enumeration test picks up `POST /v1/config-bundles`
-  automatically; handler tests for success (`201`, both `uploaded` values), digest mismatch (`400`),
-  and `createSession`/`getSession` round-tripping `configRef` (including `configRef_invalid` and that
-  audit records are unaffected by the new field).
-- **`mocactl`:** `promoteDirectory` unit tests against a fixture directory with a fake
-  `ControlPlaneApi`; CLI exit-code tests for `mocactl promote` mirroring
-  `deploy/claude/tests/promote-command.test.sh`'s coverage (clean promote, preflight error,
-  secret-scan block); an `ActiveSession`/`streamTurn` test asserting `configRef` flows from the
-  `createSession` response into every turn body; an app-level test that a successful `/promote`
-  populates the new-session overlay's pending digest and a failure does not.
-- **End-to-end:** promote a small fixture skills directory via `mocactl promote` against a running
-  control plane, start a session with `--config <digest>`, send one turn, and confirm the sandbox
-  actually sees the promoted skill — same assertion style the existing P6 smoke tests already use for
-  other config paths.
+  `entry_excluded` findings and a lockfile with `entry: ''`, while exclusion warnings still appear;
+  existing required-entry tests stay green. The relocated `config-store` tests move with the file.
+- **control-plane:** per-route body limit (a 100 KiB body is refused on a default route and accepted
+  on `putConfigBundle`); `putConfigBundle` success (`201`, both `uploaded` values), digest mismatch,
+  malformed digest, oversize tar, missing principal; `createSession` round-tripping `configRef`
+  through `getSession`/`listSessions`, `configRef_invalid`; the exchange response carrying
+  `configRef` only when set. The OpenAPI document and error-code taxonomy tests are updated with the
+  new route and codes.
+- **harness:** `run-leaf-promoted.test.ts` unchanged and green after the extraction;
+  `attachPromotedConfig` unit tests (no sandbox ⇒ no overlay; overlay failure ⇒ teardown then rethrow;
+  `detach` idempotent); `executeTurn` with `configRef` attaches and detaches, and without it does
+  neither.
+- **knative-server:** turn-auth carries `configRef` from the exchange and refuses a non-string one;
+  `turnErrorStatus` maps `BundleNotFoundError` to 410 with `config_bundle_not_found` on both paths.
+- **`mocactl`:** `promoteDirectory` against fixture directories (project layout, `.claude` layout,
+  neither, empty, `~` path, blocking secret); CLI exit codes for `mocactl promote`; `run --config`
+  sends `configRef` and `run --config --session` is a usage error; `/promote` sets a one-shot pending
+  bundle that the next `create` consumes, `/promote --clear` drops it, and a failure sets nothing;
+  `config_bundle_not_found` maps to its message; the layering allow-list.
+- **End-to-end** (`MOCACTL_LIVE_SMOKE=1`): `mocactl promote` a fixture skills directory against a
+  running control plane, `mocactl run --config <digest>` a prompt that asks the model to name its
+  skills, and assert the fixture skill's name appears in the reply.
 
 ## 6. Consequences / open questions
 
 - Positive: ordinary `mocactl` users on a P6-on-Kubernetes deployment can promote and use their own
-  skills with zero cluster credentials — the gap this design exists to close.
-- Positive: the bundle format, preflight, secret-scan, digest, and sandbox materialization are
-  completely untouched; this is additive plumbing around an already-proven mechanism.
+  skills with zero cluster credentials.
+- Positive: the bundle format, preflight, secret-scan, digest and sandbox materialization are
+  untouched, and the interactive path reuses the batch path's overlay code instead of growing a
+  second one.
 - Negative / accepted cost: a bundle's digest is a bearer capability — any session token can
-  reference any digest it knows, with no per-tenant ownership check (§4). Acceptable because preflight
-  already keeps real secrets out of bundles and a digest is not discoverable by guessing, but revisit
-  if cross-tenant bundle reuse becomes an actual incident rather than a theoretical one.
-- Follow-up owed: `harness/src/promote-cli.ts` and `mocactl promote` now both implement "read a
-  Claude-Code-shaped directory into `BuildBundleInput`," independently, because the harness CLI's
-  version is tangled with argv parsing and harness-module-relative inventory lookup that don't belong
-  in `mocactl`. If a third caller appears, factor the shared "directory → `BuildBundleInput`" mapping
-  (minus CLI concerns) into `@moca/config-bundle` itself rather than letting a third copy appear.
-- Follow-up owed: `GET /v1/config-bundles/{digest}` (metadata only — skill names, size, upload time)
-  would let `/promote`'s in-app flow show something richer than "the thing I just built" if bundle
-  reuse across sessions turns out to matter in practice.
+  reference any digest it knows. Revisit if cross-tenant bundle reuse becomes an actual incident.
+- Negative / accepted cost: every authenticated turn on a promoted session fetches and unpacks its
+  bundle (the pod-side unpack is digest-cached; the sandbox overlay is refcounted). The cold-turn
+  cost should be measured, as ADR-0030 already owes for `/runs`.
+- Negative / accepted cost: `mocactl` takes one `@moca/*` dependency, an explicit, test-enforced
+  exception to ADR-0036.
+- Follow-up owed: `harness/src/promote-cli.ts` and `mocactl`'s `promoteDirectory` both map a
+  Claude-Code-shaped directory into `BuildBundleInput`. If a third caller appears, factor the mapping
+  into `@moca/config-bundle`.
+- Follow-up owed: `GET /v1/config-bundles/{digest}` (metadata only) if bundle reuse across sessions
+  turns out to matter in practice.
 
 ---
 
