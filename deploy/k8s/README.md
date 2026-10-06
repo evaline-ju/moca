@@ -841,3 +841,108 @@ worker's 30 s keepalive; check the annotation survived.
 
 **`P2` fails with a P4 ID missing.** The host's worker is not attached; read its journal on the
 host (`journalctl -u microvm-worker`).
+
+## 12. Single-namespace dev/test target (`--target ocp-single`)
+
+For a developer or CI tenant on a shared OpenShift cluster where you have **edit rights in one
+namespace and nothing else**: no cluster-scope RBAC, no SCC grants, no permission to read
+cluster-scoped objects. The whole stack -- supervisor, relay, control plane, Redis, the container
+sandbox pool, every Secret, the credential Role -- runs in that one namespace, reached by
+`port-forward` as on Kind.
+
+```bash
+export LOG_DIR=/tmp/kagenti/tdd/moca; mkdir -p "$LOG_DIR"
+SH_GITHUB_CLIENT_ID=<client id> SH_SINGLE_NAMESPACE=<your-namespace> \
+  deploy/k8s/setup.sh --target ocp-single >"$LOG_DIR/t-single-setup.log" 2>&1; echo "EXIT:$?"
+tail -4 "$LOG_DIR/t-single-setup.log"
+```
+
+The namespace must already exist (creating one needs cluster scope, which this target assumes you
+lack); `SH_SINGLE_NAMESPACE` defaults to `moca-single`. A ResourceQuota of 8 CPU / 32 Gi covers the
+default stack several times over (§4). The one requirement the cluster must meet anyway: a default
+StorageClass, for the Redis PVC.
+
+### 12.1 How it stays within the namespace
+
+Everything the `ocp` target does outside the namespace is skipped or replaced:
+
+| The `ocp` target                                                  | `ocp-single`                                                                                 |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| creates the `moca`, `moca-sandbox`, `moca-credentials` namespaces | uses your existing namespace (existence checked, never created)                              |
+| grants `nonroot-v2` to each ServiceAccount (`oc adm`)             | no SCC: every explicit UID/GID is stripped, restricted-v2 assigns from the namespace's range |
+| Routes, `ingresses.config/cluster` read, TLS secrets              | no Routes; `kubectl port-forward`, like Kind                                                 |
+| requires `oc`                                                     | kubectl only                                                                                 |
+
+The isolation the base draws from the namespace boundary moves to pod-label NetworkPolicies: the
+default-deny, the sandbox's egress (relay attach port and the public internet only), the relay's
+exec-port rule (supervisor only) are all enforced per pod label. The sandbox's egress policy is
+the one that carries the isolation: a tenant's own namespace policies can widen ingress (§12.3).
+The sandboxes mount no ServiceAccount token, so the kube API refuses them even where the cluster
+leaves it reachable (§12.3).
+
+Three consequences of the collapse, accepted for a dev/test tenant:
+
+- The secrets the base keeps out of `moca-sandbox` (the exec token, the Redis password, the MU1
+  keys) share the namespace with the sandbox pods -- anyone who can edit the namespace can read
+  them.
+- The control plane's Secret Role (`moca-control-plane-credentials`: get, create, update, patch,
+  delete; no list) is scoped to `moca-credentials` in the base, so it reaches user credentials
+  only. In one namespace it reaches **every** Secret: the relay attach and exec tokens, the Redis
+  password, the MU1 keys. A compromised control plane can read and overwrite platform secrets by
+  name, not just user credentials.
+- The sandbox workspace and home are `emptyDir`s, so they are lost when a sandbox pod restarts
+  (they are container-local in the base too).
+
+### 12.2 Smoke
+
+```bash
+K8S_LIVE_SMOKE=1 SMOKE_MODEL_URL=<endpoint> SMOKE_MODEL_TOKEN=<token> \
+  deploy/k8s/smoke.sh --target ocp-single >"$LOG_DIR/t-single-smoke.log" 2>&1; echo "EXIT:$?"
+```
+
+There is no in-pod mock model on this target (the `kind-ci` one rides the dev.local image), so the
+smoke needs a real model credential, like `--target ocp`. The claims are the container tier's:
+pods up, sandboxes attached, authenticated turns in a sandbox, isolation (redis, relay exec,
+metadata BLOCKED; relay attach OPEN), drain, Redis-restart persistence, no restarts. The kube API
+probe is reported as a `note`, not a claim (§12.3). For a custom namespace, export the same
+`SH_SINGLE_NAMESPACE` you installed with; without it, smoke reads the `moca-setup` ConfigMap in the
+kubeconfig's current namespace, so it finds the stack only when the context is already set to it.
+
+### 12.3 Verified
+
+Brought up and smoked (11/11) on a shared OpenShift 4.x tenant with edit-only namespace rights, an
+8 CPU / 32 Gi quota, RHACS image admission active, and no SCC grants: restricted-v2 assigned
+UID/GID/fsGroup 1002610000 from the namespace's range, the emptyDirs over `/workspace` and
+`/home/sandbox` were owned by the assigned fsGroup, and the cluster's CNI (Calico, on IBM Cloud
+ROKS) enforced the pod-label policies, with the exceptions below.
+
+**The kube-API Service VIP was reachable** from the sandbox. The VIP (`172.21.0.1:443`) is
+DNAT'd to ROKS's node-local apiserver proxy, `172.20.0.1:2040`, and the sandbox reaches that
+address directly too, although it is inside the excepted `172.16.0.0/12`; other ports on it, other
+private IPs, and the DNS VIP were blocked. The namespace's own policies do not explain it, so a
+cluster-level allowance does (not readable with namespace rights). The sandboxes mount no
+ServiceAccount token, so the API refuses them; treat it as defence-in-depth lost, not as an
+escape.
+
+**The node network is outside the egress `except` list.** That tenant's nodes sit on a
+publicly routable (non-RFC 1918) range, so the sandbox's internet rule admits it: the sandbox
+reached its node's kubelet (10250) and SSH (22). The `except` list covers RFC 1918, CGNAT and
+link-local only; on a cluster whose node or infrastructure network is publicly routable, add
+those CIDRs to the `except` list in `overlays/ocp-single/patch-policies.yaml` (there is no setup
+flag for it yet; #446).
+
+**A tenant `allow-same-namespace` policy** (ingress from any pod in the namespace, to every pod)
+was preinstalled. Policies are additive, so the overlay's ingress rules (the relay's
+supervisor-only exec port, Redis) admit any pod in the namespace there. The sandboxes stay
+isolated because their own egress policy is enforced: Redis and the relay exec port were BLOCKED
+from a sandbox.
+
+### 12.4 What does not work here
+
+**P4 microVM hosts** cannot attach: their path is the relay's OpenShift Route (§11), which this
+target does not render. Container sandboxes only -- which, until #425's tier selection is wired
+into a deployment, is the same one-tier-per-stack rule the other targets have anyway.
+
+**Renaming on re-run**: `SH_SINGLE_NAMESPACE` is not sticky -- it is validated and applied fresh
+every run. Pointing it at a different namespace installs a second stack there; the first one stays
+until its namespace is deleted.

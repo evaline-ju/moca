@@ -137,6 +137,12 @@ case "${1-} ${2-}" in
 "delete pod") : ;;
 "rollout status" | "rollout restart") : ;;
 "exec redis-0") echo "${MOCK_RECORDS:-2}" ;;
+"get namespace")
+  # ocp-single's existence check. MOCK_NO_NAMESPACE=NAME fails NAME's GET (NotFound).
+  if [[ -n "${MOCK_NO_NAMESPACE-}" && "$MOCK_NO_NAMESPACE" == "$3" ]]; then
+    echo "Error from server (NotFound): namespaces \"$3\" not found" >&2
+    exit 1
+  fi ;;
 "get storageclass")
   if [[ -n "${MOCK_GET_SC_FAIL-}" ]]; then echo 'Error from server (Forbidden): storageclasses is forbidden' >&2; exit 1; fi
   if [[ -n "${MOCK_NO_DEFAULT_SC-}" ]]; then echo '{"items":[{"metadata":{"name":"slow"}}]}'
@@ -742,5 +748,58 @@ expect_out "scp -r $REPO/deploy/k8s/.generated/ocp/p4/moca_microvm_0 <kvm-host>:
   fail 'the earlier copy is not removed before the scp'
 expect_out 'sudo deploy/microvm/setup-microvm.sh --remote ~/moca-p4-moca_microvm_0'
 pass 'P4 IDs render the p4-relay component and the relay Route host, and print each host command; none render nothing'
+
+echo "== ocp-single: single-namespace, no-SCC target"
+reset_state
+expect_fail --target prod-single
+expect_out 'kind, kind-ci, ocp or ocp-single'
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_fail --target ocp-single --tls-cert "$TMP/c.pem" --tls-key "$TMP/k.pem")
+expect_out 'apply to --target ocp only'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_P4_SANDBOX_IDS=moca_microvm_0; expect_fail --target ocp-single)
+expect_out 'needs --target ocp'
+pass 'ocp-single: unknown targets, TLS flags and P4 IDs are refused, naming the fix'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp-single)
+# No oc was needed (oc would be mocked, but preflight must not even require it: the PATH holds the
+# mocks, so assert on the absence of oc's whoami in the argv log instead).
+grep -q '^oc whoami' "$MOCK_LOG" && fail 'ocp-single ran oc, which the target must not need'
+# No SCC grant: the whole run never calls oc adm.
+grep -q 'oc adm' "$MOCK_LOG" && fail 'ocp-single granted an SCC, which the target must not do'
+# The namespace existence check ran, against the default moca-single.
+grep -q 'kubectl get namespace moca-single' "$MOCK_LOG" || fail 'the namespace existence check did not run'
+# The generated overlay sets the namespace transformer and rewrites the env strings off the
+# placeholder only when the namespace is custom; the default keeps the overlay's own strings.
+gen | grep -qx 'namespace: moca-single' || fail 'the generated overlay does not set the namespace transformer'
+! grep -q 'SH_RELAY_ADDR' "$MOCK_STATE/applied-kustomization.yaml" ||
+  fail 'the default namespace rewrote env strings that the overlay already carries'
+pass 'ocp-single: needs no oc and no SCC, checks the namespace exists, sets the namespace transformer'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SINGLE_NAMESPACE=moca-tenant-1; expect_ok --target ocp-single)
+gen | grep -qx 'namespace: moca-tenant-1' || fail 'a custom SH_SINGLE_NAMESPACE did not reach the generated overlay'
+gen | grep -q 'sandbox-relay-exec.moca-tenant-1.svc:9444' || fail 'the supervisor env string was not rewritten'
+gen | grep -q 'moca-control-plane.moca-tenant-1.svc:8080' || fail 'the control plane URL was not rewritten'
+gen | grep -q 'sandbox-relay-attach.moca-tenant-1.svc:9443' || fail 'the sandbox env string was not rewritten'
+jq -e -r '.data.SH_SINGLE_NAMESPACE' "$MOCK_STATE/moca-tenant-1__ConfigMap__moca-setup.json" >/dev/null 2>&1 ||
+  fail 'moca-setup does not record SH_SINGLE_NAMESPACE for the smoke to read'
+grep -q 'kubectl get namespace moca-tenant-1' "$MOCK_LOG" || fail 'the custom namespace existence check did not run'
+expect_out 'namespace moca-tenant-1'
+pass 'ocp-single: SH_SINGLE_NAMESPACE drives the transformer, the env strings and moca-setup'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SINGLE_NAMESPACE=Bad_NS; expect_fail --target ocp-single)
+expect_out 'is not a namespace name'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SINGLE_NAMESPACE=moca; expect_fail --target ocp-single)
+expect_out 'collides with the base'
+(export SH_GITHUB_CLIENT_ID=Iv1.a MOCK_NO_NAMESPACE=moca-single; expect_fail --target ocp-single)
+expect_out 'cannot create it'
+pass 'ocp-single: an invalid, a colliding and a missing namespace are refused, naming the fix'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp-single)
+expect_out 'kubectl -n moca-single port-forward svc/moca-supervisor'
+! grep -q 'https://' "$TMP/out" || fail 'ocp-single printed an https URL; it has no Routes'
+pass 'ocp-single: access is printed as port-forward commands, never a Route URL'
 
 echo "setup.test.sh: all passed"

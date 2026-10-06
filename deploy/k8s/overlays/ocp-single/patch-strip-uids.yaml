@@ -1,0 +1,64 @@
+# No SCC grants (README §12): every explicit UID/GID/fsGroup removed from the pod security
+# contexts, so OpenShift's restricted-v2 assigns them from the namespace's range. runAsNonRoot and
+# seccompProfile stay (an assigned UID is never 0), and the containers' own contexts
+# (readOnlyRootFilesystem, drop ALL, no privilege escalation) already satisfy restricted-v2.
+#
+# What must survive without an explicit UID, and does (verified on a shared OCP 4.x tenant,
+# README §12.3): the credential and token Secret mounts (SCC admission chowns secret volumes to
+# the assigned fsGroup), and Redis reading its 0440 config Secret the same way. The nonroot-v2
+# SCC that --target ocp grants exists for the base's fixed UIDs (65532, 999), which restricted-v2
+# does not reliably admit; with none set, it is not needed.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: moca-supervisor, namespace: moca }
+spec:
+  template:
+    spec:
+      securityContext:
+        runAsUser: null
+        runAsGroup: null
+        fsGroup: null
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: sandbox-relay, namespace: moca }
+spec:
+  template:
+    spec:
+      securityContext:
+        runAsUser: null
+        runAsGroup: null
+        fsGroup: null
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: moca-control-plane, namespace: moca }
+spec:
+  template:
+    spec:
+      securityContext:
+        runAsUser: null
+        runAsGroup: null
+        fsGroup: null
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: redis, namespace: moca }
+spec:
+  template:
+    spec:
+      securityContext:
+        runAsUser: null
+        runAsGroup: null
+        fsGroup: null
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: moca-sandbox, namespace: moca-sandbox }
+spec:
+  template:
+    spec:
+      securityContext:
+        runAsUser: null
+        runAsGroup: null
+        fsGroup: null

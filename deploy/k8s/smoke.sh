@@ -37,7 +37,7 @@ while [[ $# -gt 0 ]]; do
   *) echo "smoke.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done
-case "$TARGET" in kind | kind-ci | ocp) ;; *) echo "smoke.sh: --target must be kind, kind-ci or ocp" >&2; exit 2 ;; esac
+case "$TARGET" in kind | kind-ci | ocp | ocp-single) ;; *) echo "smoke.sh: --target must be kind, kind-ci, ocp or ocp-single" >&2; exit 2 ;; esac
 case "$TIER" in container | p4) ;; *) echo "smoke.sh: --tier must be container or p4" >&2; exit 2 ;; esac
 if [[ "$TIER" == p4 ]]; then
   [[ "$TARGET" == ocp ]] || { echo "smoke.sh: --tier p4 needs --target ocp (P4 hosts reach the relay through an OpenShift Route)" >&2; exit 2; }
@@ -48,6 +48,15 @@ kc() { if [[ "$TARGET" == kind* ]]; then kubectl --context kind-moca "$@"; else 
 
 NS=moca
 SBX=moca-sandbox
+# ocp-single: every workload shares the one namespace the stack was installed in
+# (SH_SINGLE_NAMESPACE, default moca-single). An exported SH_SINGLE_NAMESPACE wins; otherwise it is
+# read from the moca-setup ConfigMap in the kubeconfig's current namespace (the read needs a
+# namespace to find the one it names), and the default covers a ConfigMap that cannot be read.
+if [[ "$TARGET" == ocp-single ]]; then
+  NS="${SH_SINGLE_NAMESPACE:-$(kc get configmap moca-setup -o jsonpath='{.data.SH_SINGLE_NAMESPACE}' 2>/dev/null || true)}"
+  NS="${NS:-moca-single}"
+  SBX="$NS"
+fi
 OUT="$(mktemp -d)"
 chmod 700 "$OUT"
 PIDS=''
@@ -74,6 +83,8 @@ wait_for() { local n="$1"; shift; for _ in $(seq "$n"); do "$@" && return 0; sle
 note() { echo "  note $1"; }
 summary() { printf '\nPASS=%s FAIL=%s\n' "$PASS" "$FAIL"; [[ "$FAIL" == 0 ]]; }
 
+# kind-ci runs the in-pod mock model; ocp-single has no mock (README §12.2), so its smoke needs a
+# real model credential like --target ocp does.
 if [[ "$TARGET" == kind-ci ]]; then
   : "${SMOKE_MODEL_URL:=http://127.0.0.1:18099}" "${SMOKE_MODEL_TOKEN:=mock-not-a-secret}"
 fi
@@ -369,20 +380,28 @@ probe() {
     'timeout 3 bash -c "</dev/tcp/$0/$1" 2>/dev/null && echo OPEN || echo BLOCKED' "$1" "$2" 2>/dev/null || echo ERROR
 }
 iso_ok=1
-for t in redis.moca.svc:6379 sandbox-relay-exec.moca.svc:9444 169.254.169.254:80; do
+for t in redis.$NS.svc:6379 sandbox-relay-exec.$NS.svc:9444 169.254.169.254:80; do
   r="$(probe "${t%:*}" "${t#*:}")"
   [[ "$r" == BLOCKED ]] || { iso_ok=0; ko "$t is $r from a sandbox (want BLOCKED)"; }
 done
 r="$(probe kubernetes.default.svc 443)"
 if [[ "$TARGET" == ocp ]]; then
   [[ "$r" == BLOCKED ]] || { iso_ok=0; ko "kubernetes.default.svc:443 is $r (want BLOCKED)"; }
+elif [[ "$TARGET" == ocp-single ]]; then
+  # The three-namespace ocp target enforces this; on a shared cluster a cluster-level network
+  # allowance can admit the apiserver endpoint past the namespace's policies (on ROKS, the
+  # node-local proxy 172.20.0.1:2040, inside the excepted 172.16.0.0/12). The sandbox mounts no
+  # ServiceAccount token, so the API refuses it either way. README §12.3.
+  note "kubernetes.default.svc:443 is $r (a cluster-level network allowance can admit it past the namespace's policies; the sandbox holds no ServiceAccount token — README §12.3)"
 else
   note "kubernetes.default.svc:443 is $r (single-node kind: kindnet does not filter node-local traffic; enforced on OCP — README Troubleshooting)"
 fi
-r="$(probe sandbox-relay-attach.moca.svc 9443)"
+r="$(probe sandbox-relay-attach.$NS.svc 9443)"
 [[ "$r" == OPEN ]] || { iso_ok=0; ko "sandbox-relay-attach:9443 is $r (want OPEN)"; }
 if [[ "$iso_ok" == 0 ]]; then :; elif [[ "$TARGET" == ocp ]]; then
   ok 'redis, relay exec, kube API and metadata BLOCKED; relay attach OPEN'
+elif [[ "$TARGET" == ocp-single ]]; then
+  ok 'redis, relay exec and metadata BLOCKED; relay attach OPEN (kube API: see note)'
 else
   ok 'redis, relay exec, metadata BLOCKED; relay attach OPEN'
 fi

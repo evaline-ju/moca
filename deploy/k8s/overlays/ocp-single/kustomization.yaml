@@ -1,0 +1,51 @@
+# The dev/test single-namespace target (--target ocp-single): every workload, Secret, Role and
+# NetworkPolicy of the base in ONE namespace, for a developer or CI tenant on a shared OpenShift
+# cluster where you have edit rights in a namespace and nothing else.
+#
+# What setup.sh does with it (deploy/k8s/README.md §12): no namespace creation (cluster scope),
+# no SCC grants (restricted-v2 assigns UIDs), no Routes, no `oc`, no cluster-scoped reads. The
+# namespace is the one you point SH_SINGLE_NAMESPACE at; setup.sh patches it into the generated
+# overlay, because a checked-in kustomization cannot take one as input. Reach the supervisor and
+# control plane by port-forward, as on Kind.
+#
+# The trade versus --target ocp is isolation: the sandbox boundary is pod labels plus
+# NetworkPolicy, not a namespace boundary, and every Secret the base splits across namespaces
+# (the attach token apart from the exec token and the Redis password) shares the namespace with
+# the sandboxes. That is acceptable on a tenant nobody else can edit and unacceptable for the
+# multi-user deployment --target ocp is for. P4 hosts cannot attach (their path is the relay's
+# OpenShift Route, which this target does not render).
+#
+# The four kinds of change, each in its own patch file:
+#   delete-*.yaml        base's three Namespace objects and five per-namespace policies, which
+#                        would collide once collapsed ($patch: delete)
+#   network-policy-single.yaml   the one namespace's default-deny and DNS (openshift-dns:5353)
+#   patch-policies.yaml  the two base policies that select peers by namespaceSelector: same
+#                        namespace now, so pod labels carry it alone
+#   patch-addressing.yaml  the cross-namespace env strings (".moca.svc" hostnames, the credential
+#                        and sandbox namespace settings)
+#   patch-strip-uids.yaml  every explicit UID/GID/fsGroup removed, so restricted-v2 assigns them
+#                        from the namespace's range -- the point of not granting nonroot-v2
+#   patch-sandbox-emptydirs.yaml  /workspace and /home/sandbox as emptyDirs, owned by the assigned
+#                        fsGroup: the image bakes them 1001:0 for the nonroot-v2 SCC, which an
+#                        assigned UID cannot write
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# setup.sh's generated overlay replaces this with SH_SINGLE_NAMESPACE (default moca-single); the
+# placeholder keeps the checked-in overlay buildable and is what the manifest tests render.
+namespace: moca-single
+resources:
+  - ../../base
+  - network-policy-single.yaml
+patches:
+  - path: patch-addressing.yaml
+  - path: patch-strip-uids.yaml
+  - path: patch-sandbox-emptydirs.yaml
+  - path: patch-policies.yaml
+  - path: delete-ns-moca.yaml
+  - path: delete-ns-sandbox.yaml
+  - path: delete-ns-credentials.yaml
+  - path: delete-pol-moca-deny.yaml
+  - path: delete-pol-sandbox-deny.yaml
+  - path: delete-pol-credentials-deny.yaml
+  - path: delete-pol-moca-dns.yaml
+  - path: delete-pol-sandbox-dns.yaml
