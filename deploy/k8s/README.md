@@ -875,8 +875,10 @@ Everything the `ocp` target does outside the namespace is skipped or replaced:
 
 The isolation the base draws from the namespace boundary moves to pod-label NetworkPolicies: the
 default-deny, the sandbox's egress (relay attach port and the public internet only), the relay's
-exec-port rule (supervisor only) are all enforced per pod label. The sandboxes mount no ServiceAccount
-token, so the kube API refuses them even where the egress policy leaves it reachable (§12.3).
+exec-port rule (supervisor only) are all enforced per pod label. The sandbox's egress policy is
+the one that carries the isolation: a tenant's own namespace policies can widen ingress (§12.3).
+The sandboxes mount no ServiceAccount token, so the kube API refuses them even where the cluster
+leaves it reachable (§12.3).
 
 Three consequences of the collapse, accepted for a dev/test tenant:
 
@@ -911,18 +913,29 @@ kubeconfig's current namespace, so it finds the stack only when the context is a
 Brought up and smoked (11/11) on a shared OpenShift 4.x tenant with edit-only namespace rights, an
 8 CPU / 32 Gi quota, RHACS image admission active, and no SCC grants: restricted-v2 assigned
 UID/GID/fsGroup 1002610000 from the namespace's range, the emptyDirs over `/workspace` and
-`/home/sandbox` were owned by the assigned fsGroup, and OVN-Kubernetes enforced every pod-label
-policy (the kube API VIP was the one exception below).
+`/home/sandbox` were owned by the assigned fsGroup, and the cluster's CNI (Calico, on IBM Cloud
+ROKS) enforced the pod-label policies, with the exceptions below.
 
-**The kube-API Service VIP was reachable** from the sandbox despite the private-range egress
-blocks, on that cluster only: same-CIDR VIPs (DNS) were blocked, arbitrary private IPs were
-blocked, and other ports on the VIP were blocked. The most likely cause is the sandbox's own
-internet-egress rule, not the cluster: OVN-Kubernetes matches `ipBlock` after the Service VIP is
-DNAT'd to its endpoints, so the DNS VIP is blocked (its backends are pod IPs in excepted ranges),
-the VIP's other ports are blocked (no endpoint), and the API port passes if the apiserver endpoint
-lies outside the `except` list, where the `0.0.0.0/0` rule admits it. The endpoint address was not
-confirmed on that tenant. The sandboxes mount no ServiceAccount token, so the API refuses them;
-treat it as defence-in-depth lost, not as an escape.
+**The kube-API Service VIP was reachable** from the sandbox. The VIP (`172.21.0.1:443`) is
+DNAT'd to ROKS's node-local apiserver proxy, `172.20.0.1:2040`, and the sandbox reaches that
+address directly too, although it is inside the excepted `172.16.0.0/12`; other ports on it, other
+private IPs, and the DNS VIP were blocked. The namespace's own policies do not explain it, so a
+cluster-level allowance does (not readable with namespace rights). The sandboxes mount no
+ServiceAccount token, so the API refuses them; treat it as defence-in-depth lost, not as an
+escape.
+
+**The node network is outside the egress `except` list.** That tenant's nodes sit on a
+publicly routable (non-RFC 1918) range, so the sandbox's internet rule admits it: the sandbox
+reached its node's kubelet (10250) and SSH (22). The `except` list covers RFC 1918, CGNAT and
+link-local only; on a cluster whose node or infrastructure network is publicly routable, add
+those CIDRs to the `except` list in `overlays/ocp-single/patch-policies.yaml` (there is no setup
+flag for it).
+
+**A tenant `allow-same-namespace` policy** (ingress from any pod in the namespace, to every pod)
+was preinstalled. Policies are additive, so the overlay's ingress rules (the relay's
+supervisor-only exec port, Redis) admit any pod in the namespace there. The sandboxes stay
+isolated because their own egress policy is enforced: Redis and the relay exec port were BLOCKED
+from a sandbox.
 
 ### 12.4 What does not work here
 

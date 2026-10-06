@@ -388,11 +388,11 @@ r="$(probe kubernetes.default.svc 443)"
 if [[ "$TARGET" == ocp ]]; then
   [[ "$r" == BLOCKED ]] || { iso_ok=0; ko "kubernetes.default.svc:443 is $r (want BLOCKED)"; }
 elif [[ "$TARGET" == ocp-single ]]; then
-  # The three-namespace ocp target enforces this; here the sandbox's own internet-egress rule
-  # (0.0.0.0/0 minus the private ranges) most likely admits it: OVN-Kubernetes matches ipBlock
-  # after the Service VIP is DNAT'd, so an apiserver endpoint outside the excepted ranges passes. The
-  # sandbox mounts no ServiceAccount token, so the API refuses it either way. README §12.3.
-  note "kubernetes.default.svc:443 is $r (the internet-egress ipBlock can admit the apiserver endpoint after DNAT; the sandbox holds no ServiceAccount token — README §12.3)"
+  # The three-namespace ocp target enforces this; on a shared cluster a cluster-level network
+  # allowance can admit the apiserver endpoint past the namespace's policies (on ROKS, the
+  # node-local proxy 172.20.0.1:2040, inside the excepted 172.16.0.0/12). The sandbox mounts no
+  # ServiceAccount token, so the API refuses it either way. README §12.3.
+  note "kubernetes.default.svc:443 is $r (a cluster-level network allowance can admit it past the namespace's policies; the sandbox holds no ServiceAccount token — README §12.3)"
 else
   note "kubernetes.default.svc:443 is $r (single-node kind: kindnet does not filter node-local traffic; enforced on OCP — README Troubleshooting)"
 fi
