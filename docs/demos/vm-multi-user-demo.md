@@ -700,12 +700,12 @@ Say these in the room. They are what stops someone over-promising.
   `moca-egress`.
 - **P4 has no internet** (#277) **and no grant binding** (MI1 S4). Its workspaces are per session,
   but any holder of the relay's exec token can target any of them.
-- **A container session can lose its files between turns.** A session re-selects its sandbox on
-  every turn, least loaded first, with no affinity to the last one. Each `sh-sandbox-N` has its own
-  `/workspace` and no shared volume. So once two turns overlap, a session's next turn can land on
-  the other container, without its files. On an idle host, ties go to the same container, which is
-  why 2d found both directories in `sh-sandbox-1`. No container act here depends on files across
-  turns. The microVM tier's per-session workspace (4d) is what does keep them.
+- **A session returns to its sandbox.** Each turn goes back to the sandbox that served the previous
+  one. If that sandbox is saturated, or briefly absent (a relay restart) for up to
+  `SH_SANDBOX_AFFINITY_GRACE_SECONDS` (60 s), the turn answers 503 with `Retry-After` and the client
+  retries: the session waits and never moves. Only a sandbox gone past the grace moves the session,
+  to the least-loaded sandbox of its tier, on an empty workspace, and the turn says so
+  (`workspace reset: …`); it never crosses tiers.
 - **Both tiers on one host are not shown.** A host may run both: each session stays in the tier it
   was created in (`sandboxTier`) and returns to its sandbox (`deploy/microvm/P4-ON-P6.md`,
   "Container sandboxes and P4 on one host"). This demo switches to P4 only for Act 4 instead.
