@@ -31,6 +31,7 @@ export interface SessionSummary {
   state: 'active' | 'deleting';
   lastTurnAt: number | null;
   turns: number;
+  configRef?: string | null;
 }
 
 export interface SessionPage {
@@ -40,6 +41,8 @@ export interface SessionPage {
 
 export interface CreateSessionRequest {
   credentials?: { inference?: string };
+  /** A promoted config bundle digest; fixed for the session's life (ADR-0038). */
+  configRef?: string;
 }
 
 export interface SessionToken {
@@ -91,6 +94,10 @@ export interface ControlPlaneApi {
   listCredentials(): Promise<CredentialDescriptor[]>;
   putCredential(name: string, req: PutCredentialRequest): Promise<void>;
   deleteCredential(name: string): Promise<void>;
+  putConfigBundle(req: {
+    digest: string;
+    tar: string;
+  }): Promise<{ digest: string; uploaded: boolean }>;
 }
 
 export interface StreamTurnArgs {

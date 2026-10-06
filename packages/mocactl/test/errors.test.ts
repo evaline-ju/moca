@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ApiError, classify, errorFromResponse, networkError } from '../src/api/errors.js';
+import { describeError } from '../src/core/messages.js';
 import { json } from './helpers/fake-fetch.js';
 
 describe('errorFromResponse', () => {
@@ -74,4 +75,11 @@ describe('classify', () => {
       message: 'hi',
     });
   });
+});
+
+it('maps an expired config bundle to its own action and message', () => {
+  const err = new ApiError('harness', 410, 'config_bundle_not_found');
+  expect(classify(err)).toEqual({ kind: 'bundle-expired' });
+  expect(describeError(err)).toContain('promote');
+  expect(describeError(err)).toContain('new session');
 });

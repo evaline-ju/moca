@@ -57,6 +57,7 @@ export type UiAction =
   | { kind: 'login' }
   | { kind: 'harness-token-rejected' }
   | { kind: 'session-gone' }
+  | { kind: 'bundle-expired' }
   | { kind: 'endpoint-unresolved'; message: string }
   | { kind: 'operator-misconfigured'; message: string }
   | { kind: 'retry-after'; seconds: number }
@@ -71,6 +72,7 @@ export function classify(err: ApiError): UiAction {
     return err.source === 'harness' ? { kind: 'harness-token-rejected' } : { kind: 'login' };
   }
   if (err.code === 'session_not_found') return { kind: 'session-gone' };
+  if (err.code === 'config_bundle_not_found') return { kind: 'bundle-expired' };
   if (err.code === 'endpoint_unresolved')
     return { kind: 'endpoint-unresolved', message: err.message };
   // Before the >= 500 branch: a 502 here is not "try again shortly" -- retrying never helps (#405).

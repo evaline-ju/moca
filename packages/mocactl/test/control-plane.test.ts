@@ -111,3 +111,13 @@ describe('ControlPlaneClient', () => {
     expect(err).toMatchObject({ status: 0, code: 'network_error', source: 'control-plane' });
   });
 });
+
+it('putConfigBundle POSTs digest and tar to /v1/config-bundles', async () => {
+  const { fetch, calls } = scriptedFetch(json({ digest: 'sha256:x', uploaded: true }, 201));
+  expect(await client(fetch).putConfigBundle({ digest: 'sha256:x', tar: 'AAAA' })).toEqual({
+    digest: 'sha256:x',
+    uploaded: true,
+  });
+  expect(calls[0]).toMatchObject({ method: 'POST', url: 'http://cp/v1/config-bundles' });
+  expect(calls[0].body).toEqual({ digest: 'sha256:x', tar: 'AAAA' });
+});

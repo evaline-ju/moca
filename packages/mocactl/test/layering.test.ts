@@ -25,9 +25,13 @@ describe('layering (spec §3.1)', () => {
     }
   });
 
-  it('declares no workspace dependency', () => {
+  // ADR-0038: exactly one exception to ADR-0036's rule. A second one must fail here.
+  const ALLOWED_WORKSPACE_DEPS = new Set(['@moca/config-bundle']);
+
+  it('declares no workspace dependency beyond the ADR-0038 allow-list', () => {
     const all = { ...pkg.dependencies, ...pkg.devDependencies };
     for (const [name, range] of Object.entries(all)) {
+      if (ALLOWED_WORKSPACE_DEPS.has(name)) continue;
       expect(String(range), name).not.toMatch(/^workspace:/);
       expect(name).not.toMatch(/^@moca\//);
     }

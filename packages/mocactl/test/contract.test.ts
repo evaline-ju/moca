@@ -36,7 +36,7 @@ const USED: Array<{ method: string; path: string; reads?: string[]; sends?: stri
     method: 'post',
     path: '/v1/sessions',
     reads: ['sessionId', 'token', 'expiresAt'],
-    sends: ['credentials'],
+    sends: ['credentials', 'configRef'],
   },
   { method: 'get', path: '/v1/sessions/{id}' },
   { method: 'delete', path: '/v1/sessions/{id}' },
@@ -44,6 +44,12 @@ const USED: Array<{ method: string; path: string; reads?: string[]; sends?: stri
   { method: 'get', path: '/v1/credentials', reads: ['credentials'] },
   { method: 'put', path: '/v1/credentials/{name}' },
   { method: 'delete', path: '/v1/credentials/{name}' },
+  {
+    method: 'post',
+    path: '/v1/config-bundles',
+    reads: ['digest', 'uploaded'],
+    sends: ['digest', 'tar'],
+  },
 ];
 
 // Codes the client branches on (api/errors.ts, core/session-manager.ts).
@@ -126,6 +132,7 @@ describe('control-plane contract (docs/api/openapi.yaml)', () => {
       secret: {},
     });
     await cProxy.deleteCredential('NAME');
+    await cProxy.putConfigBundle({ digest: 'sha256:x', tar: '' });
     const seen = calls.map((k) => {
       const path = new URL(k.url).pathname.replace('/ID', '/{id}').replace('/NAME', '/{name}');
       return `${k.method.toLowerCase()} ${path}`;
