@@ -4,7 +4,8 @@
 # Root-free, KVM-free test for setup-microvm.sh. podman, systemctl, id and go are mocked onto PATH
 # and log their argv; the installer runs against a temp SH_UNIT_DIR/SH_ENV_DIR/SH_BIN_DIR seeded with
 # the two P6 files it reads. Asserts: refusals happen before anything is written, the token is
-# generated once and shared by exactly the two files that need it, and a re-run changes nothing.
+# generated once and shared by exactly the two files that need it, a host that also runs container
+# sandboxes is tiered (P6.3), and a re-run changes nothing.
 #
 # sleep is NOT mocked: --remote's attach wait is bounded by the wall clock (bash's SECONDS), which a
 # mocked sleep would turn into a busy loop. MICROVM_ATTACH_TIMEOUT=1 and MICROVM_ATTACH_SETTLE=1
@@ -79,6 +80,7 @@ exit 0
 MOCK
 # awk logs its argv like the other mocks, so a test can prove no token is ever an argument.
 real_awk="$(command -v awk)"
+# shellcheck disable=SC2016 # $* and $MOCK_LOG are for the mock to expand, not this shell
 printf '#!/bin/sh\nprintf "awk %%s\\n" "$*" >>"$MOCK_LOG"\nexec %s "$@"\n' "$real_awk" >"$TMP/bin/awk"
 chmod +x "$TMP/bin/"*
 export PATH="$TMP/bin:$PATH"
@@ -243,25 +245,83 @@ reset_host; MICROVM_ATTACH_SETTLE=0 run >/dev/null
 check "the settle refusal names the worker's first backoff it must outlast" "$(grep -c 'MICROVM_ATTACH_SETTLE.*750ms' "$TMP/run.log")" "1"
 
 echo "== refusals write nothing"
-for case in containers stopped-containers no-p6 no-snapshot dashed-id reserved-id; do
+for case in no-p6 no-snapshot dashed-id reserved-id bad-default; do
   reset_host
   case "$case" in
-    containers) export MOCK_PODMAN_PS="sh-sandbox-0 sh-sandbox-1" ;;
-    # I3: a stopped --restart=always container comes back at boot (podman-restart.service).
-    stopped-containers) export MOCK_PODMAN_PS_STOPPED="sh-sandbox-0" ;;
     no-p6) rm -f "$TMP/etc/relay.env" ;;
     no-snapshot) rm -f "$TMP/snap/manifest.json" ;;
     dashed-id) export MICROVM_SANDBOX_ID=sbx-microvm-1 ;;
     reserved-id) export MICROVM_SANDBOX_ID=DIR ;; # the relay refuses it before any lookup
+    # On a mixed host, so the refusal is proven to come before install_tiers writes anything.
+    bad-default) export SH_SANDBOX_DEFAULT_TIER=gpu MOCK_PODMAN_PS="sh-sandbox-0" ;;
   esac
   check "$case: exit 1" "$(run)" "1"
   check "$case: no microvm env files" "$(find "$TMP/etc" -name '*microvm*' | wc -l | tr -d ' ')" "0"
   check "$case: no systemctl" "$(grep -c '^systemctl' "$MOCK_LOG")" "0"
-  unset MOCK_PODMAN_PS MOCK_PODMAN_PS_STOPPED MICROVM_SANDBOX_ID
+  unset MOCK_PODMAN_PS MOCK_PODMAN_PS_STOPPED MICROVM_SANDBOX_ID SH_SANDBOX_DEFAULT_TIER
 done
-reset_host; MOCK_PODMAN_PS="sh-sandbox-0" run >/dev/null
-check "containers: the refusal names them and the fix" \
-  "$(grep -c 'sh-sandbox-0.*SH_SANDBOX_COUNT=0' "$TMP/run.log")" "1"
+reset_host; SH_SANDBOX_DEFAULT_TIER=gpu run >/dev/null
+check "bad-default: the refusal names the variable and its choices" \
+  "$(grep -c "SH_SANDBOX_DEFAULT_TIER='gpu' must be container or microvm" "$TMP/run.log")" "1"
+
+echo "== a host with container sandboxes too is tiered, not refused (P6.3, spec §7)"
+TE="$TMP/etc/microvm-tiers.env"
+TS="$TMP/units/sh-supervisor.service.d/50-microvm-tiers.conf"
+TC="$TMP/units/sh-control-plane.service.d/50-microvm-tiers.conf"
+tiers_files() { echo "$([ -e "$TE" ] && echo env)$([ -e "$TS" ] && echo +sup)$([ -e "$TC" ] && echo +cp)"; }
+for case in containers stopped-containers; do
+  reset_host
+  case "$case" in
+    containers) export MOCK_PODMAN_PS="sh-sandbox-0 sh-sandbox-1" ;;
+    # I3: a stopped --restart=always container comes back at boot (podman-restart.service), so
+    # it counts: the host is mixed again after the next boot.
+    stopped-containers) export MOCK_PODMAN_PS_STOPPED="sh-sandbox-0" ;;
+  esac
+  check "mixed host ($case): exit 0 (no longer refused)" "$(run)" "0"
+  check "mixed host ($case): tiers env" "$(val SH_SANDBOX_TIERS "$TE")" "container,microvm"
+  check "mixed host ($case): default tier" "$(val SH_SANDBOX_DEFAULT_TIER "$TE")" "container"
+  check "mixed host ($case): supervisor drop-in" \
+    "$(grep -c "^EnvironmentFile=$TE$" "$TS")" "1"
+  check "mixed host ($case): control-plane drop-in" \
+    "$(grep -c "^EnvironmentFile=$TE$" "$TC")" "1"
+  check "mixed host ($case): supervisor try-restarted" "$(grep -c '^systemctl try-restart sh-supervisor.service$' "$MOCK_LOG")" "1"
+  check "mixed host ($case): control plane try-restarted" "$(grep -c '^systemctl try-restart sh-control-plane.service$' "$MOCK_LOG")" "1"
+  check "mixed host ($case): never a plain restart of either" "$(grep -cE '^systemctl restart sh-(supervisor|control-plane)\.service$' "$MOCK_LOG")" "0"
+  check "mixed host ($case): logged" "$(grep -c 'two sandbox tiers on this host' "$TMP/run.log")" "1"
+  check "mixed host ($case): supervisor.env and control-plane.env never written" \
+    "$(find "$TMP/etc" -name 'supervisor.env' -o -name 'control-plane.env' | wc -l | tr -d ' ')" "0"
+  unset MOCK_PODMAN_PS MOCK_PODMAN_PS_STOPPED
+done
+
+export MOCK_PODMAN_PS="sh-sandbox-0 sh-sandbox-1" # still mixed, from the containers case's install
+reset_host; run >/dev/null
+before="$(hash_tree)"; : >"$MOCK_LOG"
+check "mixed re-run: exit 0" "$(run)" "0"
+check "mixed re-run: every file byte-identical" "$(hash_tree)" "$before"
+check "mixed re-run: no daemon-reload" "$(grep -c 'daemon-reload' "$MOCK_LOG")" "0"
+check "mixed re-run: neither unit try-restarted" "$(grep -cE 'restart sh-(supervisor|control-plane)' "$MOCK_LOG")" "0"
+
+: >"$MOCK_LOG"
+check "SH_SANDBOX_DEFAULT_TIER=microvm: exit 0" "$(SH_SANDBOX_DEFAULT_TIER=microvm run)" "0"
+check "SH_SANDBOX_DEFAULT_TIER=microvm: written" "$(val SH_SANDBOX_DEFAULT_TIER "$TE")" "microvm"
+check "SH_SANDBOX_DEFAULT_TIER=microvm: the tiers unchanged" "$(val SH_SANDBOX_TIERS "$TE")" "container,microvm"
+check "SH_SANDBOX_DEFAULT_TIER=microvm: both units try-restarted" \
+  "$(grep -cE '^systemctl try-restart sh-(supervisor|control-plane)\.service$' "$MOCK_LOG")" "2"
+# An env file is re-read at every start; only a changed unit or drop-in needs a reload.
+check "SH_SANDBOX_DEFAULT_TIER=microvm: no daemon-reload (only the env file changed)" \
+  "$(grep -c 'daemon-reload' "$MOCK_LOG")" "0"
+
+unset MOCK_PODMAN_PS; : >"$MOCK_LOG"
+check "back to P4-only: exit 0" "$(run)" "0"
+check "back to P4-only: the tiers env and both drop-ins are gone" "$(tiers_files)" ""
+check "back to P4-only: daemon-reload (the drop-ins went)" "$(grep -c '^systemctl daemon-reload$' "$MOCK_LOG")" "1"
+check "back to P4-only: supervisor try-restarted" "$(grep -c '^systemctl try-restart sh-supervisor.service$' "$MOCK_LOG")" "1"
+check "back to P4-only: control plane try-restarted" "$(grep -c '^systemctl try-restart sh-control-plane.service$' "$MOCK_LOG")" "1"
+check "back to P4-only: never a plain restart of either" "$(grep -cE '^systemctl restart sh-(supervisor|control-plane)\.service$' "$MOCK_LOG")" "0"
+: >"$MOCK_LOG"
+check "P4-only re-run: exit 0" "$(run)" "0"
+check "P4-only re-run: neither unit try-restarted" "$(grep -cE 'restart sh-(supervisor|control-plane)' "$MOCK_LOG")" "0"
+check "P4-only re-run: not logged as tiered" "$(grep -c 'two sandbox tiers' "$TMP/run.log")" "0"
 
 echo "== an attach that never shows up fails the install, naming the journal"
 reset_host
@@ -338,7 +398,7 @@ check "churn: the journal was re-read after the settle" "$(cat "$TMP/journal-cal
 rm -f "$TMP/journal-calls"; t0=$SECONDS
 MICROVM_ATTACH_TIMEOUT=3 MICROVM_ATTACH_SETTLE=2 MOCK_JOURNAL_CHURN=1 runr "$B" >/dev/null
 check "churn, TIMEOUT=3 SETTLE=2: refused within TIMEOUT + SETTLE + 1 (+1 s slack), not 9 s" \
-  "$( (($SECONDS - t0 <= 7)) && echo bounded || echo "took $((SECONDS - t0))s")" "bounded"
+  "$( ((SECONDS - t0 <= 7)) && echo bounded || echo "took $((SECONDS - t0))s")" "bounded"
 check "churn: the refusal names the current invocation's journal" "$(grep -c 'journalctl -u microvm-worker _SYSTEMD_INVOCATION_ID=inv-1' "$TMP/run.log")" "1"
 check "an attach after a stream that ended counts (a reconnect): exit 0" \
   "$(MOCK_JOURNAL_TAIL="$(printf 'microvm-worker: stream ended (EOF); reconnecting in 1s\nmicrovm-worker: attached, serving execs')" runr "$B")" "0"
@@ -394,6 +454,24 @@ check "local: 50-moca-p6.conf back, 50-moca-remote.conf gone" \
 check "local: the relay is not restarted (its drop-in and env did not change)" "$(grep -c 'restart sh-relay' "$MOCK_LOG")" "0"
 check "local: attach verified against the local presence records" "$(grep -c 'HEXISTS sh:sandbox:records moca_microvm_0' "$MOCK_LOG")" "1"
 check "local: no token on any argv" "$(grep -cE "$BTOK|$ltok" "$MOCK_LOG")" "0"
+
+echo "== --remote leaves the sandbox tiers to the cluster's setup.sh (P6.3, spec §7)"
+reset_remote_host; mkbundle "$B"
+check "remote with containers: exit 0" "$(MOCK_PODMAN_PS="sh-sandbox-0" runr "$B")" "0"
+check "remote with containers: no tiers env, no drop-ins" "$(tiers_files)" ""
+check "remote with containers: neither unit try-restarted" "$(grep -cE 'restart sh-(supervisor|control-plane)' "$MOCK_LOG")" "0"
+reset_remote_host; mkbundle "$B"
+check "remote, bad SH_SANDBOX_DEFAULT_TIER: exit 1 (preflight checks it on both paths)" \
+  "$(SH_SANDBOX_DEFAULT_TIER=gpu runr "$B")" "1"
+check "remote, bad SH_SANDBOX_DEFAULT_TIER: no microvm env files" "$(find "$TMP/etc" -name '*microvm*' | wc -l | tr -d ' ')" "0"
+check "remote, bad SH_SANDBOX_DEFAULT_TIER: no systemctl" "$(grep -c '^systemctl' "$MOCK_LOG")" "0"
+reset_host; export MOCK_PODMAN_PS="sh-sandbox-0"
+check "a mixed local install: exit 0" "$(run)" "0"
+tiers_before="$(cksum "$TE" "$TS" "$TC")"; : >"$MOCK_LOG"
+check "then --remote: exit 0" "$(runr "$B")" "0"
+check "then --remote: the mixed run's tiers files are left in place, unchanged" "$(cksum "$TE" "$TS" "$TC" 2>&1)" "$tiers_before"
+check "then --remote: neither unit try-restarted" "$(grep -cE 'restart sh-(supervisor|control-plane)' "$MOCK_LOG")" "0"
+unset MOCK_PODMAN_PS
 
 if [ "$fails" -eq 0 ]; then echo "PASS"; else echo "FAIL ($fails)"; fi
 exit "$fails"

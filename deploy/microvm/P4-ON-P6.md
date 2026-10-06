@@ -11,42 +11,57 @@ never writes one of them.
 > **Read "Limits" before a demo.** A P4 guest has **no network**: `curl` and `git` to the internet
 > fail inside it (#277). There is **no grant binding** either (MI1 S4).
 
-## A P4-only host
+## Container sandboxes and P4 on one host
 
-A host runs **either** the container sandboxes **or** the microVM worker, not both at once.
+A host may run the container sandboxes and the microVM worker together. Each session runs in ONE
+tier for its whole life: the one it was created in (`mocactl run --new --option sandboxTier=microvm`,
+or the New Session form), else the default, `container` (`SH_SANDBOX_DEFAULT_TIER=microvm` on the
+`setup-microvm.sh` run changes it). `setup-microvm.sh` makes such a host tiered on its own: it writes
+`microvm-tiers.env` and drop-ins that load it into `sh-supervisor` and `sh-control-plane`, then
+try-restarts both. A P4-only host stays untiered.
 
-This is not a choice made for convenience. `selectPoolSandbox` (`harness/src/select-sandbox.ts`)
-leases the least-loaded of **all** the relay's presence records, and it selects again on **every
-turn**. A record carries no tier label: `session.Config` has no labels, and the relay keeps only
-`sandboxId`, `capabilities` and `capacityMax`. With both tiers attached, a session's second turn can
-land in a container and lose the files its first turn wrote in a microVM workspace. With exactly one
-microVM worker and no containers, every turn of every session lands on it.
+A session also returns to the sandbox that served its previous turn. If that sandbox is briefly gone
+(a relay restart), turns answer 503 and the client retries. If it stays gone past
+`SH_SANDBOX_AFFINITY_GRACE_SECONDS` (60 s), the session moves to another sandbox of its tier, on a
+fresh workspace, and the turn says so (`workspace reset: …`). Design:
+`docs/specs/2026-10-04-p6-on-kubernetes-slice3-design.md`.
 
-Choosing the tier per session (worker labels, a session attribute, a record filter) is **not built**.
+Every worker on a tiered host must be P6.3 or later: an older worker advertises no tier and is
+excluded, with a log line naming it.
 
-**To go P4-only on an installed P6:**
+A container counts while it **exists**, running or stopped: `setup-vm.sh` runs them with
+`--restart=always`, and `podman-restart.service` brings a stopped one back at boot. Re-run
+`setup-microvm.sh` after adding or removing the container sandboxes, so the host's tiers follow.
+`SH_SANDBOX_DEFAULT_TIER` is not remembered between runs: give it on every run, or a re-run without
+it sets `container` again.
+
+**To go P4-only (optional) on an installed P6:**
 
 ```bash
 sudo podman rm -f $(sudo podman ps -a --format '{{.Names}}' --filter 'name=^sh-sandbox-')
 cd /opt/serverless-harness && sudo SH_SANDBOX_COUNT=0 ./deploy/vm/setup-vm.sh
+sudo deploy/microvm/setup-microvm.sh   # removes the tier files, try-restarts both units
 ```
 
 The second command matters. Without `SH_SANDBOX_COUNT=0`, a later P6 re-run starts the containers
-again. A stopped container is not enough either: `setup-vm.sh` runs them with `--restart=always`, and
-`podman-restart.service` brings them back at boot. `setup-microvm.sh` therefore refuses while **any**
-`sh-sandbox-*` container exists, running or stopped.
+again, and the host is mixed once more. Removing the containers is the only way: a stopped one still
+counts, for the reason above.
 
 On a host installed **before** the control plane (#366), that `setup-vm.sh` re-run also installs it.
 It generates the control plane's keypair and writes `SH_REQUIRE_AUTH=true` to `supervisor.env`,
-which closes the unauthenticated `/turn` that "Run a turn" below uses.
+which closes the unauthenticated `/turn` that "Run a turn" below uses. A plain `setup-vm.sh` re-run
+(no `SH_SANDBOX_COUNT=0`) installs it just the same, on a host that keeps its containers.
 
-**To go back to containers:**
+**To go back to containers only (optional):**
 
 ```bash
 sudo systemctl disable --now microvm-worker.service
 sudo podman exec sh-redis redis-cli HDEL sh:sandbox:records moca_microvm_0
 cd /opt/serverless-harness && sudo ./deploy/vm/setup-vm.sh   # default SH_SANDBOX_COUNT=2
 ```
+
+A host that was tiered also needs the tier files removed, as in "Uninstall" below: with the microVM
+worker gone, a session created in the `microvm` tier has no sandbox to run in.
 
 ## Prerequisites
 
@@ -139,15 +154,17 @@ refused. It also checks that `sh-relay.service` is installed and that the golden
 
 **What it writes:**
 
-| File                                                              | Contents                                                                                                                                                                                                                                       |
-| ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/usr/local/bin/microvm-worker`                                   | built from `remote-worker/cmd/microvm-worker` (or `MICROVM_BIN`)                                                                                                                                                                               |
-| `/etc/systemd/system/microvm-worker.service`, `microvm-vms.slice` | the shipped files, verbatim                                                                                                                                                                                                                    |
-| `/etc/serverless-harness/microvm-worker.env` (0600)               | `RELAY_ADDR=127.0.0.1:<SH_RELAY_PORT>`, `SANDBOX_ID`, `SANDBOX_TOKEN`, `SH_WORKSPACE_IDLE=8h`                                                                                                                                                  |
-| `/etc/serverless-harness/microvm-relay.env` (0600)                | `SH_RELAY_TOKEN_<sandbox id>=<the same token>`                                                                                                                                                                                                 |
-| `sh-relay.service.d/50-moca-microvm.conf`                         | `EnvironmentFile=` the relay file above                                                                                                                                                                                                        |
-| `microvm-worker.service.d/50-moca-p6.conf`                        | `EnvironmentFile=` the worker file; `After=`/`Wants=sh-relay.service`                                                                                                                                                                          |
-| `microvm-worker.service.d/60-moca-memory.conf`                    | only with `MICROVM_MAX_COMMITTED_MB`: the budget, plus `AssertMemory=` reset and re-asserted at 90% of it. The reset clears **every** assertion, so the drop-in also re-states the shipped unit's others, `AssertPathExists=/dev/kvm` included |
+| File                                                                                                | Contents                                                                                                                                                                                                                                       |
+| --------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/usr/local/bin/microvm-worker`                                                                     | built from `remote-worker/cmd/microvm-worker` (or `MICROVM_BIN`)                                                                                                                                                                               |
+| `/etc/systemd/system/microvm-worker.service`, `microvm-vms.slice`                                   | the shipped files, verbatim                                                                                                                                                                                                                    |
+| `/etc/serverless-harness/microvm-worker.env` (0600)                                                 | `RELAY_ADDR=127.0.0.1:<SH_RELAY_PORT>`, `SANDBOX_ID`, `SANDBOX_TOKEN`, `SH_WORKSPACE_IDLE=8h`                                                                                                                                                  |
+| `/etc/serverless-harness/microvm-relay.env` (0600)                                                  | `SH_RELAY_TOKEN_<sandbox id>=<the same token>`                                                                                                                                                                                                 |
+| `sh-relay.service.d/50-moca-microvm.conf`                                                           | `EnvironmentFile=` the relay file above                                                                                                                                                                                                        |
+| `microvm-worker.service.d/50-moca-p6.conf`                                                          | `EnvironmentFile=` the worker file; `After=`/`Wants=sh-relay.service`                                                                                                                                                                          |
+| `microvm-worker.service.d/60-moca-memory.conf`                                                      | only with `MICROVM_MAX_COMMITTED_MB`: the budget, plus `AssertMemory=` reset and re-asserted at 90% of it. The reset clears **every** assertion, so the drop-in also re-states the shipped unit's others, `AssertPathExists=/dev/kvm` included |
+| `/etc/serverless-harness/microvm-tiers.env` (0644)                                                  | only on a host that also has container sandboxes: `SH_SANDBOX_TIERS=container,microvm`, `SH_SANDBOX_DEFAULT_TIER` (`container`, or the run's `SH_SANDBOX_DEFAULT_TIER`). Removed on a P4-only host                                             |
+| `sh-supervisor.service.d/50-microvm-tiers.conf`, `sh-control-plane.service.d/50-microvm-tiers.conf` | with it: `EnvironmentFile=` the tiers file, ONE file for both units so they cannot disagree                                                                                                                                                    |
 
 **The token:**
 
@@ -175,6 +192,8 @@ exactly that problem, which is why the installer refuses dashed ids.
 - **The worker:** stopped, its presence record cleared, then started, whenever its binary, unit,
   drop-ins or env file changed. It is also started if it isn't running, for example `failed` after a
   snapshot problem.
+- **The supervisor and the control plane:** `try-restart`ed, never started, when the tiers file or
+  its drop-ins were written or removed. A stopped unit stays stopped and reads them on its next start.
 - **A running, unchanged worker is left alone.**
 
 The install is not finished until the relay has mirrored the worker into `sh:sandbox:records`. That
@@ -465,7 +484,7 @@ Verified on 2026-09-30:
   (MI1 S4).
 - **A fresh VM per tool call** (#274). Destroying the VM dominates Exec latency (#307).
 - **The silent workspace reset** (#338, above).
-- **One tier per host** ("A P4-only host", above).
+- **A workspace lives on one sandbox.** A session that moves (its sandbox gone past the grace) starts on an empty workspace; nothing copies it.
 - **A `setup-vm.sh` re-run forgets every session.** It recreates `sh-redis` (`--replace`, no volume;
   `deploy/vm/setup-vm.sh`, `start_redis`). The control plane's session and ownership index goes with
   it, so every user's sessions are gone. Their workspaces stay under `/srv/workspaces` until idle
@@ -484,6 +503,11 @@ sudo rm -rf /etc/systemd/system/microvm-worker.service.d \
   /usr/local/bin/microvm-worker
 sudo rmdir /etc/systemd/system/sh-relay.service.d 2>/dev/null || true
 sudo systemctl daemon-reload && sudo systemctl restart sh-relay.service
+# the sandbox tiers, on a host that also ran container sandboxes ("Container sandboxes and P4 on one host"):
+sudo rm -f /etc/serverless-harness/microvm-tiers.env \
+  /etc/systemd/system/sh-supervisor.service.d/50-microvm-tiers.conf \
+  /etc/systemd/system/sh-control-plane.service.d/50-microvm-tiers.conf
+sudo systemctl daemon-reload && sudo systemctl try-restart sh-control-plane sh-supervisor
 # the model and check settings from "Run a turn" and "Automated check", if present:
 sudo rm -f /etc/systemd/system/sh-supervisor.service.d/90-p4-smoke.conf \
   /etc/systemd/system/sh-supervisor.service.d/91-p4-real-model.conf \
