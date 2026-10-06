@@ -42,6 +42,9 @@ printf 'systemctl %s\n' "$*" >>"$MOCK_LOG"
 # is-active answers MOCK_IS_ACTIVE's exit code (0 = active, 3 = inactive/failed, as systemd does).
 [ "$1" = is-active ] && exit "${MOCK_IS_ACTIVE:-0}"
 [ "$1" = show ] && { echo "${MOCK_INVOCATION:-inv-1}"; exit 0; } # show -p InvocationID --value <unit>
+# try-restart of a unit systemd cannot find is refused, exit 5, as systemd does: a P6 host installed
+# before #366 has no sh-control-plane.service. The installed units are the files under SH_UNIT_DIR.
+if [ "$1" = try-restart ] && [ ! -f "$SH_UNIT_DIR/$2" ]; then echo "Failed to try-restart $2: Unit $2 not found." >&2; exit 5; fi
 exit 0
 MOCK
 cat >"$TMP/bin/id" <<'MOCK'
@@ -85,12 +88,13 @@ printf '#!/bin/sh\nprintf "awk %%s\\n" "$*" >>"$MOCK_LOG"\nexec %s "$@"\n' "$rea
 chmod +x "$TMP/bin/"*
 export PATH="$TMP/bin:$PATH"
 
-reset_host() { # a fresh P6 install: relay.env + sh-relay.service, a snapshot, nothing of ours
+reset_host() { # a fresh P6 install: relay.env + its three units, a snapshot, nothing of ours
   rm -rf "${TMP:?}/units" "${TMP:?}/etc" "${TMP:?}/usrbin" "${TMP:?}/snap"
   mkdir -p "$TMP/units" "$TMP/etc" "$TMP/usrbin" "$TMP/snap"
   printf 'SH_RELAY_PORT=9443\nSH_RELAY_TOKEN=container-token\nMOCA_RELAY_EXEC_TOKEN=exec-secret\n' \
     >"$TMP/etc/relay.env"
-  printf '[Service]\nExecStart=/bin/true\n' >"$TMP/units/sh-relay.service"
+  local u
+  for u in sh-relay sh-supervisor sh-control-plane; do printf '[Service]\nExecStart=/bin/true\n' >"$TMP/units/$u.service"; done
   printf '{}\n' >"$TMP/snap/manifest.json"
   : >"$MOCK_LOG"
 }
@@ -353,7 +357,7 @@ mkbundle() { # mkbundle DIR [RELAY_ADDR] [with-ca|no-ca]
 }
 reset_remote_host() { # no P6 at all: just a snapshot
   reset_host
-  rm -f "$TMP/etc/relay.env" "$TMP/units/sh-relay.service"
+  rm -f "$TMP/etc/relay.env" "$TMP/units/"sh-*.service
 }
 runr() { bash "$SCRIPT" --remote "$1" >"$TMP/run.log" 2>&1; echo $?; }
 B="$TMP/bundle"; CA="$TMP/etc/microvm-relay-ca.crt"; RD="$TMP/units/microvm-worker.service.d/50-moca-remote.conf"
@@ -466,6 +470,16 @@ check "local: 50-moca-p6.conf back, 50-moca-remote.conf gone" \
 check "local: the relay is not restarted (its drop-in and env did not change)" "$(grep -c 'restart sh-relay' "$MOCK_LOG")" "0"
 check "local: attach verified against the local presence records" "$(grep -c 'HEXISTS sh:sandbox:records moca_microvm_0' "$MOCK_LOG")" "1"
 check "local: no token on any argv" "$(grep -cE "$BTOK|$ltok" "$MOCK_LOG")" "0"
+
+echo "== a P6 installed before the control plane (#366): try-restart only the units that exist"
+reset_host; rm -f "$TMP/units/sh-control-plane.service"; export MOCK_PODMAN_PS="sh-sandbox-0"
+check "no control-plane unit: exit 0" "$(run)" "0"
+check "no control-plane unit: the supervisor try-restarted" "$(grep -c '^systemctl try-restart sh-supervisor.service$' "$MOCK_LOG")" "1"
+check "no control-plane unit: no try-restart of the missing unit" "$(grep -c 'try-restart sh-control-plane' "$MOCK_LOG")" "0"
+check "no control-plane unit: the worker started" "$(grep -c '^systemctl start microvm-worker.service$' "$MOCK_LOG")" "1"
+check "no control-plane unit: its drop-in is still written, for a later setup-vm.sh install" \
+  "$(grep -c "^EnvironmentFile=$TE$" "$TC")" "1"
+unset MOCK_PODMAN_PS
 
 echo "== a bad default stored in microvm-tiers.env is refused, writing nothing"
 reset_host; export MOCK_PODMAN_PS="sh-sandbox-0"

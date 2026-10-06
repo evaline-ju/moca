@@ -195,6 +195,8 @@ exactly that problem, which is why the installer refuses dashed ids.
   snapshot problem.
 - **The supervisor and the control plane:** `try-restart`ed, never started, when the tiers file or
   its drop-ins were written or removed. A stopped unit stays stopped and reads them on its next start.
+  A unit that is not installed (no control plane before #366) is skipped; its drop-in is still
+  written, for the `setup-vm.sh` run that installs it.
 - **A running, unchanged worker is left alone.**
 
 The install is not finished until the relay has mirrored the worker into `sh:sandbox:records`. That
@@ -514,7 +516,10 @@ sudo systemctl daemon-reload && sudo systemctl restart sh-relay.service
 sudo rm -f /etc/serverless-harness/microvm-tiers.env \
   /etc/systemd/system/sh-supervisor.service.d/50-microvm-tiers.conf \
   /etc/systemd/system/sh-control-plane.service.d/50-microvm-tiers.conf
-sudo systemctl daemon-reload && sudo systemctl try-restart sh-control-plane sh-supervisor
+# try-restart only the units installed: a P6 from before the control plane (#366) has no
+# sh-control-plane.service, and systemd refuses a try-restart of a unit it cannot find
+sudo systemctl daemon-reload && sudo systemctl try-restart sh-supervisor
+[ ! -f /etc/systemd/system/sh-control-plane.service ] || sudo systemctl try-restart sh-control-plane
 # the model and check settings from "Run a turn" and "Automated check", if present:
 sudo rm -f /etc/systemd/system/sh-supervisor.service.d/90-p4-smoke.conf \
   /etc/systemd/system/sh-supervisor.service.d/91-p4-real-model.conf \

@@ -387,11 +387,16 @@ apply() {
   # try-restart, never restart (setup-vm.sh's rule): an unconfigured supervisor or control plane is
   # left stopped on purpose, and starting it would trip systemd's start limit. A stopped unit loads
   # the drop-in on its next start anyway.
+  # Only a unit that is installed: a P6 from before the control plane (#366) has no
+  # sh-control-plane.service, and systemd refuses a try-restart of a unit it cannot find (exit 5) --
+  # under set -e that would end the run with the files written, and a re-run, seeing them unchanged,
+  # would never try-restart the supervisor. The drop-in is written all the same: it is harmless, and
+  # the setup-vm.sh run that later installs the unit picks it up.
   if changed_any "$SH_ENV_DIR/microvm-tiers.env" "$SH_UNIT_DIR/sh-supervisor.service.d/$TIERS_DROPIN" \
     "$SH_UNIT_DIR/sh-control-plane.service.d/$TIERS_DROPIN"; then
     log "re-reading the sandbox tiers: try-restart sh-control-plane and sh-supervisor (the supervisor drains in-flight turns)"
-    systemctl try-restart sh-control-plane.service
-    systemctl try-restart sh-supervisor.service
+    [[ ! -f "$SH_UNIT_DIR/sh-control-plane.service" ]] || systemctl try-restart sh-control-plane.service
+    [[ ! -f "$SH_UNIT_DIR/sh-supervisor.service" ]] || systemctl try-restart sh-supervisor.service
   fi
   systemctl enable microvm-worker.service
   if ((relay_restart)) || changed_any "$SH_BIN_DIR/microvm-worker" "$SH_UNIT_DIR/microvm-worker.service" \
