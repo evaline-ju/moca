@@ -75,8 +75,8 @@ mocactl change; the deployment paths only set configuration.
 ### 0.4 v1.4 corrections
 
 1. **Tiers only on a mixed stack (§7).** `setup-microvm.sh` and `deploy/k8s/setup.sh` set
-   `SH_SANDBOX_TIERS=container,microvm` only when both tiers run, with the default
-   `SH_SANDBOX_DEFAULT_TIER` or `container`; a single-tier stack stays untiered. Why: a pre-P6.3
+   `SH_SANDBOX_TIERS=container,microvm` only when both tiers run, with `SH_SANDBOX_DEFAULT_TIER`
+   defaulting to `container`; a single-tier stack stays untiered. Why: a pre-P6.3
    worker advertises no tier and a tiered selector excludes it.
 2. **An untiered deployment ignores a stored tier (§3.3).** The exchange omits it and the views
    show `null`.
@@ -335,20 +335,25 @@ would exclude it.
 - **`deploy/microvm/setup-microvm.sh`:** on a mixed host (it attaches a P4 worker to a co-located
   P6 stack that also runs containers; a stopped `sh-sandbox-*` counts), it writes ONE env file,
   `microvm-tiers.env`, with `SH_SANDBOX_TIERS=container,microvm` and
-  `SH_SANDBOX_DEFAULT_TIER` set to its `SH_SANDBOX_DEFAULT_TIER` input or `container`, loaded by
-  drop-ins into both `sh-supervisor` and `sh-control-plane`. A P4-only host stays untiered, and
-  `--remote` leaves the tiers to the cluster's `setup.sh`. `P4-ON-P6.md`'s "A P4-only host"
+  `SH_SANDBOX_DEFAULT_TIER` set to its `SH_SANDBOX_DEFAULT_TIER` input, else the stored one, else
+  `container`, loaded by drop-ins into both `sh-supervisor` and `sh-control-plane`. A P4-only host
+  stays untiered, and `--remote` leaves the tiers to the cluster's `setup.sh`. The default is
+  sticky in `microvm-tiers.env` itself, so going P4-only removes that file and the stored
+  default with it; `deploy/k8s/setup.sh` keeps its default in `moca-setup`, through a
+  single-tier run. `P4-ON-P6.md`'s "A P4-only host"
   section and its entry in the limits list are rewritten.
 - **`deploy/k8s/setup.sh`:** sets `SH_SANDBOX_TIERS=container,microvm` only when the stack runs
-  both (`SH_SANDBOX_COUNT>0` and `SH_P4_SANDBOX_IDS` non-empty), with the default
-  `SH_SANDBOX_DEFAULT_TIER` or `container`; otherwise both settings are `''`. It writes them to
+  both (`SH_SANDBOX_COUNT>0` and `SH_P4_SANDBOX_IDS` non-empty), with `SH_SANDBOX_DEFAULT_TIER`
+  defaulting to `container`; otherwise both settings are `''`. It writes them to
   `moca-settings`, which the control plane and the supervisor both read, and **removes slice 2's
   one-tier-per-stack guard** (`setup.sh`, the `SH_SANDBOX_COUNT=0` requirement). P6.2's
   single-host limit is rewritten. `SH_SANDBOX_DEFAULT_TIER` is a **sticky input**: stored in
   `moca-setup` and reused when a re-run does not give it.
 - **Env parity** is two checks: the k8s manifest test (the supervisor and the control plane read
-  the same `moca-settings` keys) and `deploy/compose/tests/compose.test.sh`. The VM path needs no
-  third: `setup-microvm.sh` writes one env file loaded by both units.
+  the same `moca-settings` keys) and `deploy/compose/tests/compose.test.sh`. The
+  `setup-microvm.sh` path needs no third: it writes one env file loaded by both units. A
+  hand-tiered `deploy/vm` stack does not have that file: its units load `control-plane.env` and
+  `supervisor.env` separately, so it must set both variables in both.
 
 ## 8. Testing
 
