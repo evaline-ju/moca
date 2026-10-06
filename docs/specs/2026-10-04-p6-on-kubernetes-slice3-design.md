@@ -1,7 +1,7 @@
 # P6 on Kubernetes, slice 3: sandbox tiers and session-to-sandbox affinity — Design
 
-Version: 1.3 — October 2026 (v1.1: corrections from the implementation plan; v1.2: corrections from
-the implementation and its final review; v1.3: corrections from PR 2)
+Version: 1.4 — October 2026 (v1.1: corrections from the implementation plan; v1.2: corrections from
+the implementation and its final review; v1.3: corrections from PR 2; v1.4: corrections from PR 3)
 Status: Proposed
 Milestone: **P6.3**, registered in [the milestone registry](README.md). This is slice 3 of epic
 rossoctl/moca#426, issue rossoctl/moca#425.
@@ -71,6 +71,21 @@ mocactl change; the deployment paths only set configuration.
    names that same default for such a session (it does not leave the data plane to apply its own),
    so the view and the placement come from one value. A `sandbox` body that is not an object is a
    400 `invalid_request`.
+
+### 0.4 v1.4 corrections
+
+1. **Tiers only on a mixed stack (§7).** `setup-microvm.sh` and `deploy/k8s/setup.sh` set
+   `SH_SANDBOX_TIERS=container,microvm` only when both tiers run, with the default
+   `SH_SANDBOX_DEFAULT_TIER` or `container`; a single-tier stack stays untiered. Why: a pre-P6.3
+   worker advertises no tier and a tiered selector excludes it.
+2. **An untiered deployment ignores a stored tier (§3.3).** The exchange omits it and the views
+   show `null`.
+3. **The data plane validates the tier settings at worker boot (§3.4)** and exits 2, like
+   `SH_SANDBOX_DISCOVERY`.
+4. **The env-parity test is two checks (§7, §8):** the k8s manifest test (supervisor and control
+   plane read the same `moca-settings` keys) and `compose.test.sh`. On the VM, `setup-microvm.sh`
+   writes ONE env file loaded by both units.
+5. **`SH_SANDBOX_DEFAULT_TIER` is a sticky `setup.sh` input (§7).**
 
 ## 1. Scope
 
@@ -153,11 +168,15 @@ tiers`), and `''` is stored.
   `SH_SANDBOX_TIERS`, and a `SH_SANDBOX_TIERS` without a default (unless it names exactly one tier,
   which is then the default).
 - `ExchangeResponse` gains `sandboxTier?: string`: the stored tier, or, for a record stored with
-  `''` or written before this slice (no field), the current default. It is omitted only when the
+  `''` or written before this slice (no field), the current default. It is omitted whenever the
   deployment declares no tiers, so the untiered response is byte-identical to before.
+- **An untiered deployment ignores a stored tier.** A record that stored a tier while tiers were
+  declared keeps it, but once the deployment declares none the data plane runs untiered and
+  filters nothing, so the exchange omits the tier and the views show `null`. Declaring the tiers
+  again brings the stored tier back.
 - Session listings, `GET /v1/sessions/{id}` and `GET /v1/sessions/{id}/resources`
   (`session.sandboxTier`) include `sandboxTier`: the tier the session runs in, by the exchange's
-  rule; `null` only when the deployment declares no tiers.
+  rule; `null` whenever the deployment declares no tiers.
 - `GET /v1/discovery` gains `sandboxTiers: { names: string[]; default: string } | null`.
 - `docs/api/openapi.yaml` and the client spec are updated with all of the above.
 
@@ -171,6 +190,11 @@ tiers`), and `''` is stored.
   `SH_SANDBOX_DEFAULT_TIER`; only on an untiered deployment is there no tier filter. A session turn
   normally carries a tier (the exchange names the default for a session that recorded none, §3.3);
   this fallback covers the unauthenticated and leaf paths above.
+- **The P6 worker validates `SH_SANDBOX_TIERS` and `SH_SANDBOX_DEFAULT_TIER` at boot**
+  (`worker.ts`, `parseSandboxTiers`), with the control plane's startup refusals (§3.3): a
+  duplicate, a bad name, several tiers with no default, or a default outside the list. It exits 2
+  before `ready`, like a bad `SH_SANDBOX_DISCOVERY`. The selection still reads the settings per
+  call; the boot check exists so a typo fails the bring-up, not the first turn.
 
 ### 3.5 Affinity (new, harness)
 
@@ -294,26 +318,37 @@ stays retryable in `classifyOutcome`, beside `SandboxPoolSaturatedError` and `Sa
 
 ## 7. Configuration and deployment paths
 
-| Variable                            | Read by                    | Default                 | Meaning                                                                      |
-| ----------------------------------- | -------------------------- | ----------------------- | ---------------------------------------------------------------------------- |
-| `SH_SANDBOX_TIERS`                  | control plane, supervisor  | unset                   | Comma-separated tier names. Unset: no tiers, no filtering.                   |
-| `SH_SANDBOX_DEFAULT_TIER`           | control plane, supervisor  | unset                   | Required with more than one tier; must be one of them.                       |
-| `SH_SANDBOX_AFFINITY_TTL_SECONDS`   | supervisor, relay          | `86400`                 | Affinity and detach-key TTL in seconds. Keep ≥ `SH_WORKSPACE_IDLE`.          |
-| `SH_SANDBOX_AFFINITY_GRACE_SECONDS` | supervisor                 | `60`                    | How long an absent affine sandbox is waited for before fallback, in seconds. |
-| `SANDBOX_TIER`                      | `worker`, `microvm-worker` | `container` / `microvm` | The worker's `moca.dev/tier` label. Empty: no label.                         |
+| Variable                            | Read by                                | Default                 | Meaning                                                                      |
+| ----------------------------------- | -------------------------------------- | ----------------------- | ---------------------------------------------------------------------------- |
+| `SH_SANDBOX_TIERS`                  | control plane, supervisor, worker boot | unset                   | Comma-separated tier names. Unset: no tiers, no filtering.                   |
+| `SH_SANDBOX_DEFAULT_TIER`           | control plane, supervisor, worker boot | unset                   | Required with more than one tier; must be one of them.                       |
+| `SH_SANDBOX_AFFINITY_TTL_SECONDS`   | supervisor, relay                      | `86400`                 | Affinity and detach-key TTL in seconds. Keep ≥ `SH_WORKSPACE_IDLE`.          |
+| `SH_SANDBOX_AFFINITY_GRACE_SECONDS` | supervisor                             | `60`                    | How long an absent affine sandbox is waited for before fallback, in seconds. |
+| `SANDBOX_TIER`                      | `worker`, `microvm-worker`             | `container` / `microvm` | The worker's `moca.dev/tier` label. Empty: no label.                         |
+
+**Tiers only on a mixed stack.** Both setup scripts declare tiers only when both tiers run, and
+leave a single-tier stack untiered: a pre-P6.3 worker advertises no tier, and a tiered selector
+would exclude it.
 
 - **`deploy/vm`, `deploy/compose`:** the env templates gain the variables, unset by default. A
   stack that sets nothing behaves as before, plus affinity.
-- **`deploy/microvm/setup-microvm.sh`:** when it attaches a P4 worker to a co-located P6 stack that
-  also runs containers, it adds `microvm` to `SH_SANDBOX_TIERS` and keeps the existing default.
-  `P4-ON-P6.md`'s "A P4-only host" section and its entry in the limits list are rewritten.
-- **`deploy/k8s/setup.sh`:** derives the tiers from what it deploys (`SH_SANDBOX_COUNT>0` adds
-  `container`, `SH_P4_SANDBOX_IDS` adds `microvm`, default `container` when both), writes them to
-  both the control plane's and the supervisor's settings, and **removes slice 2's
-  one-tier-per-stack guard** (`setup.sh`, the `SH_SANDBOX_COUNT=0` requirement). P6.2's single-host
-  limit is rewritten.
-- An **env-parity test** asserts that every path sets `SH_SANDBOX_TIERS` and
-  `SH_SANDBOX_DEFAULT_TIER` identically for the control plane and the supervisor.
+- **`deploy/microvm/setup-microvm.sh`:** on a mixed host (it attaches a P4 worker to a co-located
+  P6 stack that also runs containers; a stopped `sh-sandbox-*` counts), it writes ONE env file,
+  `microvm-tiers.env`, with `SH_SANDBOX_TIERS=container,microvm` and
+  `SH_SANDBOX_DEFAULT_TIER` set to its `SH_SANDBOX_DEFAULT_TIER` input or `container`, loaded by
+  drop-ins into both `sh-supervisor` and `sh-control-plane`. A P4-only host stays untiered, and
+  `--remote` leaves the tiers to the cluster's `setup.sh`. `P4-ON-P6.md`'s "A P4-only host"
+  section and its entry in the limits list are rewritten.
+- **`deploy/k8s/setup.sh`:** sets `SH_SANDBOX_TIERS=container,microvm` only when the stack runs
+  both (`SH_SANDBOX_COUNT>0` and `SH_P4_SANDBOX_IDS` non-empty), with the default
+  `SH_SANDBOX_DEFAULT_TIER` or `container`; otherwise both settings are `''`. It writes them to
+  `moca-settings`, which the control plane and the supervisor both read, and **removes slice 2's
+  one-tier-per-stack guard** (`setup.sh`, the `SH_SANDBOX_COUNT=0` requirement). P6.2's
+  single-host limit is rewritten. `SH_SANDBOX_DEFAULT_TIER` is a **sticky input**: stored in
+  `moca-setup` and reused when a re-run does not give it.
+- **Env parity** is two checks: the k8s manifest test (the supervisor and the control plane read
+  the same `moca-settings` keys) and `deploy/compose/tests/compose.test.sh`. The VM path needs no
+  third: `setup-microvm.sh` writes one env file loaded by both units.
 
 ## 8. Testing
 
@@ -327,8 +362,11 @@ stays retryable in `classifyOutcome`, beside `SandboxPoolSaturatedError` and `Sa
   else.
 - **Workers, Go unit.** `SANDBOX_TIER` → `Hello.labels`, the defaults, and the empty value.
 - **Control plane, unit.** Validation at creation, the stored default surviving a later default
-  change, the exchange carrying the tier, an old record getting the default, discovery, the startup
-  refusals.
+  change, the exchange carrying the tier, an old record getting the default, a stored tier ignored
+  once the deployment declares none, discovery, the startup refusals.
+- **Data plane, boot.** `worker-boot.test.ts` forks the real worker: a duplicate tier and a
+  default outside the list each exit 2 before `ready`, naming the variable; a valid pair boots.
+- **Env parity.** The k8s manifest test and `compose.test.sh` (§7).
 - **mocactl, unit.** `--tier`, the picker, the notice for `workspace_reset`, ignoring an unknown
   frame type.
 - **Integration, real Redis.** Two fake workers in each of two tiers behind a real relay. Across many
