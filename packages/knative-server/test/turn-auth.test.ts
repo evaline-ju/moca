@@ -769,3 +769,38 @@ describe('makeRuntimeReporter', () => {
     });
   });
 });
+
+describe('configRef from the exchange', () => {
+  const reply = (extra: Record<string, unknown>) =>
+    fakeExchange({
+      status: 200,
+      body: {
+        mode: 'direct',
+        anthropicAuthToken: 'sk-alice', // notsecret
+        anthropicBaseUrl: 'https://litellm.internal/v1',
+        sessionId: 'sid-1',
+        subject: 'github:1234',
+        ...extra,
+      },
+    }).fetchImpl;
+
+  it('carries configRef onto TurnAuth when the control plane returns one', async () => {
+    const digest = 'sha256:' + 'f'.repeat(64);
+    const auth = await resolveTurnAuth(
+      { authorization: `Bearer ${sessionToken()}` },
+      { sessionId: 'sid-1' },
+      deps({ fetchImpl: reply({ configRef: digest }) }),
+    );
+    expect(auth?.configRef).toBe(digest);
+  });
+
+  it('refuses a non-string configRef as a control-plane fault', async () => {
+    await expect(
+      resolveTurnAuth(
+        { authorization: `Bearer ${sessionToken()}` },
+        { sessionId: 'sid-1' },
+        deps({ fetchImpl: reply({ configRef: 42 }) }),
+      ),
+    ).rejects.toMatchObject({ code: 'credential_unavailable' });
+  });
+});

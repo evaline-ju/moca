@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { SandboxPoolSaturatedError, SandboxPoolEmptyError } from '@moca/harness/run-turn';
-import { turnErrorStatus, turnErrorHeaders } from '../src/server.js';
+import { turnErrorStatus, turnErrorHeaders, turnErrorCode } from '../src/server.js';
 
 // /turn now leases a sandbox from the pool (it used to run tool calls in the harness process), so
 // SandboxPoolSaturatedError became something a turn can fail with. It is TRANSIENT — every
@@ -77,5 +77,20 @@ describe('turnErrorHeaders', () => {
     for (const status of [404, 500, 503]) {
       expect(turnErrorHeaders(status)).toMatchObject({ 'Content-Type': 'application/json' });
     }
+  });
+});
+
+describe('an expired config bundle', () => {
+  it('is 410 config_bundle_not_found, not a 500', () => {
+    const err = Object.assign(new Error('config bundle not found: sha256:' + 'a'.repeat(64)), {
+      name: 'BundleNotFoundError',
+    });
+    expect(turnErrorStatus(err)).toBe(410);
+    expect(turnErrorCode(410, err.message)).toBe('config_bundle_not_found');
+  });
+
+  it('keeps 404 session_not_found and passes other messages through', () => {
+    expect(turnErrorCode(404, 'no session in backend')).toBe('session_not_found');
+    expect(turnErrorCode(500, 'boom')).toBe('boom');
   });
 });

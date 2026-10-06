@@ -29,6 +29,8 @@ export interface TurnAuth {
   credential: UpstreamCredential;
   /** Never undefined: an unresolvable endpoint is refused upstream, not defaulted (spec §6.2). */
   anthropicBaseUrl: string;
+  /** The session's config bundle, from the control plane -- never from the request (ADR-0038). */
+  configRef?: string;
 }
 
 export interface TurnAuthDeps {
@@ -202,6 +204,9 @@ async function exchange(token: string, deps: TurnAuthDeps): Promise<ExchangeResp
       'control plane returned an unknown credential header',
     );
   }
+  if (body.configRef !== undefined && typeof body.configRef !== 'string') {
+    throw new CpError('credential_unavailable', 'control plane returned a malformed configRef');
+  }
   return body as unknown as ExchangeResponse;
 }
 
@@ -250,6 +255,7 @@ export async function resolveTurnAuth(
       ...(resolved.authHeader === 'x-api-key' ? { header: resolved.authHeader } : {}),
     },
     anthropicBaseUrl: resolved.anthropicBaseUrl,
+    ...(resolved.configRef ? { configRef: resolved.configRef } : {}),
   };
 }
 

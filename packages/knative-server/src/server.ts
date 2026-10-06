@@ -180,6 +180,7 @@ async function handleTurn(req: IncomingMessage, res: ServerResponse): Promise<vo
           config: buildConfig(auth),
           // A control-plane-minted session id must not 404 its first turn (plan gap #1).
           createIfAbsent: true,
+          configRef: auth.configRef,
         });
         res.writeHead(200, JSON_HEADERS).end(JSON.stringify(result));
       } finally {
@@ -194,7 +195,7 @@ async function handleTurn(req: IncomingMessage, res: ServerResponse): Promise<vo
     const status = turnErrorStatus(err);
     res.writeHead(status, turnErrorHeaders(status)).end(
       JSON.stringify({
-        error: status === 404 ? 'session_not_found' : message,
+        error: turnErrorCode(status, message),
         ...(sessionId ? { sessionId } : {}),
       }),
     );
@@ -232,9 +233,17 @@ async function handleTurn(req: IncomingMessage, res: ServerResponse): Promise<vo
 const NO_CAPACITY = new Set(['SandboxPoolSaturatedError', 'SandboxPoolEmptyError']);
 
 export function turnErrorStatus(err: unknown): number {
+  if (err instanceof Error && err.name === 'BundleNotFoundError') return 410;
   if (err instanceof Error && NO_CAPACITY.has(err.name)) return 503;
   const message = err instanceof Error ? err.message : String(err);
   return message.includes('no session in backend') ? 404 : 500;
+}
+
+/** The `error` field of a failed turn, shared by the sync path and the SSE pre-first-frame window. */
+export function turnErrorCode(status: number, message: string): string {
+  if (status === 404) return 'session_not_found';
+  if (status === 410) return 'config_bundle_not_found';
+  return message;
 }
 
 /**
@@ -314,6 +323,7 @@ async function handleTurnStream(
       // Unauthenticated: preserve /turn's 404-on-missing-session contract. Authenticated: the id was
       // minted by the trusted control-plane tier, so it may create-or-resume (plan gap #1).
       createIfAbsent: auth !== null,
+      ...(auth?.configRef ? { configRef: auth.configRef } : {}),
       onEvent: (f) => writeFrame(f),
       signal: ac.signal,
     });
@@ -328,7 +338,7 @@ async function handleTurnStream(
       const status = turnErrorStatus(err);
       res.writeHead(status, turnErrorHeaders(status)).end(
         JSON.stringify({
-          error: status === 404 ? 'session_not_found' : message,
+          error: turnErrorCode(status, message),
           ...(sessionId ? { sessionId } : {}),
         }),
       );
