@@ -530,7 +530,9 @@ for i in ${aff_sids[@]+"${!aff_sids[@]}"}; do
     { aff_ok=0; echo "  session ${aff_sids[$i]}: first '${aff_first[$i]}', then '$again'"; }
 done
 if ((aff_ok)); then ok "4 sessions, each on one sandbox for both turns"; else ko "a session moved between sandboxes, or a turn failed"; fi
+# The note qualifies a pass only: after a FAIL there is nothing to tell apart from luck.
 spread="$(printf '%s\n' ${aff_first[@]+"${aff_first[@]}"} | sort -u | grep -c . || true)"
-[[ "$spread" -ge 2 ]] || note "the first turns all landed on one sandbox, so this run could not tell affinity from luck"
+((!aff_ok)) || [[ "$spread" -ge 2 ]] ||
+  note "the first turns all landed on one sandbox, so this run could not tell affinity from luck"
 
 summary

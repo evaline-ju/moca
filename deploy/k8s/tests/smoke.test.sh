@@ -274,8 +274,10 @@ pass 'claim 12: first turns all on one sandbox pass with the luck note'
 (export MOCK_SESSIONS=1
   run_smoke
   claim12 | grep -qx '  FAIL a session moved between sandboxes, or a turn failed' ||
-    fail "turns that printed no where= did not fail claim 12: $(claim12)")
-pass 'claim 12: a turn that reports no sandbox is a FAIL, not a match of two empty names'
+    fail "turns that printed no where= did not fail claim 12: $(claim12)"
+  # Spread 0 here, but the luck note qualifies a PASS only: on a FAIL it would only mislead.
+  ! grep -qF 'could not tell affinity from luck' "$TMP/out" || fail "a failed claim 12 printed the luck note: $(claim12)")
+pass 'claim 12: a turn that reports no sandbox is a FAIL, not a match of two empty names, and prints no luck note'
 
 (export MOCK_SESSIONS=1 SH_SINGLE_NAMESPACE=moca-single SMOKE_MODEL_URL=https://model.example.test SMOKE_MODEL_TOKEN=model-token-not-real
   run_smoke --target ocp-single
