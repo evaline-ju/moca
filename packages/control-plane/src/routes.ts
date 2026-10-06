@@ -26,6 +26,8 @@ export interface RouteSpec {
    * client that correctly sends nothing. Ignored for GET/DELETE, which never read a body.
    */
   bodyRequired?: boolean;
+  /** Request body cap in bytes; absent means DEFAULT_MAX_BODY_BYTES. Raise it per route, never globally. */
+  maxBodyBytes?: number;
   /** Stable key the router and the OpenAPI drift test both use to name the operation. */
   operationId: string;
 }
@@ -130,6 +132,13 @@ export const ROUTES: readonly RouteSpec[] = [
     operationId: 'exchangeCredential',
   },
 ];
+
+/** A credential body is a few hundred bytes; 64 KiB is generous and bounds a hostile caller. */
+export const DEFAULT_MAX_BODY_BYTES = 64 * 1024;
+
+export function bodyLimitFor(route: RouteSpec): number {
+  return route.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+}
 
 /**
  * Compile a template to an ANCHORED regex whose parameters match a SINGLE segment (`[^/]+`).

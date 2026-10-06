@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ROUTES, matchRoute } from '../src/routes.js';
+import { ROUTES, matchRoute, bodyLimitFor, DEFAULT_MAX_BODY_BYTES } from '../src/routes.js';
 
 describe('the route table', () => {
   it('declares every slice-1 route from spec §4.2', () => {
@@ -103,5 +103,26 @@ describe('matchRoute', () => {
   it('returns null for an unknown path', () => {
     expect(matchRoute('GET', '/v1/nope')).toBeNull();
     expect(matchRoute('GET', '/')).toBeNull();
+  });
+});
+
+describe('bodyLimitFor', () => {
+  it('keeps 64 KiB as the default', () => {
+    expect(DEFAULT_MAX_BODY_BYTES).toBe(64 * 1024);
+    const putCredential = ROUTES.find((r) => r.operationId === 'putCredential')!;
+    expect(bodyLimitFor(putCredential)).toBe(64 * 1024);
+  });
+
+  it('uses a route-declared limit', () => {
+    expect(
+      bodyLimitFor({
+        method: 'POST',
+        path: '/x',
+        auth: 'api',
+        sessionScoped: false,
+        operationId: 'x',
+        maxBodyBytes: 1234,
+      }),
+    ).toBe(1234);
   });
 });
