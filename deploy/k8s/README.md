@@ -848,7 +848,7 @@ For a developer or CI tenant on a shared OpenShift cluster where you have **edit
 namespace and nothing else**: no cluster-scope RBAC, no SCC grants, no permission to read
 cluster-scoped objects. The whole stack -- supervisor, relay, control plane, Redis, the container
 sandbox pool, every Secret, the credential Role -- runs in that one namespace, reached by
-`port-forward` as on Kind.
+`port-forward` as on Kind -- or, when your tenant has a custom domain, by opt-in Routes (§12.5).
 
 ```bash
 export LOG_DIR=/tmp/kagenti/tdd/moca; mkdir -p "$LOG_DIR"
@@ -866,12 +866,12 @@ StorageClass, for the Redis PVC.
 
 Everything the `ocp` target does outside the namespace is skipped or replaced:
 
-| The `ocp` target                                                  | `ocp-single`                                                                                 |
-| ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| creates the `moca`, `moca-sandbox`, `moca-credentials` namespaces | uses your existing namespace (existence checked, never created)                              |
-| grants `nonroot-v2` to each ServiceAccount (`oc adm`)             | no SCC: every explicit UID/GID is stripped, restricted-v2 assigns from the namespace's range |
-| Routes, `ingresses.config/cluster` read, TLS secrets              | no Routes; `kubectl port-forward`, like Kind                                                 |
-| requires `oc`                                                     | kubectl only                                                                                 |
+| The `ocp` target                                                  | `ocp-single`                                                                                                                                                          |
+| ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| creates the `moca`, `moca-sandbox`, `moca-credentials` namespaces | uses your existing namespace (existence checked, never created)                                                                                                       |
+| grants `nonroot-v2` to each ServiceAccount (`oc adm`)             | no SCC: every explicit UID/GID is stripped, restricted-v2 assigns from the namespace's range                                                                          |
+| Routes, `ingresses.config/cluster` read, TLS secrets              | no Routes by default (`kubectl port-forward`, like Kind); opt-in Routes with `SH_ROUTE_DOMAIN` (§12.5), which needs no cluster-scope read because you give the domain |
+| requires `oc`                                                     | kubectl only                                                                                                                                                          |
 
 The isolation the base draws from the namespace boundary moves to pod-label NetworkPolicies: the
 default-deny, the sandbox's egress (relay attach port and the public internet only), the relay's
@@ -946,3 +946,51 @@ into a deployment, is the same one-tier-per-stack rule the other targets have an
 **Renaming on re-run**: `SH_SINGLE_NAMESPACE` is not sticky -- it is validated and applied fresh
 every run. Pointing it at a different namespace installs a second stack there; the first one stays
 until its namespace is deleted.
+
+### 12.5 Routes, opt-in (`SH_ROUTE_DOMAIN`)
+
+The port-forwards are the default because the target cannot learn a Route hostname on its own:
+reading the cluster's apps domain (`ingresses.config/cluster`) is a cluster-scoped read, which this
+target assumes you lack. But a tenant whose operator set up a custom domain -- a wildcard DNS
+record and certificate for `*.<namespace>.<domain>`, plus an ingress controller -- can be reached
+properly. Opt in with the domain:
+
+```bash
+SH_GITHUB_CLIENT_ID=<client id> SH_SINGLE_NAMESPACE=<ns> SH_ROUTE_DOMAIN=<domain> \
+  deploy/k8s/setup.sh --target ocp-single [--tls-secret NAME]
+```
+
+Two Routes render, in the namespace: `moca.<domain>` (the supervisor, TLS **passthrough** to a
+ghostunnel L4 sidecar, exactly §11's shape -- an edge Route there would silently break the
+supervisor's per-connection routing) and `moca-control-plane.<domain>` (the control plane, ordinary
+edge). `moca-settings`'s `SH_PUBLIC_HARNESS_URL` becomes the supervisor's Route, so `/v1/discovery`
+advertises it and mocactl needs no port-forward:
+
+```bash
+mocactl --control-plane-url https://moca-control-plane.<domain> login
+```
+
+The supervisor's certificate comes from one of three sources, in this order:
+
+| Source                           | What setup.sh does                                                                     |
+| -------------------------------- | -------------------------------------------------------------------------------------- |
+| `--tls-secret NAME`              | references a preinstalled `kubernetes.io/tls` Secret by name; never copies it          |
+| `--tls-cert FILE --tls-key FILE` | installs the pair as the `moca-supervisor-tls` Secret                                  |
+| neither                          | generates a self-signed one, and says so (`NODE_EXTRA_CA_CERTS`, as on `--target ocp`) |
+
+The edge Route embeds no certificate: the ingress controller serves its own (on a custom-domain
+tenant, that is the operator's wildcard; on a standard cluster, the router's default for the apps
+domain).
+
+`SH_ROUTE_DOMAIN` and `--tls-secret` are sticky like every input: a re-run without them keeps the
+Routes (and the certificate) it finds in `moca-setup`; `SH_ROUTE_DOMAIN=` set-but-empty turns the
+Routes off and returns to port-forward access. The three certificate sources are mutually
+exclusive per run (`--tls-secret` with `--tls-cert` is refused), and `--tls-cert`/`--tls-key` on a
+re-run _replaces_ a saved `--tls-secret` rather than being silently beaten by it -- the saved name
+is dropped from `moca-setup`, so a later re-run with no certificate input cannot resurrect it over
+what the pair installed. The smoke still reaches the stack by port-forward, Routes or not.
+
+The §12.3 tenant verified all of it: the operator's Let's Encrypt wildcard for
+`*.moca-ns.vpc-int.res.ibm.com` (served by `--tls-secret`, and also covering the edge Route as the
+controller's default certificate), a namespace-scoped ingress controller admitted by the
+`policy-group.network.openshift.io/ingress` selector, and mocactl logins and turns over the Routes.

@@ -1,0 +1,14 @@
+# The TLS Service the passthrough Route targets: overlays/ocp's moca-supervisor-tls shape, with
+# the namespace the overlay's transformer rewrites.
+apiVersion: v1
+kind: Service
+metadata:
+  name: moca-supervisor-tls
+  namespace: moca-single
+spec:
+  selector:
+    app: moca-supervisor
+  ports:
+    - name: https
+      port: 8443
+      targetPort: https
