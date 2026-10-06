@@ -108,17 +108,38 @@ check_mirror supervisor "$VM_ENV/supervisor.env.example"
 check_mirror sandbox-relay "$VM_ENV/relay.env.example"
 pass "supervisor and sandbox-relay env mirror deploy/vm/env/*.env.example, addressing aside"
 
-# Tier parity (P6.3): the supervisor and control plane's SH_SANDBOX_TIERS and SH_SANDBOX_DEFAULT_TIER
-# entries must be byte-identical.
-sup_tiers="$(svc_env supervisor SH_SANDBOX_TIERS)"
-cp_tiers="$(cp_env control-plane SH_SANDBOX_TIERS)"
-[[ "$sup_tiers" == "$cp_tiers" ]] ||
-  fail "supervisor SH_SANDBOX_TIERS '$sup_tiers' != control plane SH_SANDBOX_TIERS '$cp_tiers'"
-sup_default="$(svc_env supervisor SH_SANDBOX_DEFAULT_TIER)"
-cp_default="$(cp_env control-plane SH_SANDBOX_DEFAULT_TIER)"
-[[ "$sup_default" == "$cp_default" ]] ||
-  fail "supervisor SH_SANDBOX_DEFAULT_TIER '$sup_default' != control plane SH_SANDBOX_DEFAULT_TIER '$cp_default'"
-pass "the supervisor and control plane read the sandbox tiers from one source (P6.3)"
+# Tier parity (P6.3): one list validates a session at creation (control plane), the other places its turns
+# (supervisor). A mismatch strands sessions. Both must read from one source and carry identical values
+# (spec §7). Test both the "<absent> by default" case and the "set, must match" case.
+#
+# Default (untiered): both absent when .env does not set tiers.
+sup_tiers_absent="$(svc_env supervisor SH_SANDBOX_TIERS)"
+[[ "$sup_tiers_absent" == '<absent>' ]] ||
+  fail "supervisor SH_SANDBOX_TIERS should be absent by default, got '$sup_tiers_absent'"
+cp_tiers_absent="$(cp_env control-plane SH_SANDBOX_TIERS)"
+[[ "$cp_tiers_absent" == '<absent>' ]] ||
+  fail "control plane SH_SANDBOX_TIERS should be absent by default, got '$cp_tiers_absent'"
+pass "supervisor and control plane both absent of tiers by default (untiered mode)"
+
+# Render with tiers set: each service must receive the value from .env, and both must be identical.
+OUT_T="$(render tiers "${CP_ENV[@]}" 'SH_SANDBOX_TIERS=container,microvm' 'SH_SANDBOX_DEFAULT_TIER=container')" || fail "compose config failed with tiers"
+sup_tiers_set="$(jq -r '.services.supervisor.environment.SH_SANDBOX_TIERS' "$OUT_T")"
+cp_tiers_set="$(jq -r '.services["control-plane"].environment.SH_SANDBOX_TIERS' "$OUT_T")"
+[[ "$sup_tiers_set" == "container,microvm" ]] ||
+  fail "supervisor SH_SANDBOX_TIERS from .env did not reach it, got '$sup_tiers_set'"
+[[ "$cp_tiers_set" == "container,microvm" ]] ||
+  fail "control plane SH_SANDBOX_TIERS from .env did not reach it, got '$cp_tiers_set'"
+[[ "$sup_tiers_set" == "$cp_tiers_set" ]] ||
+  fail "supervisor SH_SANDBOX_TIERS '$sup_tiers_set' != control plane SH_SANDBOX_TIERS '$cp_tiers_set' (spec §7 strands sessions)"
+sup_default_set="$(jq -r '.services.supervisor.environment.SH_SANDBOX_DEFAULT_TIER' "$OUT_T")"
+cp_default_set="$(jq -r '.services["control-plane"].environment.SH_SANDBOX_DEFAULT_TIER' "$OUT_T")"
+[[ "$sup_default_set" == "container" ]] ||
+  fail "supervisor SH_SANDBOX_DEFAULT_TIER from .env did not reach it, got '$sup_default_set'"
+[[ "$cp_default_set" == "container" ]] ||
+  fail "control plane SH_SANDBOX_DEFAULT_TIER from .env did not reach it, got '$cp_default_set'"
+[[ "$sup_default_set" == "$cp_default_set" ]] ||
+  fail "supervisor SH_SANDBOX_DEFAULT_TIER '$sup_default_set' != control plane SH_SANDBOX_DEFAULT_TIER '$cp_default_set'"
+pass "supervisor and control plane both read the sandbox tiers from .env, and entries are byte-identical (spec §7)"
 
 # SH_WORKERS is commented out in the VM template (the default is availableParallelism(), which
 # respects the container's CPU limit since #341). Unset must mean unset, not SH_WORKERS=''.
