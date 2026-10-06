@@ -161,7 +161,7 @@ export function buildBundle(input: BuildBundleInput): BuildResult {
   const lockfile = buildLockfile({
     digest,
     mode: input.mode,
-    entry: input.entry,
+    entry: input.entry ?? '',
     classification,
     contextPaths,
     memoryPaths,
@@ -189,7 +189,9 @@ export function buildBundle(input: BuildBundleInput): BuildResult {
     ...checkBinaries(binaries, input.inventory),
     // Suppressed when the entry is what was excluded: `entry_excluded` already names the cause,
     // and `unknown_entry` would report the symptom of it as a second, independent-looking error.
-    ...(excluded.has(input.entry) ? [] : checkEntry(input.entry, promptNames)),
+    ...(input.entry === undefined || excluded.has(input.entry)
+      ? []
+      : checkEntry(input.entry, promptNames)),
     ...checkInteraction(classification),
     ...checkNamespacedPrompts(namespacedPromptDirs(input.promptsDir)),
     ...checkExcludedPrompts(input.entry, input.excludePrompts ?? [], excludedSeen),

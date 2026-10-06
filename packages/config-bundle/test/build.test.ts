@@ -199,3 +199,39 @@ describe('buildBundle --exclude-prompt', () => {
     );
   });
 });
+
+describe('buildBundle without an entry (interactive promotion)', () => {
+  const noEntry = () => {
+    const { entry: _entry, ...rest } = baseInput();
+    return rest;
+  };
+
+  it('raises no entry finding and records an empty entry in the lockfile', () => {
+    const r = buildBundle(noEntry());
+    const codes = r.findings.map((f) => f.code);
+    expect(codes).not.toContain('unknown_entry');
+    expect(codes).not.toContain('entry_excluded');
+    expect(r.lockfile.entry).toBe('');
+  });
+
+  it('still packs prompts and skills', () => {
+    const paths = untar(buildBundle(noEntry()).tar).map((e) => e.path);
+    expect(paths).toContain('prompts/go.md');
+    expect(paths).toContain('skills/keeper/SKILL.md');
+  });
+
+  it('still reports exclusions, which are about prompts, not the entry', () => {
+    const r = buildBundle({ ...noEntry(), excludePrompts: ['go', 'typo'] });
+    const codes = r.findings.map((f) => f.code);
+    expect(codes).toContain('prompt_excluded');
+    expect(codes).toContain('prompt_exclude_unmatched');
+    expect(codes).not.toContain('entry_excluded');
+  });
+
+  it('builds with zero prompts at all', () => {
+    rmSync(join(root, 'prompts'), { recursive: true, force: true });
+    const r = buildBundle(noEntry());
+    expect(r.promptNames).toEqual([]);
+    expect(r.findings.some((f) => f.severity === 'error')).toBe(false);
+  });
+});
