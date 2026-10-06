@@ -29,13 +29,23 @@ cat >"$TMP/bin/sleep" <<'MOCK'
 exit 0
 MOCK
 
-# curl: /healthz succeeds for the first $MOCK_HEALTHZ_OK calls (default: always); /v1/sessions
-# returns a session when MOCK_SESSIONS=1; /v1/turn streams the file $MOCK_TURN_SSE when it is set;
-# everything else is a refused connection.
+# curl: /healthz succeeds for the first $MOCK_HEALTHZ_OK calls (default: always). /v1/sessions, when
+# MOCK_SESSIONS=1, appends its request body to $MOCK_STATE/sessions.log and returns the next session
+# of a counter (s1, s2, ...). /v1/turn streams the file $MOCK_TURN_SSE when it is set; otherwise, with
+# MOCK_SESSIONS=1, it builds the turn from its request body: one bash tool_result, then the done
+# frame of the request's sessionId. A K8S-SMOKE-WHERE-1 turn prints where=<host>, its host the
+# session's entry in MOCK_WHERE ("s4=moca-sandbox-0 s5=..."); a K8S-SMOKE-WHERE-2 turn reads
+# MOCK_WHERE_2 first, so a case can move one session's second turn. MOCK_ENVELOPE=1 wraps the
+# preview in the JSON envelope a real model's run carries (see p4_sse below). Everything else is a
+# refused connection.
 cat >"$TMP/bin/curl" <<'MOCK'
 #!/usr/bin/env bash
-url=''
-for a in "$@"; do [[ "$a" == http* ]] && url="$a"; done
+url='' data='' prev=''
+for a in "$@"; do
+  [[ "$prev" != -d ]] || data="$a"
+  [[ "$a" != http* ]] || url="$a"
+  prev="$a"
+done
 case "$url" in
 */healthz)
   n=$(($(cat "$MOCK_STATE/healthz" 2>/dev/null || echo 0) + 1))
@@ -43,10 +53,28 @@ case "$url" in
   [[ "$n" -le "${MOCK_HEALTHZ_OK:-1000}" ]] ;;
 */v1/sessions)
   [[ "${MOCK_SESSIONS-}" == 1 ]] || exit 7
-  echo '{"sessionId":"s1","token":"t1"}' ;;
+  printf '%s\n' "$data" >>"$MOCK_STATE/sessions.log"
+  n=$(($(cat "$MOCK_STATE/sessions" 2>/dev/null || echo 0) + 1))
+  echo "$n" >"$MOCK_STATE/sessions"
+  echo "{\"sessionId\":\"s$n\",\"token\":\"t$n\"}" ;;
 */v1/turn)
-  [[ -n "${MOCK_TURN_SSE-}" ]] || exit 7
-  cat "$MOCK_TURN_SSE" ;;
+  if [[ -n "${MOCK_TURN_SSE-}" ]]; then cat "$MOCK_TURN_SSE"; exit 0; fi
+  [[ "${MOCK_SESSIONS-}" == 1 ]] || exit 7
+  sid="$(jq -r .sessionId <<<"$data")"
+  prompt="$(jq -r .prompt <<<"$data")"
+  case "$prompt" in
+  *K8S-SMOKE-WHERE-2*) table="${MOCK_WHERE_2-} ${MOCK_WHERE-}" ;;
+  *K8S-SMOKE-WHERE-1*) table="${MOCK_WHERE-}" ;;
+  *) table='' ;;
+  esac
+  text='ran'
+  for kv in $table; do
+    [[ "${kv%%=*}" != "$sid" ]] || { text="where=${kv#*=}"; break; }
+  done
+  jq -nc --arg t "$text" --arg env "${MOCK_ENVELOPE-}" \
+    '{type: "tool_result", preview: (if $env == "1" then {content: [{type: "text", text: ($t + "\n")}]} | tojson else $t end)}' |
+    sed 's/^/data: /'
+  jq -nc --arg s "$sid" '{type: "done", sessionId: $s}' | sed 's/^/data: /' ;;
 *) exit 7 ;;
 esac
 MOCK
@@ -58,8 +86,13 @@ case " $* " in
 *" port-forward "*) exit 0 ;;
 *" exec deploy/moca-control-plane "*) printf 'api.token.not-a-secret' ;;
 *" exec moca-sandbox-0 "*) echo BLOCKED ;;
+*"HGET sh:sandbox:records"*) printf '%s' "${MOCK_P4_RECORD-}" ;;
 *" exec redis-0 "*) printf '%s' "${MOCK_REDIS_OUT-}" ;;
+*" exec deploy/sandbox-relay "*) exit 0 ;;
 *" get statefulset "*) echo 1 ;;
+*"SH_SANDBOX_TIERS"*)
+  [[ -z "${MOCK_SETTINGS_CM_FAIL-}" ]] || { echo 'Error from server (Forbidden): configmaps "moca-settings" is forbidden' >&2; exit 1; }
+  printf '%s' "${MOCK_TIERS-}" ;;
 *" get configmap moca-setup "*)
   [[ -z "${MOCK_SETUP_CM_FAIL-}" ]] || { echo 'Error from server (Forbidden): configmaps "moca-setup" is forbidden' >&2; exit 1; }
   printf '%s' "${MOCK_P4_IDS-moca_microvm_0}" ;;
@@ -151,7 +184,7 @@ pass '--tier: p4 needs ocp, an unknown tier and a missing value exit 2, a bad SM
   expect_out 'skipped: set SMOKE_P4_ADD_ID'
   expect_out 'Claim P3'
   expect_out 'PASS='
-  ! grep -qE 'Claim (7|8|9|10|11):' "$TMP/out" || fail 'the p4 tier ran container-tier claims'
+  ! grep -qE 'Claim (7|8|9|10|11|12):' "$TMP/out" || fail 'the p4 tier ran container-tier claims'
   expect_kept 'p4 tier')
 pass 'p4 tier: P2 reads moca-setup and the records, P6 passes the exec token on stdin only, P7 is skipped, no container claims'
 
@@ -208,5 +241,104 @@ pass 'p4 tier: P3 reads the guest kernel out of a JSON-envelope preview and pass
   grep -qE "^  FAIL the turn's kernel '5\.14\.0-427\.el9\.x86_64'" "$TMP/out" ||
     fail 'P3 did not FAIL naming the node kernel read out of the envelope')
 pass 'p4 tier: P3 FAILs when the envelope text is a node kernel'
+
+echo "== claim 12: a session returns to its sandbox (P6.3, #425)"
+# Sessions are numbered across the run: claims 3, 8 and 9 take s1-s3, so claim 12's four are s4-s7.
+SPREAD='s4=moca-sandbox-0 s5=moca-sandbox-1 s6=moca-sandbox-0 s7=moca-sandbox-1'
+claim12() { sed -n '/Claim 12:/,/^PASS=/p' "$TMP/out"; }
+(export MOCK_SESSIONS=1 MOCK_ENVELOPE=1 MOCK_WHERE="$SPREAD"
+  run_smoke
+  claim12 | grep -qx '  ok 4 sessions, each on one sandbox for both turns' ||
+    fail "claim 12 did not pass with every second turn on its first turn's sandbox: $(claim12)"
+  ! grep -qF 'could not tell affinity from luck' "$TMP/out" || fail 'a spread run printed the luck note'
+  [[ "$(sort -u "$MOCK_STATE/sessions.log")" == '{}' ]] ||
+    fail "an untiered stack's sessions did not post {}: $(sort -u "$MOCK_STATE/sessions.log" | tr '\n' ' ')")
+pass 'claim 12: first turns on two sandboxes, each second turn on its first: ok, no luck note; untiered sessions post {}'
+
+(export MOCK_SESSIONS=1 MOCK_WHERE="$SPREAD" MOCK_WHERE_2='s6=moca-sandbox-1'
+  run_smoke
+  claim12 | grep -qx '  FAIL a session moved between sandboxes, or a turn failed' ||
+    fail "a session that moved did not fail claim 12: $(claim12)"
+  claim12 | grep -qF "session s6: first 'moca-sandbox-0', then 'moca-sandbox-1'" ||
+    fail "claim 12 did not name the session that moved: $(claim12)"
+  expect_kept 'claim 12 moved')
+pass 'claim 12: a second turn on the other sandbox fails, naming the session and both sandboxes'
+
+(export MOCK_SESSIONS=1 MOCK_WHERE='s4=moca-sandbox-0 s5=moca-sandbox-0 s6=moca-sandbox-0 s7=moca-sandbox-0'
+  run_smoke
+  claim12 | grep -qx '  ok 4 sessions, each on one sandbox for both turns' || fail "claim 12 did not pass on one sandbox: $(claim12)"
+  claim12 | grep -qF 'note the first turns all landed on one sandbox, so this run could not tell affinity from luck' ||
+    fail "first turns on one sandbox did not print the luck note: $(claim12)")
+pass 'claim 12: first turns all on one sandbox pass with the luck note'
+
+(export MOCK_SESSIONS=1
+  run_smoke
+  claim12 | grep -qx '  FAIL a session moved between sandboxes, or a turn failed' ||
+    fail "turns that printed no where= did not fail claim 12: $(claim12)")
+pass 'claim 12: a turn that reports no sandbox is a FAIL, not a match of two empty names'
+
+(export MOCK_SESSIONS=1 SH_SINGLE_NAMESPACE=moca-single SMOKE_MODEL_URL=https://model.example.test SMOKE_MODEL_TOKEN=model-token-not-real
+  run_smoke --target ocp-single
+  grep -qF 'kubectl -n moca-single get configmap moca-settings -o jsonpath={.data.SH_SANDBOX_TIERS}' "$MOCK_STATE/kubectl.log" ||
+    fail "ocp-single did not read the tiers from its own namespace's moca-settings"
+  [[ "$(sort -u "$MOCK_STATE/sessions.log")" == '{}' ]] ||
+    fail "ocp-single's sessions did not post {}: $(sort -u "$MOCK_STATE/sessions.log" | tr '\n' ' ')"
+  ! grep -qF 'tiered' "$TMP/out" || fail 'an untiered ocp-single run printed a tier note')
+pass 'ocp-single (never tiered): every session posts {}'
+
+echo "== a tiered stack (P6.3, #425)"
+(export MOCK_SESSIONS=1 MOCK_TIERS=container,microvm MOCK_WHERE="$SPREAD"
+  run_smoke
+  [[ "$(sort -u "$MOCK_STATE/sessions.log")" == '{"sandbox":{"tier":"container"}}' ]] ||
+    fail "a tiered container smoke did not ask for the container tier: $(sort -u "$MOCK_STATE/sessions.log" | tr '\n' ' ')"
+  expect_out 'note this stack is tiered (container,microvm): every session asks for the container tier')
+pass 'tiered: the container smoke creates container-tier sessions and says so'
+
+P4_REC='{"sandboxId":"moca_microvm_0","labels":{"moca.dev/tier":"microvm"},"capabilities":[],"capacityMax":4,"transport":"grpc"}'
+(export SMOKE_MODEL_URL=https://model.example.test SMOKE_MODEL_TOKEN=model-token-not-real MOCK_SESSIONS=1 \
+  MOCK_TIERS=container,microvm MOCK_REDIS_OUT=$'moca_microvm_0\nmoca-sandbox-0\nmoca-sandbox-1' MOCK_P4_RECORD="$P4_REC"
+  run_smoke --target ocp --tier p4
+  [[ "$(sort -u "$MOCK_STATE/sessions.log")" == '{"sandbox":{"tier":"microvm"}}' ]] ||
+    fail "a tiered p4 smoke did not ask for the microvm tier: $(sort -u "$MOCK_STATE/sessions.log" | tr '\n' ' ')"
+  grep -qx '  ok attached: moca_microvm_0, each advertising moca.dev/tier=microvm (container sandboxes beside them: moca-sandbox-0 moca-sandbox-1)' "$TMP/out" ||
+    fail "P2 did not pass on a tiered stack with labelled P4 records and containers: $(grep -A1 'Claim P2' "$TMP/out" | tail -1)"
+  grep -qF "HGET sh:sandbox:records 'moca_microvm_0'" "$MOCK_STATE/kubectl.log" || fail "P2 did not read moca_microvm_0's record")
+pass 'tiered p4: sessions ask for microvm; P2 passes with containers attached and the P4 record labelled microvm'
+
+(export SMOKE_MODEL_URL=https://model.example.test SMOKE_MODEL_TOKEN=model-token-not-real \
+  MOCK_TIERS=container,microvm MOCK_REDIS_OUT=$'moca_microvm_0\nmoca-sandbox-0' \
+  MOCK_P4_RECORD='{"sandboxId":"moca_microvm_0","labels":{},"capabilities":[],"capacityMax":4,"transport":"grpc"}'
+  run_smoke --target ocp --tier p4
+  grep -qx "  FAIL P4 record(s) not advertising moca.dev/tier=microvm: moca_microvm_0 (tier '') (a P6.3 microvm-worker advertises it; an older one gets no sessions on a tiered stack)" "$TMP/out" ||
+    fail "a P4 record without the tier label did not fail P2: $(grep -A1 'Claim P2' "$TMP/out" | tail -1)")
+pass 'tiered p4: a P4 record without moca.dev/tier fails P2, naming the id and what it advertised'
+
+(export SMOKE_MODEL_URL=https://model.example.test SMOKE_MODEL_TOKEN=model-token-not-real MOCK_SESSIONS=1 \
+  MOCK_SETTINGS_CM_FAIL=1 MOCK_REDIS_OUT=moca_microvm_0 MOCK_P4_RECORD="$P4_REC"
+  run_smoke --target ocp --tier p4
+  [[ "$RC" != 0 ]] || fail 'a run that could not read the stack tiers exited 0'
+  grep -qE '^  FAIL could not read configmap moca-settings .*forbidden' "$TMP/out" ||
+    fail 'a failed moca-settings read was not a FAIL quoting the error'
+  grep -qF '  FAIL could not tell whether this stack is tiered' "$TMP/out" ||
+    fail "P2 judged a stack whose tiers it could not read: $(grep -A1 'Claim P2' "$TMP/out" | tail -1)"
+  ! grep -qE '^  ok attached' "$TMP/out" || fail 'P2 passed without knowing whether the stack is tiered'
+  [[ "$(sort -u "$MOCK_STATE/sessions.log")" == '{}' ]] || fail 'an unreadable moca-settings did not fall back to {} sessions')
+pass 'an unreadable moca-settings is a FAIL (quoted), P2 does not judge it, sessions post {}'
+
+echo "== P7 keeps the sticky sandbox count (#425)"
+# P7 runs the setup.sh beside smoke.sh, so the copy here runs a stand-in that records its env.
+mkdir -p "$TMP/k8s"
+cp "$SMOKE" "$TMP/k8s/smoke.sh"
+cat >"$TMP/k8s/setup.sh" <<'MOCK'
+#!/usr/bin/env bash
+echo "count=${SH_SANDBOX_COUNT-unset} ids=${SH_P4_SANDBOX_IDS-unset} $*" >>"$MOCK_STATE/setup.log"
+MOCK
+(export SMOKE_MODEL_URL=https://model.example.test SMOKE_MODEL_TOKEN=model-token-not-real MOCK_REDIS_OUT=moca_microvm_0 \
+  SMOKE_P4_ADD_ID=moca_scratch_0
+  SMOKE="$TMP/k8s/smoke.sh" run_smoke --target ocp --tier p4
+  grep -qE '^  ok moca_scratch_0.s token reached' "$TMP/out" || fail "P7 did not pass with the stand-in setup.sh: $(grep -A2 'Claim P7' "$TMP/out")"
+  [[ "$(cat "$MOCK_STATE/setup.log")" == $'count=unset ids=moca_microvm_0,moca_scratch_0 --target ocp\ncount=unset ids=moca_microvm_0 --target ocp' ]] ||
+    fail "P7's setup.sh runs did not leave SH_SANDBOX_COUNT to the sticky value: $(cat "$MOCK_STATE/setup.log")")
+pass 'P7: the add and the restore leave SH_SANDBOX_COUNT unset (sticky), so a mixed stack keeps its containers'
 
 echo "smoke.test.sh: all passed"

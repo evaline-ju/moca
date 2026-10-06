@@ -429,7 +429,7 @@ unset SMOKE_MODEL_TOKEN
 `SMOKE_MODEL_KIND` is `api-key` for a raw Anthropic key and `bearer` (the default) for a gateway
 token. The smoke reaches everything by `port-forward`, as on Kind; the Route path is the demo's.
 
-**Look for:** `PASS=11 FAIL=0`. On OCP, claim 7 must also report `kube API ... BLOCKED`. Run the
+**Look for:** `PASS=12 FAIL=0`. On OCP, claim 7 must also report `kube API ... BLOCKED`. Run the
 smoke before the acts: claim 9 deletes the supervisor pod and claim 10 deletes `redis-0`.
 
 **Re-check two things that Kind could not prove,** because OVN-Kubernetes behaves differently from
@@ -698,6 +698,11 @@ the supervisor OOM-killed at its 1Gi limit (`kubectl --context kind-moca -n moca
 raise the memory request and limit together (section 4). A worker that dies inside the pod is not a
 container restart: look for `worker_exit` in the supervisor's log.
 
+**Claim 12 notes `could not tell affinity from luck`.** Its four first turns run at once so the
+least-loaded choice spreads them over the sandboxes; when they all land on one, every second turn
+matches by luck too. The claim still passes; re-run the smoke for a run that proves affinity. A
+claim 12 FAIL names the session that moved and both pod names.
+
 **The supervisor never becomes Ready on a pulled image.** The published `latest` may predate
 `/readyz`, so the startup probe fails. Use `--build` on Kind, or a branch image with `--image` on
 OCP.
@@ -817,8 +822,12 @@ stack no container sandbox may be; on a tiered stack container sandboxes may be 
 them, and each P4 ID's record must advertise the `microvm` tier (`moca.dev/tier`). P3: a turn runs
 on a kernel that is no node's and writes a file. P4: a second turn reads it back. P6: through the relay Route, a wrong attach token is refused at the relay, and SandboxExec is
 not served even with the exec token. P7 (only with `SMOKE_P4_ADD_ID=<scratch id>`): `setup.sh` adds
-that ID and removes it again, and the relay pod is the same one, with the same start time and no
-restart. Claims 7–12 do not run on this tier.
+that ID and removes it again, both runs keeping the sticky `SH_SANDBOX_COUNT` (so a mixed stack
+keeps its container sandboxes), and the relay pod is the same one, with the same start time and no
+restart. Claims 7–12 do not run on this tier. On a tiered stack every smoke session asks for its tier
+(`microvm` here, `container` without `--tier p4`) and the smoke prints a `note` naming the stack's
+tiers, so both smokes test the right tier whatever the default; on an untiered stack sessions name
+none. A `moca-settings` the smoke cannot read is a FAIL, not "untiered".
 
 ### 11.4 Add, revoke, and their timing
 
@@ -932,7 +941,8 @@ K8S_LIVE_SMOKE=1 SMOKE_MODEL_URL=<endpoint> SMOKE_MODEL_TOKEN=<token> \
 There is no in-pod mock model on this target (the `kind-ci` one rides the dev.local image), so the
 smoke needs a real model credential, like `--target ocp`. The claims are the container tier's:
 pods up, sandboxes attached, authenticated turns in a sandbox, isolation (redis, relay exec,
-metadata BLOCKED; relay attach OPEN), drain, Redis-restart persistence, no restarts. The kube API
+metadata BLOCKED; relay attach OPEN), drain, Redis-restart persistence, no restarts, and a session
+staying on its sandbox (claim 12). The kube API
 probe is reported as a `note`, not a claim (§12.3). For a custom namespace, export the same
 `SH_SINGLE_NAMESPACE` you installed with; without it, smoke reads the `moca-setup` ConfigMap in the
 kubeconfig's current namespace, so it finds the stack only when the context is already set to it.

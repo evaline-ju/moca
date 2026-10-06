@@ -41,6 +41,9 @@ const SCRIPTS = {
     done: 'done-k8s-p4-write',
   },
   'K8S-SMOKE-P4-READ': { steps: ['cat proof.txt'], done: 'done-k8s-p4-read' },
+  // P6.3 claim 12: which container served the turn. The pod name is the sandbox's SANDBOX_ID.
+  'K8S-SMOKE-WHERE-1': { steps: ['echo "where=$HOSTNAME"'], done: 'done-k8s-where-1' },
+  'K8S-SMOKE-WHERE-2': { steps: ['echo "where=$HOSTNAME"'], done: 'done-k8s-where-2' },
 };
 
 const isToolResult = (m) =>
