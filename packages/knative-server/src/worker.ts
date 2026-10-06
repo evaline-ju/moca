@@ -5,6 +5,8 @@ import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { handler } from './server.js';
 // Boot-time validation of the sandbox-discovery enum; see its use below.
 import { resolveDiscoverySource } from '@moca/harness/select-sandbox';
+// ...and of the sandbox tier settings (P6.3), likewise.
+import { parseSandboxTiers } from '@moca/harness/sandbox-affinity';
 // Shared boot preparation (keyset validation, tenancy, ambient-credential scrub) -- this path has to
 // call it itself because it never goes through startServer. See its use below.
 import { prepareServerProcess } from './server-process.js';
@@ -281,9 +283,14 @@ if (isMainModule) {
   // MI1 §5 R2: prepareServerProcess is the SAME function startServer calls, so both entry points
   // validate tenancy and scrub ambient credentials identically -- there is no separate worker-only
   // boot path for that check to drift from.
+  //
+  // SH_SANDBOX_TIERS / SH_SANDBOX_DEFAULT_TIER (P6.3 spec §3.4): the selection still reads them per
+  // call (select-sandbox.ts, `parseSandboxTiers(env)` in selectPoolSandbox), but a typo must fail
+  // the bring-up, not the first turn -- the same argument as the discovery check above.
   try {
     prepareServerProcess(process.env);
     resolveDiscoverySource(process.env, process.env.SH_REMOTE_SANDBOX === '1');
+    parseSandboxTiers(process.env);
   } catch (err) {
     console.error(String(err instanceof Error ? err.message : err));
     process.exit(2);

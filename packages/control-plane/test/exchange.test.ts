@@ -101,6 +101,9 @@ describe('sessionTier (P6.3 spec §3.3)', () => {
     expect(sessionTier(base, tiers)).toBe('container');
     expect(sessionTier(base, null)).toBe('');
   });
+  it('a tier stored while tiers were declared is not shown once the deployment stops declaring them: the data plane no longer filters', () => {
+    expect(sessionTier({ ...base, sandboxTier: 'microvm' }, null)).toBe('');
+  });
 });
 
 describe('viewTier: the tier a session view shows', () => {
@@ -125,6 +128,9 @@ describe('viewTier: the tier a session view shows', () => {
   it('is null only when the deployment declares no tiers', () => {
     expect(viewTier({ ...base, sandboxTier: '' }, null)).toBeNull();
     expect(viewTier(base, null)).toBeNull();
+  });
+  it('a tier stored while tiers were declared is not shown once the deployment stops declaring them: the data plane no longer filters', () => {
+    expect(viewTier({ ...base, sandboxTier: 'microvm' }, null)).toBeNull();
   });
 });
 

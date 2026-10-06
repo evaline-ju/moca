@@ -180,6 +180,8 @@ describe('projectResources', () => {
   });
 
   it('projects placement from the runtime report, and the session tier from the record (P6.3)', () => {
+    // Tiered: on an untiered deployment a stored tier is not shown (viewTier, spec §3.3).
+    const tiers = { names: ['container', 'microvm'], default: 'container' };
     const out = projectResources(
       { ...rec, sandboxTier: 'microvm' },
       {
@@ -189,6 +191,7 @@ describe('projectResources', () => {
         workspaceResetFrom: 'm-0',
       },
       { podName: null, phase: 'unknown', tenant: 'github:1234' },
+      tiers,
     ) as Record<string, Record<string, unknown> | null>;
     expect(out.session!.sandboxTier).toBe('microvm');
     expect(out.placement).toEqual({

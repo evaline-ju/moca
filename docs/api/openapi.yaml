@@ -104,8 +104,9 @@ components:
           description: |
             the sandbox tier the session runs in (P6.3): the tier recorded at creation; for a
             session that recorded none (created before P6.3, or while the deployment declared no
-            tiers), today's deployment default, which the data plane applies; null only when the
-            deployment declares no tiers
+            tiers), today's deployment default, which the data plane applies; null whenever the
+            deployment declares no tiers, even for a session that recorded one (the data plane
+            then runs untiered)
     CredentialDescriptor:
       type: object
       required: [name, kind, consumer, destination, binding]
@@ -572,8 +573,8 @@ paths:
                     type: string
                     description: |
                       the tier the session's turn runs in (P6.3): the recorded tier, or today's
-                      default for a session that recorded none; absent only when the deployment
-                      declares no tiers
+                      default for a session that recorded none; absent whenever the deployment
+                      declares no tiers, even for a session that recorded one
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
