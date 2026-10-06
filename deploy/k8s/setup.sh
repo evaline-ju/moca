@@ -86,11 +86,15 @@ parse_args() {
   *) die "unknown --target '$TARGET': kind, kind-ci, ocp or ocp-single" ;;
   esac
   if [[ -n "$TLS_CERT$TLS_KEY" ]]; then
-    # ocp always has Routes; ocp-single only with SH_ROUTE_DOMAIN (README §12.5).
-    [[ "$TARGET" == ocp || "$TARGET" == ocp-single ]] || die '--tls-cert/--tls-key apply to --target ocp only'
-    [[ "$TARGET" != ocp-single || -n "${SH_ROUTE_DOMAIN-}" ]] || die '--tls-cert/--tls-key need SH_ROUTE_DOMAIN on --target ocp-single: without it there is no Route to serve'
+    [[ "$TARGET" == ocp || "$TARGET" == ocp-single ]] || die '--tls-cert/--tls-key apply to --target ocp or ocp-single only'
     [[ -n "$TLS_CERT" && -n "$TLS_KEY" ]] || die '--tls-cert and --tls-key go together'
     [[ -r "$TLS_CERT" && -r "$TLS_KEY" ]] || die "cannot read $TLS_CERT or $TLS_KEY"
+    # Not also coupled to SH_ROUTE_DOMAIN here: the domain may be the earlier run's sticky value,
+    # resolved in load_setup_inputs long after parse_args. ensure_tls refuses the combination,
+    # the same deferral --tls-secret's validation documents.
+  fi
+  if [[ -n "$TLS_CERT$TLS_KEY" && -n "$TLS_SECRET" ]]; then
+    die '--tls-cert/--tls-key and --tls-secret are two certificate sources; pass one'
   fi
   if [[ -n "$RELAY_TLS_CERT$RELAY_TLS_KEY" ]]; then
     [[ "$TARGET" == ocp ]] || die '--relay-tls-cert/--relay-tls-key apply to --target ocp only'
@@ -107,8 +111,7 @@ parse_args() {
     [[ "$TARGET" == ocp-single ]] || die '--tls-secret applies to --target ocp-single only'
     # Not also coupled to SH_ROUTE_DOMAIN here: the domain may be the earlier run's sticky value,
     # resolved in load_setup_inputs long after parse_args. ensure_tls refuses the combination.
-  fi
-  # ocp-single's optional Routes (README §12.5): validated here, before anything touches a cluster.
+  fi  # ocp-single's optional Routes (README §12.5): validated here, before anything touches a cluster.
   # The domain cannot be read at cluster scope with namespace rights, so it is given, not found.
   if [[ "$TARGET" == ocp-single && -n "${SH_ROUTE_DOMAIN-}" ]]; then
     [[ "$SH_ROUTE_DOMAIN" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$ ]] ||
@@ -318,7 +321,20 @@ load_setup_inputs() {
     data="$(jq -nc --argjson d "$data" --arg dom "$ROUTE_DOMAIN" '($d + {SH_ROUTE_DOMAIN: $dom}) | with_entries(select(.value != ""))')"
     # --tls-secret is sticky too: with Routes kept on (SH_ROUTE_DOMAIN unset), a re-run without
     # the flag must not fall back to a self-signed certificate over the operator's Secret.
-    if [[ -z "$TLS_SECRET" && -n "$ROUTE_DOMAIN" ]]; then TLS_SECRET="$(cm_value "$json" SH_TLS_SECRET)"; fi
+    # --tls-cert/--tls-key, given on this run, replaces the source: the saved name is not loaded,
+    # so it cannot silently beat the pair, and the key's absence from the ConfigMap below makes
+    # the server-side apply drop it -- a later re-run with no certificate input cannot resurrect
+    # it over what this run installed.
+    if [[ -z "$TLS_SECRET" && -z "$TLS_CERT" && -n "$ROUTE_DOMAIN" ]]; then TLS_SECRET="$(cm_value "$json" SH_TLS_SECRET)"; fi
+    # A certificate source with no Routes is refused HERE, before moca-setup is applied, so the
+    # mistake is never recorded (and the Secret check below, which names the Secret, does not
+    # mask it): a certificate nothing serves would leave the operator thinking theirs is in use.
+    if [[ -n "$TLS_SECRET$TLS_CERT" && -z "$ROUTE_DOMAIN" ]]; then
+      die '--tls-secret/--tls-cert need SH_ROUTE_DOMAIN: without it there is no Route to serve'
+    fi
+    # Before the ConfigMap apply, so a bad name is never recorded (a re-run cannot inherit the
+    # mistake) -- even when the domain came from this same ConfigMap and Routes stay on.
+    check_tls_secret
     if [[ -n "$TLS_SECRET" ]]; then
       data="$(jq -nc --argjson d "$data" --arg s "$TLS_SECRET" '$d + {SH_TLS_SECRET: $s}')"
     fi
@@ -616,21 +632,28 @@ route_cert() {
   ROUTE_CERT_MADE=self-signed
 }
 
+# check_tls_secret: the --tls-secret (or saved SH_TLS_SECRET) must exist and be kubernetes.io/tls.
+# Called from load_setup_inputs BEFORE moca-setup is applied, so a mistyped name is refused without
+# ever being recorded -- a later re-run cannot inherit the mistake. A failed GET aborts, never reads
+# as "absent" (secret_json's rule).
+check_tls_secret() {
+  [[ -n "$TLS_SECRET" ]] || return 0
+  local json
+  json="$(secret_json "$TLS_SECRET" "$NS")"
+  [[ -n "$json" ]] || die "Secret $TLS_SECRET does not exist (or is unreadable): --tls-secret needs a preinstalled kubernetes.io/tls Secret"
+  [[ "$(printf '%s' "$json" | jq -r '.type // empty')" == 'kubernetes.io/tls' ]] ||
+    die "Secret $TLS_SECRET is not a kubernetes.io/tls Secret; the ghostunnel sidecar needs tls.crt and tls.key"
+}
+
 ensure_tls() {
   if [[ "$TARGET" == ocp-single ]]; then
-    # --tls-secret with no Routes is a mistake naming the domain: it cannot serve anything, and a
-    # silent ignore would leave the operator thinking their certificate is in use.
-    [[ -z "$TLS_SECRET" || -n "$ROUTE_DOMAIN" ]] ||
-      die '--tls-secret needs SH_ROUTE_DOMAIN: without it there is no Route to serve'
+    # A certificate source with no Routes was already refused in load_setup_inputs (which sees
+    # the sticky domain, and refuses before moca-setup records anything); by here Routes are on.
     [[ -n "$ROUTE_DOMAIN" ]] || return 0
     # --tls-secret: a preinstalled certificate the sidecar references by name; no copy is made, so
     # an operator's Secret is never duplicated (and never rotated by a later self-signed default).
     if [[ -n "$TLS_SECRET" ]]; then
-      local json
-      json="$(secret_json "$TLS_SECRET" "$NS")"
-      [[ -n "$json" ]] || die "Secret $TLS_SECRET does not exist (or is unreadable): --tls-secret needs a preinstalled kubernetes.io/tls Secret"
-      [[ "$(printf '%s' "$json" | jq -r '.type // empty')" == 'kubernetes.io/tls' ]] ||
-        die "Secret $TLS_SECRET is not a kubernetes.io/tls Secret; the ghostunnel sidecar needs tls.crt and tls.key"
+      check_tls_secret
       log "serving the supervisor Route with the preinstalled Secret $TLS_SECRET"
       return 0
     fi

@@ -984,8 +984,11 @@ domain).
 
 `SH_ROUTE_DOMAIN` and `--tls-secret` are sticky like every input: a re-run without them keeps the
 Routes (and the certificate) it finds in `moca-setup`; `SH_ROUTE_DOMAIN=` set-but-empty turns the
-Routes off and returns to port-forward access. The smoke still reaches the stack by port-forward,
-Routes or not.
+Routes off and returns to port-forward access. The three certificate sources are mutually
+exclusive per run (`--tls-secret` with `--tls-cert` is refused), and `--tls-cert`/`--tls-key` on a
+re-run _replaces_ a saved `--tls-secret` rather than being silently beaten by it -- the saved name
+is dropped from `moca-setup`, so a later re-run with no certificate input cannot resurrect it over
+what the pair installed. The smoke still reaches the stack by port-forward, Routes or not.
 
 The §12.3 tenant verified all of it: the operator's Let's Encrypt wildcard for
 `*.moca-ns.vpc-int.res.ibm.com` (served by `--tls-secret`, and also covering the edge Route as the

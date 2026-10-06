@@ -224,7 +224,7 @@ expect_fail --target prod
 expect_out "unknown --target 'prod'"
 touch "$TMP/c.pem" "$TMP/k.pem"
 expect_fail --target kind --tls-cert "$TMP/c.pem" --tls-key "$TMP/k.pem"
-expect_out 'apply to --target ocp only'
+expect_out 'apply to --target ocp or ocp-single only'
 (export SH_SANDBOX_COUNT=abc; expect_fail --target kind)
 expect_out "SH_SANDBOX_COUNT='abc'"
 (export MOCK_KIND_VERSION=0.23.0; expect_fail --target kind)
@@ -754,11 +754,11 @@ reset_state
 expect_fail --target prod-single
 expect_out 'kind, kind-ci, ocp or ocp-single'
 (export SH_GITHUB_CLIENT_ID=Iv1.a; expect_fail --target ocp-single --tls-cert "$TMP/c.pem" --tls-key "$TMP/k.pem")
-expect_out 'need SH_ROUTE_DOMAIN on --target ocp-single'
+expect_out 'need SH_ROUTE_DOMAIN'
 (export SH_GITHUB_CLIENT_ID=Iv1.a; expect_fail --target kind --tls-secret some-secret)
 expect_out 'applies to --target ocp-single only'
 (export SH_GITHUB_CLIENT_ID=Iv1.a; expect_fail --target ocp-single --tls-secret some-secret)
-expect_out 'needs SH_ROUTE_DOMAIN'
+expect_out 'need SH_ROUTE_DOMAIN'
 (export SH_GITHUB_CLIENT_ID=Iv1.a SH_P4_SANDBOX_IDS=moca_microvm_0; expect_fail --target ocp-single)
 expect_out 'needs --target ocp'
 pass 'ocp-single: unknown targets, TLS flags (without a domain) and P4 IDs are refused, naming the fix'
@@ -867,15 +867,45 @@ expect_out 'NODE_EXTRA_CA_CERTS'
 pass 'ocp-single: without --tls-secret or --tls-cert a self-signed certificate is generated and said'
 
 # --tls-secret names a Secret that does not exist, or exists but is not kubernetes.io/tls: both
-# abort before any apply, so a mistyped name never silently falls back to a self-signed one.
+# abort BEFORE moca-setup is applied, so a mistyped name is never recorded (a re-run cannot inherit
+# the mistake) and never silently falls back to a self-signed one.
 reset_state
 (export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=example.test; expect_fail --target ocp-single --tls-secret missing-cert)
 expect_out 'does not exist'
 [[ ! -e "$MOCK_STATE/moca-single__Secret__moca-supervisor-tls.json" ]] || fail 'a refused --tls-secret still generated a certificate'
+if [[ -e "$MOCK_STATE/moca-single__ConfigMap__moca-setup.json" ]] &&
+  jq -e 'has("SH_TLS_SECRET")' "$MOCK_STATE/moca-single__ConfigMap__moca-setup.json" >/dev/null 2>&1; then
+  fail 'a refused --tls-secret was recorded in moca-setup'
+fi
 jq -nc '{apiVersion: "v1", kind: "Secret", metadata: {name: "opaque", namespace: "moca-single"}, type: "Opaque", data: {}}' \
   >"$MOCK_STATE/moca-single__Secret__opaque.json"
 (export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=example.test; expect_fail --target ocp-single --tls-secret opaque)
 expect_out 'not a kubernetes.io/tls Secret'
-pass 'ocp-single: a missing or mistyped --tls-secret aborts, generating nothing'
+pass 'ocp-single: a missing or mistyped --tls-secret aborts, recording and generating nothing'
+
+# The three certificate inputs are mutually exclusive, and the saved one never silently beats a
+# given pair: --tls-cert on a re-run replaces the saved source, and drops it from moca-setup.
+reset_state
+jq -nc '{apiVersion: "v1", kind: "Secret", metadata: {name: "op-cert", namespace: "moca-single"},
+  type: "kubernetes.io/tls", data: {"tls.crt": "Y3J0", "tls.key": "a2V5"}}' >"$MOCK_STATE/moca-single__Secret__op-cert.json"
+touch "$TMP/c.pem" "$TMP/k.pem"
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=example.test
+  expect_fail --target ocp-single --tls-secret op-cert --tls-cert "$TMP/c.pem" --tls-key "$TMP/k.pem")
+expect_out 'two certificate sources; pass one'
+pass 'ocp-single: --tls-secret and --tls-cert together are refused, naming the conflict'
+
+# A sticky-domain re-run (SH_ROUTE_DOMAIN unset) can swap in --tls-cert: the domain comes from
+# moca-setup, the pair replaces the saved Secret, and moca-setup no longer records the name.
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=example.test; expect_ok --target ocp-single --tls-secret op-cert)
+jq -e -r '.data.SH_TLS_SECRET' "$MOCK_STATE/moca-single__ConfigMap__moca-setup.json" >/dev/null ||
+  fail 'the setup with --tls-secret did not record it'
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp-single --tls-cert "$TMP/c.pem" --tls-key "$TMP/k.pem")
+gen | grep -q 'value: moca.example.test' || fail 'the sticky domain was lost on the --tls-cert re-run'
+grep -qF -- "--cert=$TMP/c.pem" "$MOCK_LOG" || fail 'the --tls-cert pair was not installed'
+grep -q 'kubectl create secret tls moca-supervisor-tls' "$MOCK_LOG" || fail 'the pair did not install into moca-supervisor-tls'
+jq -e 'has("SH_TLS_SECRET")' "$MOCK_STATE/moca-single__ConfigMap__moca-setup.json" >/dev/null 2>&1 &&
+  fail 'the saved SH_TLS_SECRET survived a --tls-cert re-run'
+gen | grep -q 'secretName: op-cert' && fail 'the saved --tls-secret still drives the sidecar volume'
+pass 'ocp-single: --tls-cert replaces the saved --tls-secret (volume, ConfigMap key), sticky domain intact'
 
 echo "setup.test.sh: all passed"
