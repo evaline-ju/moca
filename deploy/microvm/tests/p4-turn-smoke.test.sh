@@ -119,11 +119,11 @@ cat >"$TMP/bin/mocactl" <<'MOCK'
 echo "mocactl $*" >>"$MOCK_LOG"
 [ "$1" = run ] || exit 2
 prompt="$2"; shift 2
-sid="" opt="" cpurl=""
+sid="" opts=" " cpurl=""
 while [ $# -gt 0 ]; do
   case "$1" in
   --session) sid="$2"; shift 2 ;;
-  --option) opt="$2"; shift 2 ;;
+  --option) opts="$opts$2 "; shift 2 ;; # repeatable, as mocactl's is
   --control-plane-url) cpurl="$2"; shift 2 ;;
   *) shift 2 ;;
   esac
@@ -136,7 +136,7 @@ sub="$(node -e 'const a = JSON.parse(require("fs").readFileSync(process.argv[1],
   process.stdout.write(c.sub === a.subject && c.scope.includes("api") && a.controlPlaneUrl === process.argv[2]
     ? c.sub : "")' "$XDG_CONFIG_HOME/mocactl/auth.json" "$cpurl" 2>/dev/null)"
 case "$sub" in p4smoke:a | p4smoke:b) ;; *) echo "not logged in — run \`mocactl login\` first" >&2; exit 2 ;; esac
-if [ -z "$sid" ] && [ "$opt" != "inferenceCredential=p4-smoke-mock" ]; then
+if [ -z "$sid" ] && [[ "$opts" != *" inferenceCredential=p4-smoke-mock "* ]]; then
   echo "choose the inference credential with --option inferenceCredential=<value>" >&2; exit 2
 fi
 # A new session needs the subject's OWN stored credential (resolveSessionOptions lists the caller's).
@@ -152,7 +152,9 @@ printf '%b\n' "$resp"
 MOCK
 cat >"$TMP/bin/podman" <<'MOCK'
 #!/usr/bin/env bash
-case "$1" in exec) echo 1 ;; ps) : ;; esac
+# ps lists MOCK_PODMAN_PS: the container sandboxes of a tiered host (none by default).
+case "$1" in exec) echo 1 ;; ps) [ -n "${MOCK_PODMAN_PS:-}" ] && printf '%s\n' $MOCK_PODMAN_PS ;; esac
+exit 0
 MOCK
 cat >"$TMP/bin/journalctl" <<'MOCK'
 #!/usr/bin/env bash
@@ -179,6 +181,14 @@ MOCK
 chmod +x "$TMP/bin/"*
 export PATH="$TMP/bin:$PATH"
 export SH_WORKSPACE_ROOT="$STATE/ws" SH_JAIL_BASE="$TMP/jail" SMOKE_FAIL_DELAY=1
+# Where setup-microvm.sh writes microvm-tiers.env on a tiered host; empty (untiered) unless a case
+# writes it. Never the real /etc/serverless-harness, which a rig running this test may have.
+export SH_ENV_DIR="$TMP/etc"
+mkdir -p "$SH_ENV_DIR"
+tiered() { # tiered <default tier>: the file setup-microvm.sh writes on a host with both tiers
+  printf 'SH_SANDBOX_TIERS=container,microvm\nSH_SANDBOX_DEFAULT_TIER=%s\n' "$1" >"$SH_ENV_DIR/microvm-tiers.env"
+}
+untiered() { rm -f "$SH_ENV_DIR/microvm-tiers.env"; }
 for v in vm-6 vm-7 vm-8; do mkdir -p "$SH_JAIL_BASE/firecracker/$v/root/run"; : >"$SH_JAIL_BASE/firecracker/$v/root/run/firecracker.socket"; done
 
 echo "== shellcheck"
@@ -196,6 +206,29 @@ check "the two sessions got different server-assigned ids" \
 check "the VM killed was the RUNNING one (vm-7), not the newest standby (I2)" \
   "$(grep -c '^kill -KILL 99999007$' "$MOCK_LOG")" "1"
 check "which VM was killed is recorded" "$(grep -c 'killed vm-7' "$TMP/out1/SUMMARY")" "1"
+check "untiered: the P4-only precondition is checked" \
+  "$(grep -c 'ok: no container sandbox exists (P4-only host)' "$TMP/out1/SUMMARY")" "1"
+check "untiered: no tier precondition" "$(grep -c 'tiered' "$TMP/out1/SUMMARY")" "0"
+
+echo "== a tiered host, unauthenticated: the default tier must be microvm (spec §3.4)"
+rm -rf "$STATE"; tiered container
+MOCK_PODMAN_PS="sh-sandbox-0 sh-sandbox-1" bash "$SCRIPT" --out "$TMP/out-t1" >"$TMP/run-t1.log" 2>&1
+rc=$?
+check "default container: exit non-zero" "$([ "$rc" -ne 0 ] && echo yes || echo no)" "yes"
+check "default container: the host is tiered" \
+  "$(grep -c 'ok: the host is tiered (container, microvm)' "$TMP/out-t1/SUMMARY")" "1"
+check "default container: no P4-only precondition on a tiered host" \
+  "$(grep -c 'no container sandbox exists' "$TMP/out-t1/SUMMARY")" "0"
+check "default container: the precondition FAILs, naming --auth and the setup-microvm.sh re-run" \
+  "$(grep -c "FAIL: .*--auth.*setup-microvm.sh with SH_SANDBOX_DEFAULT_TIER=microvm" "$TMP/out-t1/SUMMARY")" "1"
+rm -rf "$STATE"; tiered microvm
+MOCK_PODMAN_PS="sh-sandbox-0 sh-sandbox-1" bash "$SCRIPT" --out "$TMP/out-t2" >"$TMP/run-t2.log" 2>&1
+rc=$?
+check "default microvm: exit 0" "$rc" "0"
+[ "$rc" = 0 ] || sed -n '/FAIL/p' "$TMP/run-t2.log"
+check "default microvm: the default-tier precondition passes" \
+  "$(grep -c 'ok: unauthenticated turns run in the default tier' "$TMP/out-t2/SUMMARY")" "1"
+untiered
 
 echo "== an empty response fails the run, and the isolation checks fail rather than pass (C2)"
 rm -rf "$STATE"
@@ -229,6 +262,7 @@ if [ -e "$DIR/../../packages/control-plane/node_modules/tsx" ]; then
   check "each subject stored the mock credential" "$(grep -c '^credential-put .*/v1/credentials/p4-smoke-mock$' "$MOCK_LOG")" "2"
   check "every turn went through mocactl" "$(grep -c '^mocactl run ' "$MOCK_LOG")" "5"
   check "no api token on any argv" "$(grep -c 'eyJ' "$MOCK_LOG")" "0"
+  check "untiered: no session asks for a tier" "$(grep -c 'sandboxTier' "$MOCK_LOG")" "0"
   mode() { node -e 'process.stdout.write((require("fs").statSync(process.argv[1]).mode & 0o7777).toString(8))' "$1"; }
   check "the --out directory is 0700" "$(mode "$TMP/out3")" "700"
   check "each subject's config directory is 0700" "$(mode "$TMP/out3/xdg-a")$(mode "$TMP/out3/xdg-b")" "700700"
@@ -280,6 +314,23 @@ if [ -e "$DIR/../../packages/control-plane/node_modules/tsx" ]; then
     MOCA_ROOT="$DIR/../.." MOCA_CRED_DIR="$TMP/cred" MOCACTL=mocactl bash "$m" --auth --out "$TMP/out9" >"$TMP/run9.log" 2>&1
     check "the PUT is named as refused" "$(grep -c "FAIL: stored subject a's inference credential (want '204', got '400')" "$TMP/out9/SUMMARY")" "1"
   else check "the bad-consumer mutation applied" no yes; fi
+  echo "== --auth on a tiered host: every new session asks for the microvm tier"
+  rm -rf "$STATE"; : >"$MOCK_LOG"; tiered container # --auth does not depend on the default
+  MOCK_PODMAN_PS="sh-sandbox-0" MOCA_CRED_DIR="$TMP/cred" MOCACTL=mocactl bash "$SCRIPT" --auth \
+    --out "$TMP/out-t3" >"$TMP/run-t3.log" 2>&1
+  rc=$?
+  check "tiered --auth: exit 0" "$rc" "0"
+  [ "$rc" = 0 ] || sed -n '/FAIL/p' "$TMP/run-t3.log"
+  check "tiered --auth: the host is tiered" \
+    "$(grep -c 'ok: the host is tiered (container, microvm)' "$TMP/out-t3/SUMMARY")" "1"
+  check "tiered --auth: no default-tier precondition (each session names its tier)" \
+    "$(grep -c 'default tier' "$TMP/out-t3/SUMMARY")" "0"
+  check "tiered --auth: both new sessions (A, B) pass --option sandboxTier=microvm" \
+    "$(grep -cE '^mocactl run .*--option sandboxTier=microvm( |$)' "$MOCK_LOG")" "2"
+  check "tiered --auth: every new session does (no mocactl run without --session lacks it)" \
+    "$(grep '^mocactl run ' "$MOCK_LOG" | grep -v -- '--session ' | grep -vc 'sandboxTier=microvm')" "0"
+  untiered
+
   echo "== --auth refuses an --out that already exists, or is a symlink (it would hold tokens)"
   mkdir -p "$TMP/shared"; chmod 1777 "$TMP/shared"; : >"$TMP/shared/someone-elses-file"
   ln -s "$TMP/shared" "$TMP/link-out"

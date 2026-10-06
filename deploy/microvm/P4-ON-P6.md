@@ -32,8 +32,9 @@ excluded, with a log line naming it.
 A container counts while it **exists**, running or stopped: `setup-vm.sh` runs them with
 `--restart=always`, and `podman-restart.service` brings a stopped one back at boot. Re-run
 `setup-microvm.sh` after adding or removing the container sandboxes, so the host's tiers follow.
-`SH_SANDBOX_DEFAULT_TIER` is not remembered between runs: give it on every run, or a re-run without
-it sets `container` again.
+`SH_SANDBOX_DEFAULT_TIER` is sticky: a re-run without it keeps the value in `microvm-tiers.env`, and
+`SH_SANDBOX_DEFAULT_TIER=` (set, empty) clears it back to `container`. A bad value, given or stored, is
+refused before anything is written. Going P4-only removes the file, and the stored default with it.
 
 **To go P4-only (optional) on an installed P6:**
 
@@ -332,6 +333,12 @@ The settings go in an `EnvironmentFile=`, not an `Environment=` line. systemd le
 loaded after `supervisor.env` wins over an `SH_MODEL` or `ANTHROPIC_*` already set there, or in the
 real-model file above. Remove the real-model drop-in during the check. The verified run used an
 `Environment=` drop-in, on a `supervisor.env` that set none of these keys.
+
+On a host with both tiers, the check runs in the microVM tier: `--auth` creates every session with
+`--option sandboxTier=microvm`. Without `--auth` a turn has no session, so it runs in the default
+tier: the check then requires `SH_SANDBOX_DEFAULT_TIER=microvm` in `microvm-tiers.env`. Either use
+`--auth`, or re-run `setup-microvm.sh` with `SH_SANDBOX_DEFAULT_TIER=microvm`. On a host without
+tiers it still requires that no `sh-sandbox-*` container exists.
 
 It exits 0 and prints `PASS` when every check held. Afterwards, point the supervisor back at the real
 model:

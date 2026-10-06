@@ -28,8 +28,9 @@
 # an attach must hold before it counts, at least 1) -- defaults below -- and
 # MICROVM_MAX_COMMITTED_MB (unset by default): a VM-memory budget in MiB for a host smaller than the
 # shipped unit's 24 GiB, written as a drop-in that also lowers the unit's AssertMemory to match -- and
-# SH_SANDBOX_DEFAULT_TIER (container, the default, or microvm): the tier of a session created without
-# one, on a host with both tiers.
+# SH_SANDBOX_DEFAULT_TIER (container or microvm): the tier of a session created without one, on a host
+# with both tiers. Sticky, like deploy/k8s/setup.sh's: unset keeps the value in microvm-tiers.env (else
+# container), and set but empty clears it back to container.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -56,6 +57,7 @@ TIERS_DROPIN="50-microvm-tiers.conf" # in sh-supervisor.service.d and sh-control
 SHIPPED_RESERVE_MB=4096
 CHANGED=() # destination paths this run actually rewrote
 MIXED=0    # 1 when container sandboxes share this host with the microVM worker (preflight)
+DEFAULT_TIER=container # the resolved SH_SANDBOX_DEFAULT_TIER (preflight)
 
 log() { printf '==> %s\n' "$*"; }
 die() { echo "setup-microvm.sh: $*" >&2; exit 1; }
@@ -147,11 +149,21 @@ preflight() {
   # rejected token's attached -> stream ended -> attached cycle could fall outside the window.
   [[ "$MICROVM_ATTACH_SETTLE" =~ ^[1-9][0-9]*$ ]] ||
     die "MICROVM_ATTACH_SETTLE='$MICROVM_ATTACH_SETTLE' must be a whole number of seconds, at least 1, to outlast the worker's first reconnect backoff (at most 750ms)"
-  # Checked on both paths, before the --remote return below, so a bad value writes nothing anywhere
-  # (--remote ignores it, but a typo should not pass silently).
-  case "${SH_SANDBOX_DEFAULT_TIER:-container}" in
+  # The default tier is sticky: a re-run without SH_SANDBOX_DEFAULT_TIER must not silently flip a
+  # chosen microvm back to container (and try-restart both units to do it). Set but empty clears it.
+  # The RESOLVED value is checked, so a bad stored one is refused too -- on both paths, before the
+  # --remote return below, so a bad value writes nothing anywhere (--remote ignores it, but a typo
+  # should not pass silently).
+  local tiers_env="$SH_ENV_DIR/microvm-tiers.env" from
+  if [[ -n "${SH_SANDBOX_DEFAULT_TIER+x}" ]]; then
+    DEFAULT_TIER="${SH_SANDBOX_DEFAULT_TIER:-container}" from=''
+  else
+    DEFAULT_TIER="$(env_value SH_SANDBOX_DEFAULT_TIER "$tiers_env")" from=" in $tiers_env"
+    DEFAULT_TIER="${DEFAULT_TIER:-container}"
+  fi
+  case "$DEFAULT_TIER" in
     container | microvm) ;;
-    *) die "SH_SANDBOX_DEFAULT_TIER='$SH_SANDBOX_DEFAULT_TIER' must be container or microvm" ;;
+    *) die "SH_SANDBOX_DEFAULT_TIER='$DEFAULT_TIER'$from must be container or microvm" ;;
   esac
   if [[ -z "$REMOTE_BUNDLE" ]]; then
     [[ -f "$SH_ENV_DIR/relay.env" && -f "$SH_UNIT_DIR/sh-relay.service" ]] ||
@@ -286,7 +298,7 @@ install_memory_dropin() {
 # remove what an earlier mixed run wrote. Drop-ins and an env file of OURS, never an edit to
 # supervisor.env / control-plane.env, which setup-vm.sh owns.
 install_tiers() {
-  local env="$SH_ENV_DIR/microvm-tiers.env" def="${SH_SANDBOX_DEFAULT_TIER:-container}" stage
+  local env="$SH_ENV_DIR/microvm-tiers.env" def="$DEFAULT_TIER" stage
   local sup="$SH_UNIT_DIR/sh-supervisor.service.d/$TIERS_DROPIN"
   local cp="$SH_UNIT_DIR/sh-control-plane.service.d/$TIERS_DROPIN"
   if ((MIXED == 0)); then

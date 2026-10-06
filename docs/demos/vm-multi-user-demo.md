@@ -112,8 +112,9 @@ Act 4. Follow `deploy/microvm/P4-ON-P6.md`:
 
 1. **Build the golden snapshot** ("Build the golden snapshot"), from the image 0a pulled. The
    container sandboxes can keep running for this.
-2. **Remove the container sandboxes and install the worker.** `setup-microvm.sh` refuses while
-   any `sh-sandbox-*` container exists:
+2. **Remove the container sandboxes and install the worker.** The demo removes them so that Act 4
+   shows a P4-only host. A host may keep both tiers instead (`P4-ON-P6.md`, "Container sandboxes
+   and P4 on one host"), and `setup-microvm.sh` then makes it tiered:
 
    ```bash
    sudo podman rm -f $(sudo podman ps -a --format '{{.Names}}' --filter 'name=^sh-sandbox-')

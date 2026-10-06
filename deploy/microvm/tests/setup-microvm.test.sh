@@ -311,6 +311,18 @@ check "SH_SANDBOX_DEFAULT_TIER=microvm: both units try-restarted" \
 check "SH_SANDBOX_DEFAULT_TIER=microvm: no daemon-reload (only the env file changed)" \
   "$(grep -c 'daemon-reload' "$MOCK_LOG")" "0"
 
+# Sticky (as deploy/k8s/setup.sh's input is): unset keeps the stored value; set but empty clears it.
+before="$(hash_tree)"; : >"$MOCK_LOG"
+check "sticky default, re-run without it: exit 0" "$(run)" "0"
+check "sticky default, re-run without it: microvm kept" "$(val SH_SANDBOX_DEFAULT_TIER "$TE")" "microvm"
+check "sticky default, re-run without it: every file byte-identical" "$(hash_tree)" "$before"
+check "sticky default, re-run without it: nothing restarted" "$(grep -c 'restart' "$MOCK_LOG")" "0"
+: >"$MOCK_LOG"
+check "SH_SANDBOX_DEFAULT_TIER= (set, empty): exit 0" "$(SH_SANDBOX_DEFAULT_TIER='' run)" "0"
+check "SH_SANDBOX_DEFAULT_TIER= (set, empty): cleared to container" "$(val SH_SANDBOX_DEFAULT_TIER "$TE")" "container"
+check "SH_SANDBOX_DEFAULT_TIER= (set, empty): both units try-restarted" \
+  "$(grep -cE '^systemctl try-restart sh-(supervisor|control-plane)\.service$' "$MOCK_LOG")" "2"
+
 unset MOCK_PODMAN_PS; : >"$MOCK_LOG"
 check "back to P4-only: exit 0" "$(run)" "0"
 check "back to P4-only: the tiers env and both drop-ins are gone" "$(tiers_files)" ""
@@ -454,6 +466,21 @@ check "local: 50-moca-p6.conf back, 50-moca-remote.conf gone" \
 check "local: the relay is not restarted (its drop-in and env did not change)" "$(grep -c 'restart sh-relay' "$MOCK_LOG")" "0"
 check "local: attach verified against the local presence records" "$(grep -c 'HEXISTS sh:sandbox:records moca_microvm_0' "$MOCK_LOG")" "1"
 check "local: no token on any argv" "$(grep -cE "$BTOK|$ltok" "$MOCK_LOG")" "0"
+
+echo "== a bad default stored in microvm-tiers.env is refused, writing nothing"
+reset_host; export MOCK_PODMAN_PS="sh-sandbox-0"
+run >/dev/null
+sed -i.bak 's/^SH_SANDBOX_DEFAULT_TIER=.*/SH_SANDBOX_DEFAULT_TIER=gpu/' "$TE" && rm -f "$TE.bak"
+before="$(hash_tree)"; : >"$MOCK_LOG"
+check "stored garbage: exit 1" "$(run)" "1"
+check "stored garbage: every file byte-identical" "$(hash_tree)" "$before"
+check "stored garbage: no systemctl" "$(grep -c '^systemctl' "$MOCK_LOG")" "0"
+check "stored garbage: the refusal names the value and the file" \
+  "$(grep -c "SH_SANDBOX_DEFAULT_TIER='gpu' in $TE must be container or microvm" "$TMP/run.log")" "1"
+: >"$MOCK_LOG"
+check "stored garbage, an explicit value overrides it: exit 0" "$(SH_SANDBOX_DEFAULT_TIER=microvm run)" "0"
+check "stored garbage, an explicit value overrides it: written" "$(val SH_SANDBOX_DEFAULT_TIER "$TE")" "microvm"
+unset MOCK_PODMAN_PS
 
 echo "== --remote leaves the sandbox tiers to the cluster's setup.sh (P6.3, spec §7)"
 reset_remote_host; mkbundle "$B"
