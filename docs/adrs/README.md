@@ -48,6 +48,7 @@ spec). Chronological by the spec's date; numbers are permanent.
 | [0035](0035-per-exec-microvm-warm-standby.md)             | Sandbox isolation becomes a per-`Exec` microVM, made affordable by warm standby                 | Proposed    |
 | [0036](0036-tui-decoupled-http-client.md)                 | `mocactl` is a standalone HTTP client of MU1, not a harness/control-plane feature               | Proposed    |
 | [0037](0037-p6-on-kubernetes-substrate.md)                | P6 on Kubernetes is a substrate, not the deprecated Knative path                                | Proposed    |
+| [0038](0038-mocactl-config-bundle-promotion.md)            | Promote config bundles through the control plane, not a direct Redis tunnel                     | Proposed    |
 
 ## What an ADR is (and isn't)
 
