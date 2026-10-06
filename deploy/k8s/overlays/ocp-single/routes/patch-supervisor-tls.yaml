@@ -1,0 +1,54 @@
+# The ghostunnel L4 sidecar (overlays/ocp/patch-supervisor-tls.yaml's shape): a byte-for-byte TCP
+# proxy on 8443 to 127.0.0.1:8080, so the supervisor's per-connection hand-off, routing and
+# admission see what they would see with no proxy at all (ADR-0037). NOT an HTTP proxy: never
+# replace it with one. No explicit UID/GID/fsGroup (patch-strip-uids.yaml's rule): restricted-v2
+# assigns them from the namespace's range, the point of ocp-single.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: moca-supervisor
+  namespace: moca-single
+spec:
+  template:
+    spec:
+      containers:
+        - name: tls
+          image: docker.io/ghostunnel/ghostunnel:v1.11.3@sha256:2599b8a04bae16d70a4209495618dea61b46a00a9a05fcf74da282688ad3517f
+          args:
+            - server
+            - --listen
+            - 0.0.0.0:8443
+            - --target
+            - 127.0.0.1:8080
+            - --cert
+            - /tls/tls.crt
+            - --key
+            - /tls/tls.key
+            - --disable-authentication
+          ports:
+            - name: https
+              containerPort: 8443
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          readinessProbe:
+            tcpSocket:
+              port: https
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: moca-supervisor-tls
+            defaultMode: 288 # 0440

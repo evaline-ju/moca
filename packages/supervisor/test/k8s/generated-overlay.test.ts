@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { parseAllDocuments } from 'yaml';
-import { K8S_DIR, NO_KUBECTL, find, podSpec, type K8sObject } from './render.js';
+import { K8S_DIR, NO_KUBECTL, container, envVar, find, podSpec, type K8sObject } from './render.js';
 
 /**
  * The overlay setup.sh GENERATES for --target ocp, rendered through real `kubectl kustomize` (#423).
@@ -154,6 +154,59 @@ describe.skipIf(NO_KUBECTL)(
     it('keeps the supervisor and control plane patches of the no-P4 render', () => {
       expect(find(objs, 'Route', 'moca', 'moca').spec.host).toBe(SUP_HOST);
       expect(find(objs, 'StatefulSet', 'moca-sandbox', 'moca-sandbox').spec.replicas).toBe(0);
+    });
+  },
+);
+
+describe.skipIf(NO_KUBECTL)(
+  'the generated ocp-single overlay with Routes (setup.sh write_overlay)',
+  () => {
+    const DIR = resolve(K8S_DIR, '.generated/test-ocp-single-routes');
+    const DOMAIN = 'example.test';
+    const NS = 'moca-tenant-1';
+    let objs: K8sObject[] = [];
+    beforeAll(() => {
+      execFileSync('bash', [WRITER, DIR], {
+        env: {
+          ...process.env,
+          GO_TARGET: 'ocp-single',
+          GO_NS: NS,
+          GO_SBX_NS: NS,
+          GO_SANDBOX_COUNT: '2',
+          GO_CLIENT_ID: 'Iv1.generated-overlay-test',
+          GO_SETTINGS_HASH: HASH,
+          GO_ROUTE_DOMAIN: DOMAIN,
+          GO_TLS_SECRET: 'op-cert',
+        },
+        stdio: ['ignore', 'ignore', 'inherit'],
+      });
+      const out = execFileSync('kubectl', ['kustomize', DIR], { encoding: 'utf8' });
+      objs = parseAllDocuments(out)
+        .map((d) => d.toJS() as K8sObject | null)
+        .filter((o): o is K8sObject => o !== null);
+    });
+    afterAll(() => {
+      rmSync(DIR, { recursive: true, force: true });
+    });
+
+    it('lists the routes component and patches both Route hosts to the domain', () => {
+      expect(find(objs, 'Route', 'moca', NS).spec.host).toBe(`moca.${DOMAIN}`);
+      expect(find(objs, 'Route', 'moca-control-plane', NS).spec.host).toBe(
+        `moca-control-plane.${DOMAIN}`,
+      );
+    });
+
+    it('points the sidecar volume at the --tls-secret Secret, not the default name', () => {
+      const vol = podSpec(find(objs, 'Deployment', 'moca-supervisor', NS)).volumes.find(
+        (v: { name: string }) => v.name === 'tls',
+      );
+      expect(vol.secret.secretName).toBe('op-cert');
+    });
+
+    it('keeps the namespace transformer and the env-string rewrites of the no-Routes render', () => {
+      const supervisor = container(find(objs, 'Deployment', 'moca-supervisor', NS), 'supervisor');
+      expect(envVar(supervisor, 'SH_RELAY_ADDR')?.value).toBe(`sandbox-relay-exec.${NS}.svc:9444`);
+      find(objs, 'Service', 'moca-supervisor-tls', NS); // throws when absent
     });
   },
 );

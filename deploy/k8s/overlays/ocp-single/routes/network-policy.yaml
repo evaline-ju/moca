@@ -1,0 +1,44 @@
+# Additive (policies union): the OpenShift router may reach the supervisor's ghostunnel port and
+# the control plane's HTTP port, and nothing else changes. Without these the namespace's
+# default-deny (network-policy-single.yaml) silently blocks the router and every Route 504s.
+# The selector matches the ingress namespace by its policy-group label, as overlays/ocp does; a
+# tenant with a namespace-scoped ingress controller is covered too when its pods share the label.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: moca-supervisor-from-router
+  namespace: moca-single
+spec:
+  podSelector:
+    matchLabels:
+      app: moca-supervisor
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              policy-group.network.openshift.io/ingress: ''
+      ports:
+        - protocol: TCP
+          port: 8443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: moca-control-plane-from-router
+  namespace: moca-single
+spec:
+  podSelector:
+    matchLabels:
+      app: moca-control-plane
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              policy-group.network.openshift.io/ingress: ''
+      ports:
+        - protocol: TCP
+          port: 8080

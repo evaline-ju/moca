@@ -1,0 +1,35 @@
+# Hosts are placeholders: setup.sh's generated overlay replaces both with <name>.<SH_ROUTE_DOMAIN>.
+# The supervisor Route is passthrough (ADR-0037: the router routes on SNI and never decrypts, so
+# each client connection is exactly one supervisor connection); the control plane is ordinary
+# HTTP behind an edge Route, where connection reuse is harmless.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: moca
+  namespace: moca-single
+spec:
+  host: moca.apps.example.invalid
+  to:
+    kind: Service
+    name: moca-supervisor-tls
+  port:
+    targetPort: https
+  tls:
+    termination: passthrough
+    insecureEdgeTerminationPolicy: None
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: moca-control-plane
+  namespace: moca-single
+spec:
+  host: moca-control-plane.apps.example.invalid
+  to:
+    kind: Service
+    name: moca-control-plane
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

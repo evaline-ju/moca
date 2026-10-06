@@ -3,15 +3,17 @@
 #
 #   deploy/k8s/setup.sh --target kind|kind-ci|ocp|ocp-single [--image IMG] [--sandbox-image IMG]
 #                       [--build|--skip-build] [--tls-cert FILE --tls-key FILE]
-#                       [--relay-tls-cert FILE --relay-tls-key FILE]
+#                       [--relay-tls-cert FILE --relay-tls-key FILE] [--tls-secret NAME]
 #
 # Environment: SH_GITHUB_CLIENT_ID, SH_ADMIN_SUBJECTS, SH_ALLOW_OPERATOR_FALLBACK (default false),
 # SH_SANDBOX_COUNT (default 2; 0 runs no container sandboxes), SH_WAIT_SECONDS (default 120),
 # SH_P4_SANDBOX_IDS (ocp only: comma-separated IDs of P4 microVM hosts outside the cluster, each
 # attaching to the relay over TLS; needs SH_SANDBOX_COUNT=0 -- see
 # docs/specs/2026-10-04-p6-on-kubernetes-slice2-design.md), SH_SINGLE_NAMESPACE (ocp-single only:
-# the one namespace everything lands in; default moca-single, must already exist), SH_SOURCE_ONLY=1
-# (define the functions and stop, for tests).
+# the one namespace everything lands in; default moca-single, must already exist),
+# SH_ROUTE_DOMAIN (ocp-single only: opt in to Routes -- the public DNS domain whose hosts
+# moca.<domain> and moca-control-plane.<domain> are the Route hostnames; see README §12.5),
+# SH_SOURCE_ONLY=1 (define the functions and stop, for tests).
 #
 # Idempotent: a re-run converges and never rotates a secret. Inputs are sticky: a re-run keeps every
 # setting, --image, --sandbox-image (ocp), SH_SANDBOX_COUNT and SH_P4_SANDBOX_IDS it is not given; an
@@ -42,6 +44,13 @@ P4_IDS=''
 P4_IDS_GIVEN=''
 # ocp-single's namespace (README §12), validated in parse_args.
 SINGLE_NS=''
+# ocp-single's optional Routes (README §12.5): the public DNS domain when SH_ROUTE_DOMAIN opted in,
+# empty when the stack is reached by port-forward. Validated in parse_args, resolved sticky in
+# load_setup_inputs.
+ROUTE_DOMAIN=''
+# --tls-secret: a preinstalled kubernetes.io/tls Secret to serve the supervisor's Route with,
+# instead of --tls-cert or a generated self-signed one. ocp-single only, and only with Routes.
+TLS_SECRET=''
 
 log() { printf '==> %s\n' "$*" >&2; }
 die() {
@@ -66,6 +75,7 @@ parse_args() {
     --tls-key) need_value "$1" $# "${2-}"; TLS_KEY="$2"; shift 2 ;;
     --relay-tls-cert) need_value "$1" $# "${2-}"; RELAY_TLS_CERT="$2"; shift 2 ;;
     --relay-tls-key) need_value "$1" $# "${2-}"; RELAY_TLS_KEY="$2"; shift 2 ;;
+    --tls-secret) need_value "$1" $# "${2-}"; TLS_SECRET="$2"; shift 2 ;;
     -h | --help) usage; exit 0 ;;
     *) die "unknown argument: $1 (see --help)" ;;
     esac
@@ -76,7 +86,9 @@ parse_args() {
   *) die "unknown --target '$TARGET': kind, kind-ci, ocp or ocp-single" ;;
   esac
   if [[ -n "$TLS_CERT$TLS_KEY" ]]; then
-    [[ "$TARGET" == ocp ]] || die '--tls-cert/--tls-key apply to --target ocp only'
+    # ocp always has Routes; ocp-single only with SH_ROUTE_DOMAIN (README §12.5).
+    [[ "$TARGET" == ocp || "$TARGET" == ocp-single ]] || die '--tls-cert/--tls-key apply to --target ocp only'
+    [[ "$TARGET" != ocp-single || -n "${SH_ROUTE_DOMAIN-}" ]] || die '--tls-cert/--tls-key need SH_ROUTE_DOMAIN on --target ocp-single: without it there is no Route to serve'
     [[ -n "$TLS_CERT" && -n "$TLS_KEY" ]] || die '--tls-cert and --tls-key go together'
     [[ -r "$TLS_CERT" && -r "$TLS_KEY" ]] || die "cannot read $TLS_CERT or $TLS_KEY"
   fi
@@ -91,6 +103,23 @@ parse_args() {
   P4_IDS="$(normalize_p4_ids "${SH_P4_SANDBOX_IDS-}")"
   [[ -z "$P4_IDS" ]] || [[ "$TARGET" == ocp ]] ||
     die "SH_P4_SANDBOX_IDS ($P4_IDS) needs --target ocp: a P4 host outside the cluster reaches the relay through an OpenShift Route, and $TARGET has none"
+  if [[ -n "$TLS_SECRET" ]]; then
+    [[ "$TARGET" == ocp-single ]] || die '--tls-secret applies to --target ocp-single only'
+    # Not also coupled to SH_ROUTE_DOMAIN here: the domain may be the earlier run's sticky value,
+    # resolved in load_setup_inputs long after parse_args. ensure_tls refuses the combination.
+  fi
+  # ocp-single's optional Routes (README §12.5): validated here, before anything touches a cluster.
+  # The domain cannot be read at cluster scope with namespace rights, so it is given, not found.
+  if [[ "$TARGET" == ocp-single && -n "${SH_ROUTE_DOMAIN-}" ]]; then
+    [[ "$SH_ROUTE_DOMAIN" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$ ]] ||
+      die "SH_ROUTE_DOMAIN='$SH_ROUTE_DOMAIN' is not a DNS name (lowercase labels separated by dots)"
+  fi
+  # A domain on any other target is a mistake: those targets either have Routes by other means
+  # (ocp, whose hosts the cluster's apps domain sets) or none at all (kind). Only the set-and-
+  # nonempty case is refused; set-and-empty on ocp-single means "Routes off" (load_setup_inputs).
+  if [[ -n "${SH_ROUTE_DOMAIN-}" && "$TARGET" != ocp-single ]]; then
+    die "SH_ROUTE_DOMAIN ($SH_ROUTE_DOMAIN) needs --target ocp-single: it names the domain your namespace's Routes are served on (README §12.5)"
+  fi
   # ocp-single's namespace: validated here, before anything touches a cluster. It must already
   # exist -- creating one needs cluster scope, which this target assumes you lack.
   if [[ "$TARGET" == ocp-single ]]; then
@@ -278,9 +307,21 @@ load_setup_inputs() {
       '{SH_SANDBOX_COUNT: $n, IMAGE: $i, SANDBOX_IMAGE: $s, SH_P4_SANDBOX_IDS: $p} | with_entries(select(.value != ""))')"
   fi
   # ocp-single adds its namespace, so a later smoke.sh finds it without being told
-  # (smoke.sh reads this key to pick its own -n).
+  # (smoke.sh reads this key to pick its own -n). SH_ROUTE_DOMAIN is sticky the same way as every
+  # other input: unset keeps the earlier run's value (Routes stay on), set-and-empty turns them
+  # off, a new value moves them.
   if [[ "$TARGET" == ocp-single ]]; then
     data="$(jq -nc --argjson d "$data" --arg ns "$NS" '$d + {SH_SINGLE_NAMESPACE: $ns}')"
+    if [[ -n "${SH_ROUTE_DOMAIN+x}" ]]; then ROUTE_DOMAIN="$SH_ROUTE_DOMAIN"; else ROUTE_DOMAIN="$(cm_value "$json" SH_ROUTE_DOMAIN)"; fi
+    [[ -z "$ROUTE_DOMAIN" || "$ROUTE_DOMAIN" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$ ]] ||
+      die "moca-setup holds SH_ROUTE_DOMAIN='$ROUTE_DOMAIN': re-run with SH_ROUTE_DOMAIN set to a DNS name or empty (Routes off)"
+    data="$(jq -nc --argjson d "$data" --arg dom "$ROUTE_DOMAIN" '($d + {SH_ROUTE_DOMAIN: $dom}) | with_entries(select(.value != ""))')"
+    # --tls-secret is sticky too: with Routes kept on (SH_ROUTE_DOMAIN unset), a re-run without
+    # the flag must not fall back to a self-signed certificate over the operator's Secret.
+    if [[ -z "$TLS_SECRET" && -n "$ROUTE_DOMAIN" ]]; then TLS_SECRET="$(cm_value "$json" SH_TLS_SECRET)"; fi
+    if [[ -n "$TLS_SECRET" ]]; then
+      data="$(jq -nc --argjson d "$data" --arg s "$TLS_SECRET" '$d + {SH_TLS_SECRET: $s}')"
+    fi
   fi
   jq -n --arg ns "$NS" --argjson data "$data" \
     '{apiVersion: "v1", kind: "ConfigMap", metadata: {name: "moca-setup", namespace: $ns}, data: $data}' |
@@ -488,7 +529,12 @@ CLIENT_ID=''
 client_id() { printf '%s' "$CLIENT_ID"; }
 
 public_harness_url() {
-  if is_kind || [[ "$TARGET" == ocp-single ]]; then echo 'http://127.0.0.1:8080'; else echo "https://$SUP_HOST"; fi
+  if is_kind; then echo 'http://127.0.0.1:8080'
+  elif [[ "$TARGET" == ocp-single ]]; then
+    # Routes are opt-in (README §12.5): with a domain, the supervisor's passthrough Route is the
+    # public URL; without one, the port-forward localhost one.
+    if [[ -n "$ROUTE_DOMAIN" ]]; then echo "https://moca.$ROUTE_DOMAIN"; else echo 'http://127.0.0.1:8080'; fi
+  else echo "https://$SUP_HOST"; fi
 }
 
 # sha256: stdin's SHA-256, hex. sha256sum (Linux, coreutils) or shasum (macOS), whichever is present.
@@ -571,6 +617,31 @@ route_cert() {
 }
 
 ensure_tls() {
+  if [[ "$TARGET" == ocp-single ]]; then
+    # --tls-secret with no Routes is a mistake naming the domain: it cannot serve anything, and a
+    # silent ignore would leave the operator thinking their certificate is in use.
+    [[ -z "$TLS_SECRET" || -n "$ROUTE_DOMAIN" ]] ||
+      die '--tls-secret needs SH_ROUTE_DOMAIN: without it there is no Route to serve'
+    [[ -n "$ROUTE_DOMAIN" ]] || return 0
+    # --tls-secret: a preinstalled certificate the sidecar references by name; no copy is made, so
+    # an operator's Secret is never duplicated (and never rotated by a later self-signed default).
+    if [[ -n "$TLS_SECRET" ]]; then
+      local json
+      json="$(secret_json "$TLS_SECRET" "$NS")"
+      [[ -n "$json" ]] || die "Secret $TLS_SECRET does not exist (or is unreadable): --tls-secret needs a preinstalled kubernetes.io/tls Secret"
+      [[ "$(printf '%s' "$json" | jq -r '.type // empty')" == 'kubernetes.io/tls' ]] ||
+        die "Secret $TLS_SECRET is not a kubernetes.io/tls Secret; the ghostunnel sidecar needs tls.crt and tls.key"
+      log "serving the supervisor Route with the preinstalled Secret $TLS_SECRET"
+      return 0
+    fi
+    local ca="$K8S_DIR/.generated/ocp-single/moca-supervisor-ca.crt" host="moca.$ROUTE_DOMAIN"
+    route_cert moca-supervisor-tls "$host" "$TLS_CERT" "$TLS_KEY" "$ca"
+    if [[ "$ROUTE_CERT_MADE" == self-signed ]]; then
+      log "WARNING: no --tls-cert given, so the supervisor uses a SELF-SIGNED certificate for $host."
+      log "  Every mocactl user must trust it: export NODE_EXTRA_CA_CERTS=$ca"
+    fi
+    return 0
+  fi
   [[ "$TARGET" == ocp ]] || return 0
   local ca="$K8S_DIR/.generated/ocp/moca-supervisor-ca.crt"
   route_cert moca-supervisor-tls "$SUP_HOST" "$TLS_CERT" "$TLS_KEY" "$ca"
@@ -687,6 +758,12 @@ write_overlay() {
     printf 'apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - ../../overlays/%s\n' "$TARGET"
     # P6.2 (spec §4.6): the relay's external path, only with P4 hosts; with none, slice 1's render.
     [[ -z "$P4_IDS" ]] || printf 'components:\n  - ../../overlays/ocp/p4-relay\n'
+    # ocp-single's Routes (README §12.5), only when SH_ROUTE_DOMAIN opted in; with none, the
+    # port-forward render §12 describes. ocp-single refuses P4 IDs, so the two components never
+    # coexist and each printf is the only writer of the components: block.
+    if [[ "$TARGET" == ocp-single && -n "$ROUTE_DOMAIN" ]]; then
+      printf 'components:\n  - ../../overlays/ocp-single/routes\n'
+    fi
     printf 'patches:\n'
     # base/control-plane.yaml's pod template has no annotations, so "add" creates the map.
     printf '  - target: { kind: Deployment, name: moca-control-plane }\n    patch: |-\n      - { op: replace, path: /spec/replicas, value: %s }\n' "$cp_replicas"
@@ -726,6 +803,21 @@ write_overlay() {
         printf '      apiVersion: apps/v1\n      kind: StatefulSet\n      metadata: { name: moca-sandbox }\n'
         printf '      spec:\n        template:\n          spec:\n            containers:\n              - name: sandbox\n                env:\n'
         printf '                  - { name: RELAY_ADDR, value: "sandbox-relay-attach.%s.svc:9443" }\n' "$NS"
+      fi
+      # ocp-single's Routes (README §12.5): the component's placeholder hosts, replaced with the
+      # domain SH_ROUTE_DOMAIN gave; and with --tls-secret, the sidecar's volume points at the
+      # preinstalled Secret by name instead of the moca-supervisor-tls the other two TLS sources
+      # write (a strategic-merge patch on the volume by name; the material is never copied). Like
+      # the env-string patches above, these belong under patches:, before the namespace: key.
+      if [[ -n "$ROUTE_DOMAIN" ]]; then
+        printf '  - target: { kind: Route, name: moca }\n    patch: |-\n      - { op: replace, path: /spec/host, value: moca.%s }\n' "$ROUTE_DOMAIN"
+        printf '  - target: { kind: Route, name: moca-control-plane }\n    patch: |-\n      - { op: replace, path: /spec/host, value: moca-control-plane.%s }\n' "$ROUTE_DOMAIN"
+        if [[ -n "$TLS_SECRET" && "$TLS_SECRET" != moca-supervisor-tls ]]; then
+          printf '  - target: { kind: Deployment, name: moca-supervisor }\n'
+          printf '    patch: |-\n'
+          printf '      apiVersion: apps/v1\n      kind: Deployment\n      metadata: { name: moca-supervisor }\n'
+          printf '      spec:\n        template:\n          spec:\n            volumes:\n              - name: tls\n                secret:\n                  secretName: %s\n' "$TLS_SECRET"
+        fi
       fi
       # The namespace, as a transformer on the generated overlay: every object, every Service DNS
       # name the transformer rewrites, and the RoleBinding's subjects follow it. The checked-in
@@ -798,12 +890,21 @@ P6 is up on kind (context $KIND_CONTEXT). Reach it with two port-forwards:
 then:  mocactl --control-plane-url http://127.0.0.1:8090 login
 EOF
   elif [[ "$TARGET" == ocp-single ]]; then
-    cat >&2 <<EOF
+    if [[ -n "$ROUTE_DOMAIN" ]]; then
+      cat >&2 <<EOF
+P6 is up on OpenShift, namespace $NS (single-namespace dev/test target), served by Routes:
+  harness:        https://moca.$ROUTE_DOMAIN   (TLS passthrough to the supervisor's L4 sidecar)
+  control plane:  https://moca-control-plane.$ROUTE_DOMAIN
+then:  mocactl --control-plane-url https://moca-control-plane.$ROUTE_DOMAIN login
+EOF
+    else
+      cat >&2 <<EOF
 P6 is up on OpenShift, namespace $NS (single-namespace dev/test target; no Routes). Reach it by port-forward:
   kubectl -n $NS port-forward svc/moca-supervisor 8080:8080
   kubectl -n $NS port-forward svc/moca-control-plane 8090:8080
 then:  mocactl --control-plane-url http://127.0.0.1:8090 login
 EOF
+    fi
   else
     cat >&2 <<EOF
 P6 is up on OpenShift.

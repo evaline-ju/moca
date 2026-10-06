@@ -754,10 +754,14 @@ reset_state
 expect_fail --target prod-single
 expect_out 'kind, kind-ci, ocp or ocp-single'
 (export SH_GITHUB_CLIENT_ID=Iv1.a; expect_fail --target ocp-single --tls-cert "$TMP/c.pem" --tls-key "$TMP/k.pem")
-expect_out 'apply to --target ocp only'
+expect_out 'need SH_ROUTE_DOMAIN on --target ocp-single'
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_fail --target kind --tls-secret some-secret)
+expect_out 'applies to --target ocp-single only'
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_fail --target ocp-single --tls-secret some-secret)
+expect_out 'needs SH_ROUTE_DOMAIN'
 (export SH_GITHUB_CLIENT_ID=Iv1.a SH_P4_SANDBOX_IDS=moca_microvm_0; expect_fail --target ocp-single)
 expect_out 'needs --target ocp'
-pass 'ocp-single: unknown targets, TLS flags and P4 IDs are refused, naming the fix'
+pass 'ocp-single: unknown targets, TLS flags (without a domain) and P4 IDs are refused, naming the fix'
 
 reset_state
 (export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp-single)
@@ -801,5 +805,77 @@ reset_state
 expect_out 'kubectl -n moca-single port-forward svc/moca-supervisor'
 ! grep -q 'https://' "$TMP/out" || fail 'ocp-single printed an https URL; it has no Routes'
 pass 'ocp-single: access is printed as port-forward commands, never a Route URL'
+
+echo "== ocp-single: optional Routes (SH_ROUTE_DOMAIN, README §12.5)"
+reset_state
+# A preinstalled kubernetes.io/tls Secret, as an operator's wildcard certificate would be.
+jq -nc '{apiVersion: "v1", kind: "Secret", metadata: {name: "op-cert", namespace: "moca-single"},
+  type: "kubernetes.io/tls", data: {"tls.crt": "Y3J0", "tls.key": "a2V5"}}' >"$MOCK_STATE/moca-single__Secret__op-cert.json"
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=example.test; expect_ok --target ocp-single --tls-secret op-cert)
+# The component and both hosts reach the generated overlay, and the volume follows --tls-secret.
+gen | grep -qx 'components:' || fail 'no components: block with SH_ROUTE_DOMAIN'
+gen | grep -q 'ocp-single/routes' || fail 'the routes component is not listed'
+gen | grep -q 'value: moca.example.test' || fail 'the supervisor Route host was not set'
+gen | grep -q 'value: moca-control-plane.example.test' || fail 'the control plane Route host was not set'
+gen | grep -q 'secretName: op-cert' || fail '--tls-secret did not reach the sidecar volume'
+# The preinstalled Secret was checked, never copied or generated.
+grep -q 'kubectl get secret op-cert' "$MOCK_LOG" || fail 'the --tls-secret Secret was never checked'
+[[ ! -e "$MOCK_STATE/moca-single__Secret__moca-supervisor-tls.json" ]] || fail '--tls-secret still wrote a moca-supervisor-tls Secret'
+# The run never called oc: Routes render with kubectl only, like the rest of the target.
+grep -q '^oc ' "$MOCK_LOG" && fail 'ocp-single with Routes ran oc'
+# The settings follow: the public URL is the supervisor Route, and moca-setup records both inputs.
+grep -q 'https://moca.example.test' "$MOCK_STATE/moca-single__ConfigMap__moca-settings.json" ||
+  fail 'SH_PUBLIC_HARNESS_URL is not the supervisor Route URL'
+jq -e -r '.data.SH_ROUTE_DOMAIN' "$MOCK_STATE/moca-single__ConfigMap__moca-setup.json" >/dev/null 2>&1 ||
+  fail 'moca-setup does not record SH_ROUTE_DOMAIN'
+jq -e -r '.data.SH_TLS_SECRET' "$MOCK_STATE/moca-single__ConfigMap__moca-setup.json" >/dev/null 2>&1 ||
+  fail 'moca-setup does not record SH_TLS_SECRET'
+expect_out 'https://moca-control-plane.example.test'
+expect_out 'mocactl --control-plane-url https://moca-control-plane.example.test'
+pass 'ocp-single: SH_ROUTE_DOMAIN renders the component, the hosts and the Route access text'
+
+# Sticky: a re-run without SH_ROUTE_DOMAIN keeps the Routes and the Secret; empty turns both off.
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp-single)
+gen | grep -q 'value: moca.example.test' || fail 'a re-run without SH_ROUTE_DOMAIN dropped the Routes'
+jq -e -r '.data.SH_TLS_SECRET' "$MOCK_STATE/moca-single__ConfigMap__moca-setup.json" >/dev/null 2>&1 ||
+  fail 'a re-run without --tls-secret dropped the recorded Secret name'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=; expect_ok --target ocp-single)
+! gen | grep -q 'ocp-single/routes' || fail 'SH_ROUTE_DOMAIN= left the component rendered'
+jq -e 'has("SH_ROUTE_DOMAIN") or .data.SH_ROUTE_DOMAIN' "$MOCK_STATE/moca-single__ConfigMap__moca-setup.json" >/dev/null 2>&1 ||
+  pass 'SH_ROUTE_DOMAIN= cleared the recorded domain'
+expect_out 'kubectl -n moca-single port-forward'
+pass 'ocp-single: SH_ROUTE_DOMAIN and --tls-secret are sticky; empty turns Routes off'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=Example.Test; expect_fail --target ocp-single)
+expect_out 'is not a DNS name'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=no_dots; expect_fail --target ocp-single)
+expect_out 'is not a DNS name'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=example.test; expect_fail --target kind)
+expect_out 'needs --target ocp-single'
+pass 'ocp-single: an invalid domain is refused before anything touches a cluster'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=example.test; expect_ok --target ocp-single)
+# No --tls-secret and no --tls-cert: a self-signed moca-supervisor-tls is generated, and the run
+# says so (the NODE_EXTRA_CA_CERTS line), as --target ocp does.
+[[ -n "$(sv moca-single moca-supervisor-tls tls.crt)" ]] || fail 'no self-signed supervisor certificate was generated'
+expect_out 'SELF-SIGNED'
+expect_out 'NODE_EXTRA_CA_CERTS'
+# The default volume name needs no patch: only --tls-secret writes one (checked above).
+! gen | grep -q 'secretName:' || fail 'the self-signed path wrote a volume patch; only --tls-secret should'
+pass 'ocp-single: without --tls-secret or --tls-cert a self-signed certificate is generated and said'
+
+# --tls-secret names a Secret that does not exist, or exists but is not kubernetes.io/tls: both
+# abort before any apply, so a mistyped name never silently falls back to a self-signed one.
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=example.test; expect_fail --target ocp-single --tls-secret missing-cert)
+expect_out 'does not exist'
+[[ ! -e "$MOCK_STATE/moca-single__Secret__moca-supervisor-tls.json" ]] || fail 'a refused --tls-secret still generated a certificate'
+jq -nc '{apiVersion: "v1", kind: "Secret", metadata: {name: "opaque", namespace: "moca-single"}, type: "Opaque", data: {}}' \
+  >"$MOCK_STATE/moca-single__Secret__opaque.json"
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=example.test; expect_fail --target ocp-single --tls-secret opaque)
+expect_out 'not a kubernetes.io/tls Secret'
+pass 'ocp-single: a missing or mistyped --tls-secret aborts, generating nothing'
 
 echo "setup.test.sh: all passed"
