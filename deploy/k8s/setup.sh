@@ -109,8 +109,14 @@ parse_args() {
   # Normalised and validated here, before anything touches a cluster. Unset means "the earlier run's
   # IDs" (load_setup_inputs); set-but-empty means none.
   P4_IDS_GIVEN="${SH_P4_SANDBOX_IDS+x}"
-  # Same rule for the default tier: unset keeps the earlier run's, set-but-empty clears it.
+  # Same rule for the default tier: unset keeps the earlier run's, set-but-empty clears it. A GIVEN
+  # value is checked here on every target, kind too, before anything touches a cluster (kind stores
+  # none, but a typo should not pass silently); a stored one is checked in load_setup_inputs.
   DEFAULT_TIER_GIVEN="${SH_SANDBOX_DEFAULT_TIER+x}"
+  case "${SH_SANDBOX_DEFAULT_TIER-}" in
+  '' | container | microvm) ;;
+  *) die "SH_SANDBOX_DEFAULT_TIER='$SH_SANDBOX_DEFAULT_TIER' must be container or microvm" ;;
+  esac
   P4_IDS="$(normalize_p4_ids "${SH_P4_SANDBOX_IDS-}")"
   [[ -z "$P4_IDS" ]] || [[ "$TARGET" == ocp ]] ||
     die "SH_P4_SANDBOX_IDS ($P4_IDS) needs --target ocp: a P4 host outside the cluster reaches the relay through an OpenShift Route, and $TARGET has none"
@@ -325,6 +331,9 @@ load_setup_inputs() {
   [[ -n "$SH_SANDBOX_COUNT" ]] || SH_SANDBOX_COUNT=2
   [[ "$SH_SANDBOX_COUNT" =~ ^[0-9]+$ ]] ||
     die "moca-setup holds SH_SANDBOX_COUNT='$SH_SANDBOX_COUNT': re-run with SH_SANDBOX_COUNT set to a whole number"
+  # Normalised once, so every later comparison may be a string one: 00 is 0 (no container
+  # sandboxes, so untiered), and 08 is 8, not an octal error.
+  SH_SANDBOX_COUNT=$((10#$SH_SANDBOX_COUNT))
   derive_tiers
   local data
   if is_kind; then

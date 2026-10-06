@@ -123,6 +123,17 @@ exactly when they change, even if an earlier run failed after writing them. The 
 because it reads the sandbox tiers from the same ConfigMap (§11.1); it drains on the roll, with a
 120 s grace.
 
+**The first apply of a P6.3 release disrupts every session, so run it at a quiet time.** It does
+more than roll the supervisor and the control plane once:
+
+- **It recreates the relay.** `base/relay.yaml` gains `SH_SANDBOX_AFFINITY_TTL_SECONDS`, and the
+  relay is `strategy: Recreate`. While it is down, every sandbox and every P4 host is detached, and
+  in-flight turns fail and are retried.
+- **It rolls every `moca-sandbox` pod**, even on an untiered stack: `base/sandbox.yaml` gains
+  `SANDBOX_TIER`. A container sandbox's workspace is local to its pod, so every container session's
+  workspace is reset. This happens **silently**: the pod names do not change, so affinity returns
+  each session to the same sandbox id, and no `workspace reset` notice is shown.
+
 A re-run with nothing changed converges without restarting any pod or touching any Secret. To
 remove everything: `kind delete cluster --name moca`.
 
@@ -742,7 +753,8 @@ turn of it runs there. A user picks the tier at creation, in mocactl's New Sessi
 
 - **`SH_SANDBOX_DEFAULT_TIER`** (`container` or `microvm`, default `container`) sets that default.
   It is sticky, stored in `moca-setup`; `SH_SANDBOX_DEFAULT_TIER=` clears it back to `container`.
-  Any other value is refused before anything is stored.
+  Any other value is refused before anything is stored. Kind is never tiered and stores none, but it
+  refuses a bad value too.
 - **A single-tier stack stays untiered** (containers only, or P4 only): both tier settings are
   empty, and a stored `SH_SANDBOX_DEFAULT_TIER` is kept but unused. Untiered on purpose: a worker
   older than P6.3 advertises no tier, and a tiered supervisor would exclude it.
@@ -751,6 +763,10 @@ turn of it runs there. A user picks the tier at creation, in mocactl's New Sessi
 - **Any settings change now rolls the supervisor too** (section 2): a change of client id or admins
   restarts both Deployments, and the first run of a P6.3 `setup.sh` on an existing stack rolls both
   once, because the settings it hashes gained the two tier keys.
+- **That first run also recreates the relay and rolls the container sandboxes** (section 2), on
+  every stack, tiered or not. Every sandbox and P4 host detaches while the relay is down, and every
+  container session's workspace is reset with no `workspace reset` notice, since each session
+  returns to a sandbox of the same name. Run it at a quiet time.
 
 The rest applies to every stack with P4 hosts:
 

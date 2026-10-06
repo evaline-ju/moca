@@ -10,6 +10,8 @@ SRC_K8S="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 export MOCK_LOG="$TMP/mock.log" MOCK_STATE="$TMP/state" SH_WAIT_SECONDS=2
+# Sticky input: a value in the caller's shell would be a GIVEN default tier in every run below.
+unset SH_SANDBOX_DEFAULT_TIER
 REAL_PATH="$PATH"
 export REAL_PATH
 REAL_BASH="$(command -v bash)"
@@ -998,6 +1000,28 @@ mv "$TMP/cm.json" "$MOCK_STATE/moca__ConfigMap__moca-setup.json"
 (unset SH_SANDBOX_DEFAULT_TIER; export SH_GITHUB_CLIENT_ID=Iv1.a; expect_fail --target ocp)
 expect_out "SH_SANDBOX_DEFAULT_TIER='gpu' must be container or microvm"
 pass 'a default tier other than container or microvm, given or stored, is refused and stores nothing'
+
+# Kind is never tiered and stores no default tier, but a bad GIVEN value is still a typo to
+# refuse -- before anything touches the cluster, as on the other targets (M3).
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_DEFAULT_TIER=gpu; expect_fail --target kind --skip-build)
+expect_out "SH_SANDBOX_DEFAULT_TIER='gpu' must be container or microvm"
+! grep -q '^kubectl' "$MOCK_LOG" || fail 'a refused SH_SANDBOX_DEFAULT_TIER on kind still reached the cluster'
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_DEFAULT_TIER=microvm; expect_ok --target kind --skip-build)
+[[ -z "$(dtier_stored)" ]] || fail "kind stored a default tier: '$(dtier_stored)'"
+untiered || fail 'kind was tiered'
+pass 'kind: a bad SH_SANDBOX_DEFAULT_TIER is refused before the cluster is touched; a good one is stored nowhere'
+
+# SH_SANDBOX_COUNT=00 is zero container sandboxes: a P4-only stack, untiered (d). Compared as a
+# string it was "not 0", and the stack was tiered with no container sandbox for the default tier.
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=00 SH_P4_SANDBOX_IDS=moca_microvm_0; expect_ok --target ocp)
+untiered || fail "SH_SANDBOX_COUNT=00 with a P4 ID was tiered: '$(setting SH_SANDBOX_TIERS)' / '$(setting SH_SANDBOX_DEFAULT_TIER)'"
+[[ "$(setup_cm | jq -r '.data.SH_SANDBOX_COUNT')" == 0 ]] || fail "SH_SANDBOX_COUNT=00 was not stored as 0: '$(setup_cm | jq -r '.data.SH_SANDBOX_COUNT')'"
+[[ "$(replicas_of moca-sandbox)" == 0 ]] || fail "SH_SANDBOX_COUNT=00 did not scale moca-sandbox to 0: '$(replicas_of moca-sandbox)'"
+expect_out 'SH_SANDBOX_COUNT=0: no container sandboxes to wait for'
+pass 'SH_SANDBOX_COUNT=00 with P4 IDs is a P4-only stack: untiered, stored and applied as 0'
 
 # ocp-single runs no P4 hosts (SH_P4_SANDBOX_IDS needs --target ocp), so it is never tiered; the
 # sticky default is still stored there, unused. Its supervisor already has an env patch entry when
