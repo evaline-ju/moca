@@ -23,6 +23,7 @@ const EXPECTED: Record<CpErrorCode, number> = {
   // 404, not 403, for another user's session: a 403 is an existence oracle (spec §8.1).
   session_not_found: 404,
   session_mismatch: 400,
+  digest_mismatch: 400,
   credential_required: 400,
   credential_ambiguous: 400,
   credential_not_found: 404,

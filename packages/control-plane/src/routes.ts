@@ -126,6 +126,15 @@ export const ROUTES: readonly RouteSpec[] = [
   },
   {
     method: 'POST',
+    path: '/v1/config-bundles',
+    auth: 'api',
+    sessionScoped: false,
+    // Holds the base64 of a MAX_BUNDLE_BYTES tar (~10.7 MiB) plus the JSON wrapper.
+    maxBodyBytes: 12 * 1024 * 1024,
+    operationId: 'putConfigBundle',
+  },
+  {
+    method: 'POST',
     path: '/internal/credentials',
     auth: 'exchange',
     sessionScoped: false,

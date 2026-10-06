@@ -1,3 +1,4 @@
+import type { BundleRedisLike } from '@moca/config-bundle';
 import type { CpRedisLike } from '../../src/ownership.js';
 
 /**
@@ -69,4 +70,25 @@ export function fakeRedis() {
     },
   };
   return { redis, hashes, zsets, streams, ops };
+}
+
+/** In-memory BundleRedisLike for the bundle upload route. */
+export function fakeBundleRedis(): BundleRedisLike & { store: Map<string, string> } {
+  const store = new Map<string, string>();
+  return {
+    store,
+    async set(key, value) {
+      store.set(key, value);
+      return 'OK';
+    },
+    async get(key) {
+      return store.get(key) ?? null;
+    },
+    async exists(key) {
+      return store.has(key) ? 1 : 0;
+    },
+    async expire() {
+      return 1;
+    },
+  };
 }

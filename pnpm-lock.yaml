@@ -63,6 +63,9 @@ importers:
 
   packages/control-plane:
     dependencies:
+      '@moca/config-bundle':
+        specifier: workspace:*
+        version: link:../config-bundle
       redis:
         specifier: ^6.2.1
         version: 6.2.1

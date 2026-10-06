@@ -1,3 +1,10 @@
+import {
+  assertValidDigest,
+  BundleDigestMismatchError,
+  MAX_BUNDLE_BYTES,
+  putBundle,
+  type BundleRedisLike,
+} from '@moca/config-bundle';
 import { CpError } from './errors.js';
 import {
   resolveInferenceName,
@@ -42,6 +49,8 @@ export interface CpConfig {
 export interface CpDeps {
   index: OwnershipIndex;
   credentials: CredentialStore;
+  /** Content-addressed config bundles (ADR-0038); the same Redis the ownership index uses. */
+  bundles: BundleRedisLike;
   identity: IdentityProvider;
   signer: { kid: string; mint(input: MintInput): string };
   /**
@@ -410,6 +419,36 @@ export const HANDLERS: Record<string, Handler> = {
     });
     // 204 whether or not it existed: a 404 here would be an existence oracle over credential names.
     return { status: 204, body: undefined };
+  },
+
+  putConfigBundle: async (ctx, deps) => {
+    requirePrincipal(ctx);
+    const body = asRecord(ctx.body);
+    const digest = body.digest;
+    if (typeof digest !== 'string') throw new CpError('invalid_request', 'digest must be a string');
+    try {
+      assertValidDigest(digest);
+    } catch {
+      throw new CpError('invalid_request', 'digest must be sha256:<64 lowercase hex>');
+    }
+    if (typeof body.tar !== 'string' || body.tar.length === 0) {
+      throw new CpError('invalid_request', 'tar must be a non-empty base64 string');
+    }
+    const tar = Buffer.from(body.tar, 'base64');
+    if (tar.length > MAX_BUNDLE_BYTES) {
+      throw new CpError(
+        'invalid_request',
+        `bundle is ${tar.length} bytes; the limit is ${MAX_BUNDLE_BYTES} bytes`,
+      );
+    }
+    try {
+      const { uploaded } = await putBundle(deps.bundles, digest, tar);
+      return { status: 201, body: { digest, uploaded } };
+    } catch (err) {
+      if (err instanceof BundleDigestMismatchError)
+        throw new CpError('digest_mismatch', err.message);
+      throw new CpError('redis_unavailable', 'redis is not answering');
+    }
   },
 
   getSessionResources: async (ctx, deps) => {

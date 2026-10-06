@@ -23,6 +23,7 @@ export const CP_ERROR_CODES = [
   'forbidden',
   'session_not_found',
   'session_mismatch',
+  'digest_mismatch',
   'credential_required',
   'credential_ambiguous',
   'credential_not_found',
@@ -51,6 +52,8 @@ const STATUS: Record<CpErrorCode, number> = {
   // reserved for "authenticated but insufficiently privileged on a resource you may know exists".
   session_not_found: 404,
   session_mismatch: 400,
+  // A client-built bundle whose bytes do not hash to the digest it claimed (config-bundle store).
+  digest_mismatch: 400,
   credential_required: 400,
   credential_ambiguous: 400,
   credential_not_found: 404,

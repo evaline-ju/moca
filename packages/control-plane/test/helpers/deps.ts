@@ -3,7 +3,7 @@ import { InMemoryCredentialStore, parseCredentialBody } from '../../src/credenti
 import type { CpConfig, CpDeps, RequestCtx } from '../../src/handlers.js';
 import { OwnershipIndex } from '../../src/ownership.js';
 import { makeSigner, publicKeyFromBase64, type TokenClaims } from '../../src/token.js';
-import { fakeRedis } from './fake-redis.js';
+import { fakeBundleRedis, fakeRedis } from './fake-redis.js';
 import { StubIdentity } from './stub-identity.js';
 
 /** Fixed epoch ms, so nothing in these suites depends on the wall clock. */
@@ -36,6 +36,7 @@ export function makeDeps(
   const base: TestDeps = {
     index: new OwnershipIndex(fake.redis),
     credentials: new InMemoryCredentialStore(),
+    bundles: fakeBundleRedis(),
     identity: new StubIdentity({ subject: 'github:1234', displayName: 'Alice', roles: [] }),
     signer,
     publicKeyBase64: signer.publicKeyBase64,

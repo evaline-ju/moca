@@ -1,4 +1,5 @@
 import { createClient } from 'redis';
+import type { BundleRedisLike } from '@moca/config-bundle';
 import { fileURLToPath } from 'node:url';
 import type { KeyObject } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
@@ -262,6 +263,7 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
       if (client.isOpen) client.destroy();
     },
     index: new OwnershipIndex(client as unknown as CpRedisLike),
+    bundles: client as unknown as BundleRedisLike,
     credentials: credentialStoreFromEnv(env),
     identity: new GithubOAuthProvider({
       clientId: env.SH_GITHUB_CLIENT_ID!,

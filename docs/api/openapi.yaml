@@ -70,6 +70,7 @@ components:
             - forbidden
             - session_not_found
             - session_mismatch
+            - digest_mismatch
             - credential_required
             - credential_ambiguous
             - credential_not_found
@@ -468,6 +469,37 @@ paths:
       parameters: [{ $ref: '#/components/parameters/credentialName' }]
       responses:
         '204': { description: deleted }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/config-bundles:
+    post:
+      operationId: putConfigBundle
+      summary: Upload a client-built config bundle (ADR-0038)
+      description: |
+        Content-addressed: the server re-hashes the tar and refuses a mismatch. Idempotent; a digest
+        that already exists only has its TTL refreshed. The decoded tar may be at most 8 MiB.
+      security: [{ sessionToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [digest, tar]
+              properties:
+                digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+                tar: { type: string, contentEncoding: base64 }
+      responses:
+        '201':
+          description: stored, or already present
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [digest, uploaded]
+                properties:
+                  digest: { type: string }
+                  uploaded: { type: boolean, description: false when it already existed }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
   /internal/credentials:
