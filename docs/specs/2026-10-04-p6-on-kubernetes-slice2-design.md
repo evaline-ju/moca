@@ -44,7 +44,7 @@ Builds on these; it reuses them and redesigns nothing:
 
 **Out of scope:**
 
-- **More than one tier per stack, or more than one P4 host per stack.** That is slice 3, rossoctl/moca#425. Until then, `selectPoolSandbox` has no tier label and no session affinity (rossoctl/moca#424, "Limits").
+- **More than one tier per stack, or more than one P4 host per stack.** That is slice 3, rossoctl/moca#425. Until then, `selectPoolSandbox` has no tier label and no session affinity (rossoctl/moca#424, "Limits"). Lifted by P6.3 (#425, `2026-10-04-p6-on-kubernetes-slice3-design.md`).
 - **External P4 on Kind or plain Kubernetes.** It needs a router or an LB; follow-up.
 - **cert-manager.**
 - **P4 guest networking** (#277); the P4 acts have no research turns.
@@ -116,6 +116,8 @@ These objects are rendered only when there is at least one P4 host. §4.6 explai
 - `--relay-tls-cert FILE` and `--relay-tls-key FILE` (OCP only) supply an operator certificate for the relay Route host.
 
 ### 4.2 One tier per stack (until slice 3)
+
+Superseded by P6.3: a stack with both tiers is tiered, not refused.
 
 A non-empty `SH_P4_SANDBOX_IDS` together with `SH_SANDBOX_COUNT > 0` is **refused**. The message names both values and the fix (`SH_SANDBOX_COUNT=0`). P4 IDs on `--target kind` or `kind-ci` are refused too: there is no router, so the external path is OpenShift-only in this slice.
 

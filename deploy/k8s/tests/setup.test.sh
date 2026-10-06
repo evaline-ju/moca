@@ -364,22 +364,43 @@ expect_out 'no SH_GITHUB_CLIENT_ID'
 grep -q "^kubectl --context kind-moca apply -k $REPO/deploy/k8s/.generated/kind\$" "$MOCK_LOG" || fail 'not applied from the generated overlay'
 grep -q '^  - ../../overlays/kind$' "$MOCK_STATE/applied-kustomization.yaml" || fail 'the generated overlay does not build on overlays/kind'
 [[ "$(setting SH_PUBLIC_HARNESS_URL)" == http://127.0.0.1:8080 ]] || fail 'kind advertises the wrong harness URL'
-# The control plane's configMapKeyRefs are not optional: a missing key stops the pod opaquely.
-[[ "$(jq -c '.data | keys' "$MOCK_STATE/moca__ConfigMap__moca-settings.json")" == '["SH_ADMIN_SUBJECTS","SH_ALLOW_OPERATOR_FALLBACK","SH_GITHUB_CLIENT_ID","SH_PUBLIC_HARNESS_URL"]' ]] ||
-  fail 'moca-settings must hold exactly the four keys the control plane references'
+# The control plane's configMapKeyRefs are not optional, bar the two tier keys: a missing key stops
+# the pod opaquely. The tier keys are written on every run too ('' when untiered, as here), so the
+# hash input is the same six keys on every stack.
+[[ "$(jq -c '.data | keys' "$MOCK_STATE/moca__ConfigMap__moca-settings.json")" == '["SH_ADMIN_SUBJECTS","SH_ALLOW_OPERATOR_FALLBACK","SH_GITHUB_CLIENT_ID","SH_PUBLIC_HARNESS_URL","SH_SANDBOX_DEFAULT_TIER","SH_SANDBOX_TIERS"]' ]] ||
+  fail 'moca-settings must hold exactly the six keys the control plane and the supervisor reference'
+[[ -z "$(setting SH_SANDBOX_TIERS)" && -z "$(setting SH_SANDBOX_DEFAULT_TIER)" ]] || fail 'kind is never tiered'
 expect_out 'port-forward svc/moca-supervisor 8080:8080'
 pass 'kind: generated overlay applied; control plane held at 0 without a client id; access printed'
 
-hash_of() { gen | grep -oE 'moca.dev/settings-hash: "[0-9a-f]{64}"' | grep -oE '[0-9a-f]{64}'; }
+# hash_of DEPLOYMENT: every settings hash the generated overlay stamps on DEPLOYMENT's pod template,
+# one per line (nothing when there is none). A Deployment may have several patch entries (ocp-single
+# adds an env patch for the supervisor), so every entry targeting it is read.
+hash_of() {
+  gen | awk -v t="kind: Deployment, name: $1 }" '/^  - target: /{ on = index($0, t) > 0; next } /^[^ ]/{ on = 0 } on' |
+    { grep -oE 'moca.dev/settings-hash: "[0-9a-f]{64}"' || true; } | grep -oE '[0-9a-f]{64}' || true
+}
+# settings_hash: THE settings hash of the generated overlay. Both Deployments that read moca-settings
+# (the control plane and the supervisor) carry it exactly once, and the two agree -- read per target,
+# so a patch that stamped one but not the other, or two different values, cannot hide behind a match.
+settings_hash() {
+  local cp sup
+  cp="$(hash_of moca-control-plane)"
+  sup="$(hash_of moca-supervisor)"
+  [[ -n "$cp" && "$cp" != *$'\n'* ]] || fail "the control plane's pod template must carry exactly one settings hash, got '$cp'"
+  [[ -n "$sup" && "$sup" != *$'\n'* ]] || fail "the supervisor's pod template must carry exactly one settings hash, got '$sup'"
+  [[ "$sup" == "$cp" ]] || fail "the supervisor's settings hash ($sup) differs from the control plane's ($cp)"
+  printf '%s' "$cp"
+}
 reset_state
 (export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
 [[ "$(replicas_of moca-control-plane)" == 1 ]] || fail 'a client id must render the control plane at 1 replica'
-h1="$(hash_of)"
-[[ -n "$h1" ]] || fail 'the generated overlay carries no settings hash on the control plane pod template'
+h1="$(settings_hash)"
+[[ -n "$h1" ]] || fail 'the generated overlay carries no settings hash'
 (export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
-[[ "$(hash_of)" == "$h1" ]] || fail 'an unchanged re-run changed the settings hash (it would roll the control plane for nothing)'
+[[ "$(settings_hash)" == "$h1" ]] || fail 'an unchanged re-run changed the settings hash (it would roll the control plane for nothing)'
 (export SH_GITHUB_CLIENT_ID=Iv1.b; expect_ok --target kind --skip-build)
-h2="$(hash_of)"
+h2="$(settings_hash)"
 [[ -n "$h2" && "$h2" != "$h1" ]] || fail 'a changed client id did not change the settings hash'
 [[ "$(setting SH_GITHUB_CLIENT_ID)" == Iv1.b ]] || fail 'the new client id was not written'
 pass 'the settings hash is stable for unchanged settings and changes with them (Review Focus 2)'
@@ -388,12 +409,12 @@ pass 'the settings hash is stable for unchanged settings and changes with them (
 # remembered between runs, so the next run renders B's hash and the apply still rolls the pods.
 reset_state
 (export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
-[[ "$(hash_of)" == "$h1" ]] || fail 'the settings hash depends on more than the settings'
+[[ "$(settings_hash)" == "$h1" ]] || fail 'the settings hash depends on more than the settings'
 (export SH_GITHUB_CLIENT_ID=Iv1.b MOCK_APPLY_K_FAIL=1; expect_fail --target kind --skip-build)
 [[ "$(setting SH_GITHUB_CLIENT_ID)" == Iv1.b ]] || fail 'the failed run did not get as far as writing the new settings'
-[[ "$(hash_of)" == "$h1" ]] || fail 'the failed apply still recorded an applied kustomization'
+[[ "$(settings_hash)" == "$h1" ]] || fail 'the failed apply still recorded an applied kustomization'
 (export SH_GITHUB_CLIENT_ID=Iv1.b; expect_ok --target kind --skip-build)
-[[ "$(hash_of)" == "$h2" ]] || fail 'after a failed run, the re-run did not roll the control plane onto the new settings'
+[[ "$(settings_hash)" == "$h2" ]] || fail 'after a failed run, the re-run did not roll the control plane onto the new settings'
 ! grep -q 'rollout restart' "$MOCK_LOG" || fail 'the control plane is rolled by the hash; nothing may rollout restart it'
 pass 'a settings change survives a failed run: the re-run applies the new hash'
 
@@ -401,7 +422,7 @@ if [[ -x "$TMP/bin/sha256sum" && -x "$TMP/bin/shasum" ]]; then
   mv "$TMP/bin/sha256sum" "$TMP/bin/sha256sum.off"
   (export SH_GITHUB_CLIENT_ID=Iv1.b; expect_ok --target kind --skip-build)
   mv "$TMP/bin/sha256sum.off" "$TMP/bin/sha256sum"
-  [[ "$(hash_of)" == "$h2" ]] || fail 'shasum and sha256sum disagree on the settings hash'
+  [[ "$(settings_hash)" == "$h2" ]] || fail 'shasum and sha256sum disagree on the settings hash'
   grep -q '^shasum -a 256' "$MOCK_LOG" || fail 'without sha256sum, shasum was not used'
   pass 'without sha256sum the hash comes from shasum -a 256, and is the same'
 fi
@@ -484,14 +505,14 @@ pass 'ocp: the self-signed private key is removed whether the TLS install succee
 echo "== sticky inputs: a re-run keeps every input it is not given"
 reset_state
 (export SH_GITHUB_CLIENT_ID=Iv1.a SH_ADMIN_SUBJECTS=github:alice SH_ALLOW_OPERATOR_FALLBACK=true; expect_ok --target kind --skip-build)
-h1="$(hash_of)"
+h1="$(settings_hash)"
 (unset SH_GITHUB_CLIENT_ID SH_ADMIN_SUBJECTS SH_ALLOW_OPERATOR_FALLBACK; expect_ok --target kind --skip-build)
 [[ "$(setting SH_GITHUB_CLIENT_ID)" == Iv1.a ]] || fail 'a re-run without SH_GITHUB_CLIENT_ID dropped the client id'
 [[ "$(setting SH_ADMIN_SUBJECTS)" == github:alice ]] || fail 'a re-run without SH_ADMIN_SUBJECTS dropped the admins'
 [[ "$(setting SH_ALLOW_OPERATOR_FALLBACK)" == true ]] || fail 'a re-run without SH_ALLOW_OPERATOR_FALLBACK reset it'
 [[ "$(replicas_of moca-control-plane)" == 1 ]] || fail 'a re-run without SH_GITHUB_CLIENT_ID scaled the control plane to 0'
 ! grep -q 'no SH_GITHUB_CLIENT_ID' "$TMP/out" || fail 'a re-run with a stored client id still warned that there is none'
-[[ "$(hash_of)" == "$h1" ]] || fail 'a re-run with no inputs changed the settings hash (it would roll the control plane)'
+[[ "$(settings_hash)" == "$h1" ]] || fail 'a re-run with no inputs changed the settings hash (it would roll the control plane)'
 grep -q 'rollout status deployment/moca-control-plane' "$MOCK_LOG" || fail 'the re-run did not wait for the control plane it keeps running'
 pass 'settings are sticky: a re-run without them keeps the client id, admins, fallback, replicas and hash'
 (export SH_ADMIN_SUBJECTS=; expect_ok --target kind --skip-build)
@@ -569,16 +590,17 @@ expect_out 'needs --target ocp'
 ! grep -q '^kubectl' "$MOCK_LOG" || fail 'a refused ID list still reached the cluster'
 pass 'refused: an ID with a dash, a duplicate, glob char, the reserved DIR, P4 IDs on kind -- before anything touches a cluster'
 
-# The live switch from a slice-1 stack: moca-setup already holds SH_SANDBOX_COUNT=2.
+# The live switch from a slice-1 stack: moca-setup already holds SH_SANDBOX_COUNT=2. Slice 2 refused
+# P4 IDs here (one tier per stack); P6.3 tiers the stack instead (slice-3 spec §7).
 reset_state
 (export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp)
-(export SH_GITHUB_CLIENT_ID=Iv1.a SH_P4_SANDBOX_IDS=moca_microvm_0; expect_fail --target ocp)
-expect_out 'SH_SANDBOX_COUNT=2'
-expect_out 'Re-run with SH_SANDBOX_COUNT=0'
-[[ -z "$(p4_stored)" ]] || fail 'a refused run still stored the P4 IDs'
-(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS=moca_microvm_0; expect_ok --target ocp)
-[[ "$(p4_stored)" == moca_microvm_0 ]] || fail 'the switch with SH_SANDBOX_COUNT=0 did not store the ID'
-pass 'one tier per stack: the stored count of 2 refuses P4 IDs, names the fix, and stores nothing (Review Focus 2)'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_P4_SANDBOX_IDS=moca_microvm_0; expect_ok --target ocp)
+[[ "$(setting SH_SANDBOX_TIERS)" == container,microvm ]] || fail "the stored count of 2 plus a P4 ID did not tier the stack: '$(setting SH_SANDBOX_TIERS)'"
+[[ "$(setting SH_SANDBOX_DEFAULT_TIER)" == container ]] || fail "a mixed stack's default tier is not container: '$(setting SH_SANDBOX_DEFAULT_TIER)'"
+[[ "$(p4_stored)" == moca_microvm_0 ]] || fail 'the switch to a mixed stack did not store the ID'
+[[ "$(replicas_of moca-sandbox)" == 2 ]] || fail 'the switch to a mixed stack dropped the container sandboxes'
+expect_out 'two sandbox tiers'
+pass 'the stored count of 2 plus P4 IDs is a tiered stack (container,microvm; default container), not a refusal'
 
 reset_state
 expect_fail --target kind --relay-tls-cert "$TMP/c.pem" --relay-tls-key "$TMP/k.pem"
@@ -607,12 +629,18 @@ if [[ -x /bin/bash ]]; then
       normalize_p4_ids ' , ' || exit 1
       result=\$(normalize_p4_ids 'a,b')
       [[ \"\$result\" == 'a b' ]] || exit 1
-      unset SH_P4_SANDBOX_IDS
+      unset SH_P4_SANDBOX_IDS SH_SANDBOX_DEFAULT_TIER
       parse_args --target kind || exit 1
+      [[ -z \"\$DEFAULT_TIER_GIVEN\" ]] || exit 1
+      SH_SANDBOX_DEFAULT_TIER= parse_args --target kind || exit 1
+      [[ -n \"\$DEFAULT_TIER_GIVEN\" ]] || exit 1
+      SH_SANDBOX_COUNT=2 P4_IDS=a STORED_DEFAULT_TIER=''
+      derive_tiers 2>/dev/null
+      [[ \"\$TIERS,\$DEFAULT_TIER\" == 'container,microvm,container' ]] || exit 1
       echo 'all tests passed'
     " 2>&1)
-    [[ "$test_output" == *"all tests passed"* ]] || fail "normalize_p4_ids failed on bash 3.2 with set -u: $test_output"
-    pass "normalize_p4_ids works on bash 3.2 with set -u (empty arrays safe); all edge cases tested"
+    [[ "$test_output" == *"all tests passed"* ]] || fail "the bash 3.2 checks failed with set -u: $test_output"
+    pass "normalize_p4_ids, parse_args (SH_SANDBOX_DEFAULT_TIER unset and empty) and derive_tiers work on bash 3.2 with set -u"
   else
     echo "skip - bash 3.2 not available (version is: $bash3_version)"
   fi
@@ -907,5 +935,104 @@ jq -e 'has("SH_TLS_SECRET")' "$MOCK_STATE/moca-single__ConfigMap__moca-setup.jso
   fail 'the saved SH_TLS_SECRET survived a --tls-cert re-run'
 gen | grep -q 'secretName: op-cert' && fail 'the saved --tls-secret still drives the sidecar volume'
 pass 'ocp-single: --tls-cert replaces the saved --tls-secret (volume, ConfigMap key), sticky domain intact'
+
+echo "== P6.3 Task 16: sandbox tiers on a mixed stack; a sticky default tier"
+setup_cm() { cat "$MOCK_STATE/${1:-moca}__ConfigMap__moca-setup.json"; }
+dtier_stored() { setup_cm "${1:-moca}" | jq -r '.data.SH_SANDBOX_DEFAULT_TIER // empty'; }
+# annotation_adds DEPLOYMENT: how many patch ops of the generated overlay add DEPLOYMENT's pod
+# template annotations. More than one and the second "add" replaces the first's map.
+annotation_adds() {
+  gen | awk -v t="kind: Deployment, name: $1 }" '/^  - target: /{ on = index($0, t) > 0; next } /^[^ ]/{ on = 0 } on' |
+    grep -c 'path: /spec/template/metadata/annotations' || true
+}
+untiered() { [[ -z "$(setting SH_SANDBOX_TIERS)" && -z "$(setting SH_SANDBOX_DEFAULT_TIER)" ]]; }
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp)
+untiered || fail "a containers-only stack was tiered: '$(setting SH_SANDBOX_TIERS)' / '$(setting SH_SANDBOX_DEFAULT_TIER)'"
+! grep -q 'two sandbox tiers' "$TMP/out" || fail 'a containers-only stack logged two tiers'
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS=moca_microvm_0; expect_ok --target ocp)
+untiered || fail "a P4-only stack was tiered: '$(setting SH_SANDBOX_TIERS)' / '$(setting SH_SANDBOX_DEFAULT_TIER)'"
+pass 'a single-tier stack (containers only, or P4 only) stays untiered: both settings are empty'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=2 SH_P4_SANDBOX_IDS=moca_microvm_0; expect_ok --target ocp)
+[[ "$(setting SH_SANDBOX_TIERS)" == container,microvm && "$(setting SH_SANDBOX_DEFAULT_TIER)" == container ]] ||
+  fail 'a mixed stack is not tiered container,microvm with default container'
+[[ "$(annotation_adds moca-control-plane)" == 1 && "$(annotation_adds moca-supervisor)" == 1 ]] ||
+  fail 'ocp: each Deployment that reads moca-settings needs exactly one pod-template annotations add'
+h_c="$(settings_hash)"
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_DEFAULT_TIER=microvm; expect_ok --target ocp)
+[[ "$(setting SH_SANDBOX_DEFAULT_TIER)" == microvm ]] || fail 'SH_SANDBOX_DEFAULT_TIER=microvm was not written'
+[[ "$(dtier_stored)" == microvm ]] || fail 'moca-setup does not hold the default tier'
+h_m="$(settings_hash)"
+[[ "$h_m" != "$h_c" ]] || fail 'a changed default tier did not change the settings hash (neither Deployment would roll)'
+expect_out 'default microvm'
+pass 'a mixed stack is tiered; SH_SANDBOX_DEFAULT_TIER picks the default, and a change rolls both Deployments'
+
+(unset SH_SANDBOX_DEFAULT_TIER; export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp)
+[[ "$(setting SH_SANDBOX_DEFAULT_TIER)" == microvm ]] || fail 'a re-run without SH_SANDBOX_DEFAULT_TIER dropped the stored default'
+[[ "$(settings_hash)" == "$h_m" ]] || fail 'a re-run with the same default changed the settings hash'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_P4_SANDBOX_IDS=; expect_ok --target ocp)
+untiered || fail 'clearing the P4 IDs left the stack tiered'
+[[ "$(dtier_stored)" == microvm ]] || fail 'a single-tier run dropped the stored default (it is kept, unused)'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_P4_SANDBOX_IDS=moca_microvm_0; expect_ok --target ocp)
+[[ "$(setting SH_SANDBOX_DEFAULT_TIER)" == microvm ]] || fail 'the stored default was not used when the stack became mixed again'
+pass 'SH_SANDBOX_DEFAULT_TIER is sticky, and kept (unused) while the stack has one tier'
+
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_DEFAULT_TIER=; expect_ok --target ocp)
+[[ -z "$(dtier_stored)" ]] || fail 'SH_SANDBOX_DEFAULT_TIER= (explicitly empty) did not clear the stored default'
+[[ "$(setting SH_SANDBOX_DEFAULT_TIER)" == container ]] || fail 'a cleared default did not fall back to container'
+(unset SH_SANDBOX_DEFAULT_TIER; export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp)
+[[ "$(setting SH_SANDBOX_DEFAULT_TIER)" == container ]] || fail 'the run after a clear did not write container'
+pass 'an explicitly empty SH_SANDBOX_DEFAULT_TIER clears it; the default is container again'
+
+before_setup="$(setup_cm)"
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_DEFAULT_TIER=gpu SH_SANDBOX_COUNT=3; expect_fail --target ocp)
+expect_out "SH_SANDBOX_DEFAULT_TIER='gpu' must be container or microvm"
+[[ "$(setup_cm)" == "$before_setup" ]] || fail 'a refused default tier still rewrote moca-setup'
+[[ "$(setting SH_SANDBOX_DEFAULT_TIER)" == container ]] || fail 'a refused default tier still rewrote moca-settings'
+jq '.data.SH_SANDBOX_DEFAULT_TIER = "gpu"' "$MOCK_STATE/moca__ConfigMap__moca-setup.json" >"$TMP/cm.json"
+mv "$TMP/cm.json" "$MOCK_STATE/moca__ConfigMap__moca-setup.json"
+(unset SH_SANDBOX_DEFAULT_TIER; export SH_GITHUB_CLIENT_ID=Iv1.a; expect_fail --target ocp)
+expect_out "SH_SANDBOX_DEFAULT_TIER='gpu' must be container or microvm"
+pass 'a default tier other than container or microvm, given or stored, is refused and stores nothing'
+
+# ocp-single runs no P4 hosts (SH_P4_SANDBOX_IDS needs --target ocp), so it is never tiered; the
+# sticky default is still stored there, unused. Its supervisor already has an env patch entry when
+# the namespace is custom: the settings-hash entry is a second one, and the two must not collide.
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SINGLE_NAMESPACE=moca-tenant-1 SH_SANDBOX_DEFAULT_TIER=microvm; expect_ok --target ocp-single)
+[[ "$(dtier_stored moca-tenant-1)" == microvm ]] || fail 'ocp-single did not store the sticky default tier'
+[[ -z "$(jq -r '.data.SH_SANDBOX_TIERS' "$MOCK_STATE/moca-tenant-1__ConfigMap__moca-settings.json")" ]] || fail 'ocp-single was tiered'
+[[ "$(annotation_adds moca-control-plane)" == 1 && "$(annotation_adds moca-supervisor)" == 1 ]] ||
+  fail 'ocp-single: each Deployment that reads moca-settings needs exactly one pod-template annotations add'
+gen | grep -q 'sandbox-relay-exec.moca-tenant-1.svc:9444' || fail "the supervisor's env patch was lost beside its settings-hash patch"
+settings_hash >/dev/null
+pass 'ocp-single: never tiered, the default is stored; one annotations add per Deployment beside the env patches'
+
+# Both ocp-single features at once: Routes (with --tls-secret, which adds a second moca-supervisor
+# patch entry and the routes component's sidecar patch) and the sticky default tier. moca-setup
+# holds both sides' sticky keys, and each Deployment still gets exactly one annotations add.
+reset_state
+jq -nc '{apiVersion: "v1", kind: "Secret", metadata: {name: "op-cert", namespace: "moca-single"},
+  type: "kubernetes.io/tls", data: {"tls.crt": "Y3J0", "tls.key": "a2V5"}}' >"$MOCK_STATE/moca-single__Secret__op-cert.json"
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=example.test SH_SANDBOX_DEFAULT_TIER=microvm
+  expect_ok --target ocp-single --tls-secret op-cert)
+for k in SH_SINGLE_NAMESPACE SH_ROUTE_DOMAIN SH_TLS_SECRET SH_SANDBOX_DEFAULT_TIER SH_SANDBOX_COUNT; do
+  setup_cm moca-single | jq -e --arg k "$k" '.data | has($k)' >/dev/null || fail "ocp-single with Routes: moca-setup lacks $k"
+done
+[[ "$(jq -r '.data | keys | length' "$MOCK_STATE/moca-single__ConfigMap__moca-settings.json")" == 6 ]] ||
+  fail 'ocp-single with Routes: moca-settings does not hold exactly six keys'
+[[ "$(jq -r '.data.SH_PUBLIC_HARNESS_URL' "$MOCK_STATE/moca-single__ConfigMap__moca-settings.json")" == https://moca.example.test ]] ||
+  fail 'ocp-single with Routes: SH_PUBLIC_HARNESS_URL is not the supervisor Route'
+[[ "$(annotation_adds moca-control-plane)" == 1 && "$(annotation_adds moca-supervisor)" == 1 ]] ||
+  fail 'ocp-single with Routes: each Deployment that reads moca-settings needs exactly one pod-template annotations add'
+gen | grep -q 'secretName: op-cert' || fail '--tls-secret was lost beside the settings-hash patch'
+(unset SH_SANDBOX_DEFAULT_TIER SH_ROUTE_DOMAIN; export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp-single)
+[[ "$(dtier_stored moca-single)" == microvm ]] || fail 'a Routes re-run dropped the sticky default tier'
+gen | grep -q 'value: moca.example.test' || fail 'a default-tier re-run dropped the sticky Routes'
+pass 'ocp-single: Routes, --tls-secret and the sticky default tier coexist; one annotations add per Deployment'
 
 echo "setup.test.sh: all passed"

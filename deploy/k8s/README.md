@@ -117,9 +117,11 @@ it never starts into a crash-loop. To fix it, re-run with the client id set:
 SH_GITHUB_CLIENT_ID=<client id> deploy/k8s/setup.sh --target kind --skip-build
 ```
 
-The settings change rolls the control plane: `setup.sh` stamps a hash of its settings on the pod
-template (`moca.dev/settings-hash`), so the apply itself restarts it exactly when they change, even
-if an earlier run failed after writing them.
+The settings change rolls the control plane, and the supervisor with it: `setup.sh` stamps a hash
+of its settings on both pod templates (`moca.dev/settings-hash`), so the apply itself restarts them
+exactly when they change, even if an earlier run failed after writing them. The supervisor is in it
+because it reads the sandbox tiers from the same ConfigMap (§11.1); it drains on the roll, with a
+120 s grace.
 
 A re-run with nothing changed converges without restarting any pod or touching any Secret. To
 remove everything: `kind delete cluster --name moca`.
@@ -137,6 +139,9 @@ re-running with just that one:
   `--image ghcr.io/rossoctl/moca:latest`), or delete the stored key:
   `kubectl -n moca patch configmap moca-setup --type=json -p '[{"op":"remove","path":"/data/IMAGE"}]'`.
   On Kind the images are never stored: the stack always runs the locally loaded `dev.local` tags.
+- On OpenShift, `SH_P4_SANDBOX_IDS` and `SH_SANDBOX_DEFAULT_TIER` (§11) live in `moca-setup` too,
+  and on `--target ocp-single` so do `SH_ROUTE_DOMAIN` and `--tls-secret` (§12.5). For the
+  variables, as for the settings, one set to empty clears the stored value.
 
 `kubectl -n moca get configmap moca-settings moca-setup -o yaml` shows what the next run will reuse.
 A failed read of either ConfigMap aborts the run rather than resetting the inputs.
@@ -710,17 +715,39 @@ token; the relay reads it from a mounted Secret on every attach, so adding a hos
 Design:
 [`docs/specs/2026-10-04-p6-on-kubernetes-slice2-design.md`](../../docs/specs/2026-10-04-p6-on-kubernetes-slice2-design.md).
 
-**OpenShift only, and one tier per stack** (until #425): a stack runs container sandboxes _or_ P4
-hosts, never both, because the supervisor re-selects a sandbox every turn and a session would hop
-between workspaces. `setup.sh` refuses `SH_P4_SANDBOX_IDS` with `SH_SANDBOX_COUNT` above 0, and on
-kind. The same re-selection makes two attached P4 hosts hop a session between their workspaces, so
-until #425 keep one host serving sessions; `setup.sh` accepts several IDs, but does not check this.
+**OpenShift only**: `setup.sh` refuses `SH_P4_SANDBOX_IDS` on kind and on `ocp-single`. A stack
+may run P4 hosts beside its container sandboxes, and several P4 hosts: since P6.3 (#425) a session
+returns to the sandbox that holds its workspace
+([`docs/specs/2026-10-04-p6-on-kubernetes-slice3-design.md`](../../docs/specs/2026-10-04-p6-on-kubernetes-slice3-design.md)).
 
-### 11.1 Switch a stack to P4
+### 11.1 Container sandboxes and P4 together, or P4 only
 
 ```bash
+# A mixed stack: two container sandboxes and one P4 host.
+SH_SANDBOX_COUNT=2 SH_P4_SANDBOX_IDS=moca_microvm_0 deploy/k8s/setup.sh --target ocp
+# P4 only.
 SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS=moca_microvm_0 deploy/k8s/setup.sh --target ocp
 ```
+
+**A mixed stack is tiered** (`SH_SANDBOX_COUNT` above 0 and `SH_P4_SANDBOX_IDS` not empty):
+`setup.sh` writes `SH_SANDBOX_TIERS=container,microvm` to `moca-settings`, which the supervisor and
+the control plane both read, and logs `two sandbox tiers`. A session is created in a tier and every
+turn of it runs there. A user picks the tier at creation, in mocactl's New Session overlay or with
+`mocactl run --new --option sandboxTier=microvm`; a session that names none gets the default tier.
+
+- **`SH_SANDBOX_DEFAULT_TIER`** (`container` or `microvm`, default `container`) sets that default.
+  It is sticky, stored in `moca-setup`; `SH_SANDBOX_DEFAULT_TIER=` clears it back to `container`.
+  Any other value is refused before anything is stored.
+- **A single-tier stack stays untiered** (containers only, or P4 only): both tier settings are
+  empty, and a stored `SH_SANDBOX_DEFAULT_TIER` is kept but unused. Untiered on purpose: a worker
+  older than P6.3 advertises no tier, and a tiered supervisor would exclude it.
+- **On a mixed stack every worker must be P6.3 or later** (the container sandboxes' image and each
+  P4 host's `microvm-worker`): an older one advertises no tier and receives no sessions.
+- **Any settings change now rolls the supervisor too** (section 2): a change of client id or admins
+  restarts both Deployments, and the first run of a P6.3 `setup.sh` on an existing stack rolls both
+  once, because the settings it hashes gained the two tier keys.
+
+The rest applies to every stack with P4 hosts:
 
 - IDs match `^[A-Za-z_][A-Za-z0-9_]*$` (no dashes: the relay looks each up by name), comma-separated,
   each listed once.
@@ -785,12 +812,13 @@ relay, restoring its local token.
 K8S_LIVE_SMOKE=1 SMOKE_MODEL_URL=… SMOKE_MODEL_TOKEN=… deploy/k8s/smoke.sh --target ocp --tier p4
 ```
 
-Claims 1, 5 and 6 are the container tier's. P2: every P4 ID is attached, and no container sandbox
-is. P3: a turn runs on a kernel that is no node's and writes a file. P4: a second turn reads it
-back. P6: through the relay Route, a wrong attach token is refused at the relay, and SandboxExec is
+Claims 1, 5 and 6 are the container tier's. P2: every P4 ID is attached. On a P4-only (untiered)
+stack no container sandbox may be; on a tiered stack container sandboxes may be attached beside
+them, and each P4 ID's record must advertise the `microvm` tier (`moca.dev/tier`). P3: a turn runs
+on a kernel that is no node's and writes a file. P4: a second turn reads it back. P6: through the relay Route, a wrong attach token is refused at the relay, and SandboxExec is
 not served even with the exec token. P7 (only with `SMOKE_P4_ADD_ID=<scratch id>`): `setup.sh` adds
 that ID and removes it again, and the relay pod is the same one, with the same start time and no
-restart. Claims 7–11 do not run on this tier.
+restart. Claims 7–12 do not run on this tier.
 
 ### 11.4 Add, revoke, and their timing
 
@@ -802,10 +830,11 @@ restart. Claims 7–11 do not run on this tier.
   refused. A host already attached stays attached until its stream drops; to cut it off at once,
   restart the relay (`kubectl -n moca rollout restart deployment/sandbox-relay`), which drops every
   attached sandbox.
-- **Clear** every ID (`SH_P4_SANDBOX_IDS=`, with `SH_SANDBOX_COUNT` back above 0 to return to
-  container sandboxes): the relay pod loses its TLS sidecar, so nothing listens on 8444 any more.
-  `setup.sh` applies with a non-pruning `kubectl apply -k`, though, so four objects of the p4-relay
-  component stay behind. Delete them by hand:
+- **Clear** every ID (`SH_P4_SANDBOX_IDS=`; on a P4-only stack, with `SH_SANDBOX_COUNT` back above
+  0 to return to container sandboxes; a mixed stack becomes untiered): the relay pod loses its TLS
+  sidecar, so nothing listens on 8444 any more. `setup.sh` applies with a non-pruning
+  `kubectl apply -k`, though, so four objects of the p4-relay component stay behind. Delete them
+  by hand:
 
   ```bash
   kubectl -n moca delete route/moca-relay service/sandbox-relay-tls \
@@ -940,8 +969,8 @@ from a sandbox.
 ### 12.4 What does not work here
 
 **P4 microVM hosts** cannot attach: their path is the relay's OpenShift Route (§11), which this
-target does not render. Container sandboxes only -- which, until #425's tier selection is wired
-into a deployment, is the same one-tier-per-stack rule the other targets have anyway.
+target does not render. Container sandboxes only, so this target is never tiered; a given
+`SH_SANDBOX_DEFAULT_TIER` is stored in `moca-setup` but unused.
 
 **Renaming on re-run**: `SH_SINGLE_NAMESPACE` is not sticky -- it is validated and applied fresh
 every run. Pointing it at a different namespace installs a second stack there; the first one stays

@@ -6,8 +6,9 @@
 #
 # Globals come from the environment as GO_<name>: GO_TARGET, GO_IMAGE, GO_SANDBOX_IMAGE, GO_SUP_HOST,
 # GO_CP_HOST, GO_SANDBOX_COUNT, GO_CLIENT_ID, GO_SETTINGS_HASH, GO_P4_IDS, GO_RELAY_HOST, GO_ROUTE_DOMAIN,
-# GO_TLS_SECRET -- what setup.sh's earlier steps would have set. Prefixed because sourcing setup.sh
-# resets its own globals (TARGET='' and so on).
+# GO_TLS_SECRET, GO_NS and GO_SBX_NS (ocp-single's namespace; default setup.sh's own) -- what
+# setup.sh's earlier steps would have set. Prefixed because sourcing setup.sh resets its own globals
+# (TARGET='' and so on).
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../../../../deploy/k8s/setup.sh
