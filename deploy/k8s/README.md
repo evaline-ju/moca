@@ -929,7 +929,7 @@ publicly routable (non-RFC 1918) range, so the sandbox's internet rule admits it
 reached its node's kubelet (10250) and SSH (22). The `except` list covers RFC 1918, CGNAT and
 link-local only; on a cluster whose node or infrastructure network is publicly routable, add
 those CIDRs to the `except` list in `overlays/ocp-single/patch-policies.yaml` (there is no setup
-flag for it).
+flag for it yet; #446).
 
 **A tenant `allow-same-namespace` policy** (ingress from any pod in the namespace, to every pod)
 was preinstalled. Policies are additive, so the overlay's ingress rules (the relay's
