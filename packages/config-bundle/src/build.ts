@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { classifySkills, detectBinaries } from './classify.js';
 import { buildLockfile, serializeLockfile, skillContentHash } from './lockfile.js';
@@ -12,7 +12,7 @@ import {
   checkSiblingPaths,
   checkExcludedPrompts,
 } from './preflight.js';
-import { resolveSkills } from './resolve.js';
+import { isWithin, resolveSkills } from './resolve.js';
 import { blockingSecrets, scanEntriesForSecrets, SecretScanError } from './secret-scan.js';
 import { canonicalTar, digestOf } from './tar.js';
 import type { BuildBundleInput, BuildResult, PreflightFinding, TarEntry } from './types.js';
@@ -31,10 +31,22 @@ export function contentDigest(entries: TarEntry[]): string {
 }
 
 /** `.md` files directly in `dir`, sorted. Empty when the directory is absent. */
-function markdownFiles(dir: string | undefined): string[] {
+function markdownFiles(dir: string | undefined, findings: PreflightFinding[]): string[] {
   if (!dir || !existsSync(dir)) return [];
+  const root = realpathSync(dir);
   return readdirSync(dir)
-    .filter((n) => n.endsWith('.md') && statSync(join(dir, n)).isFile())
+    .filter((n) => {
+      const p = join(dir, n);
+      if (!n.endsWith('.md') || !statSync(p).isFile()) return false;
+      if (isWithin(root, realpathSync(p))) return true;
+      findings.push({
+        severity: 'warn',
+        code: 'skill_symlink_escaped',
+        message: `symlink '${n}' resolves outside its directory and was skipped`,
+        path: dir,
+      });
+      return false;
+    })
     .sort();
 }
 
@@ -103,9 +115,11 @@ export function buildBundle(input: BuildBundleInput): BuildResult {
     contextPaths.push(path);
   });
 
-  const memoryNames = markdownFiles(input.memoryDir).filter((n) => n !== 'MEMORY.md');
+  const fsFindings: PreflightFinding[] = [];
+  const memoryFiles = markdownFiles(input.memoryDir, fsFindings);
+  const memoryNames = memoryFiles.filter((n) => n !== 'MEMORY.md');
   let memoryIndex: string | undefined;
-  if (input.memoryDir && existsSync(join(input.memoryDir, 'MEMORY.md'))) {
+  if (input.memoryDir && memoryFiles.includes('MEMORY.md')) {
     memoryIndex = readFileSync(join(input.memoryDir, 'MEMORY.md'), 'utf8');
     entries.push({ path: 'context/MEMORY.md', content: Buffer.from(memoryIndex, 'utf8') });
     contextPaths.push('context/MEMORY.md');
@@ -123,7 +137,7 @@ export function buildBundle(input: BuildBundleInput): BuildResult {
   const excluded = new Set(input.excludePrompts ?? []);
   const excludedSeen = new Set<string>();
   const promptNames: string[] = [];
-  for (const name of markdownFiles(input.promptsDir)) {
+  for (const name of markdownFiles(input.promptsDir, fsFindings)) {
     const promptName = name.replace(/\.md$/, '');
     if (excluded.has(promptName)) {
       excludedSeen.add(promptName);
@@ -184,6 +198,7 @@ export function buildBundle(input: BuildBundleInput): BuildResult {
     // Findings raised while resolving each skill's own files (e.g. a symlink that escaped its
     // skill directory and was skipped -- resolve.ts's `filesUnder`).
     ...classification.travels.flatMap((skill) => skill.findings ?? []),
+    ...fsFindings,
     ...checkSiblingPaths(classification.travels),
     ...checkMemoryLinks(memoryIndex, memoryNames),
     ...checkBinaries(binaries, input.inventory),

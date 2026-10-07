@@ -6,7 +6,7 @@ import type { PreflightFinding, ResolvedSkill, SkillRoots, SkillScope } from './
  * Is `pCanonical` inside `rootCanonical` (or equal to it)? Path-segment-aware: `relative()`
  * rather than a bare `startsWith`, so `/a/skillsX` is never mistaken for being inside `/a/skills`.
  */
-function isWithin(rootCanonical: string, pCanonical: string): boolean {
+export function isWithin(rootCanonical: string, pCanonical: string): boolean {
   if (rootCanonical === pCanonical) return true;
   const rel = relative(rootCanonical, pCanonical);
   return rel !== '' && rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel);
@@ -58,7 +58,7 @@ function filesUnder(dir: string, findings: PreflightFinding[]): string[] {
       } catch {
         continue;
       }
-      if (st.isDirectory()) {
+      if (st.isDirectory() || st.isFile()) {
         let pCanonical: string;
         try {
           pCanonical = realpathSync(p);
@@ -74,12 +74,12 @@ function filesUnder(dir: string, findings: PreflightFinding[]): string[] {
           });
           continue;
         }
-        if (!visited.has(pCanonical)) {
+        if (st.isFile()) {
+          out.push(relative(dir, p).split(sep).join('/'));
+        } else if (!visited.has(pCanonical)) {
           visited.add(pCanonical);
           walk(p);
         }
-      } else if (st.isFile()) {
-        out.push(relative(dir, p).split(sep).join('/'));
       }
     }
   };

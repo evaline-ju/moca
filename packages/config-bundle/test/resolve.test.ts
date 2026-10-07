@@ -186,6 +186,32 @@ describe('resolveSkills', () => {
     expect(findings[0]!.message).toContain('escape');
   });
 
+  it('a FILE symlink escaping the skill directory is skipped and raises a warn finding', () => {
+    const outside = join(root, 'outside');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, 'credentials'), 'aws_secret');
+    const skillDir = join(root, 'user', 'skills', 'leaky');
+    skill(skillDir, 'leaky');
+    symlinkSync(join(outside, 'credentials'), join(skillDir, 'creds'));
+
+    const found = resolveSkills({ userDir: join(root, 'user') });
+    expect(found[0]!.files).not.toContain('creds');
+    expect(found[0]!.findings).toEqual([
+      expect.objectContaining({ severity: 'warn', code: 'skill_symlink_escaped' }),
+    ]);
+    expect(found[0]!.findings![0]!.message).toContain("'creds'");
+  });
+
+  it('a FILE symlink pointing within the skill directory is kept, with no finding', () => {
+    const skillDir = join(root, 'user', 'skills', 'filealias');
+    skill(skillDir, 'filealias');
+    writeFileSync(join(skillDir, 'real.md'), 'real');
+    symlinkSync(join(skillDir, 'real.md'), join(skillDir, 'alias.md'));
+    const found = resolveSkills({ userDir: join(root, 'user') });
+    expect(found[0]!.files).toContain('alias.md');
+    expect(found[0]!.findings ?? []).toEqual([]);
+  });
+
   it('a symlink pointing within the skill directory is still followed, and raises no finding', () => {
     const skillDir = join(root, 'user', 'skills', 'aliased');
     skill(skillDir, 'aliased');

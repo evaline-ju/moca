@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { buildBundle, contentDigest, LOCKFILE_PATH } from '../src/build.js';
@@ -139,6 +139,19 @@ describe('buildBundle', () => {
     expect(warn).toHaveLength(1);
     expect(warn[0]!.severity).toBe('warn');
     expect(warn[0]!.message).toContain('ns');
+  });
+
+  it('skips a prompt or memory file that is a symlink out of its directory, with a warning', () => {
+    write('outside/secret.md', 'top secret');
+    symlinkSync(join(root, 'outside/secret.md'), join(root, 'prompts/leak.md'));
+    mkdirSync(join(root, 'memory'), { recursive: true });
+    symlinkSync(join(root, 'outside/secret.md'), join(root, 'memory/leak.md'));
+    const r = buildBundle(baseInput());
+    const paths = untar(r.tar).map((e) => e.path);
+    expect(paths).not.toContain('prompts/leak.md');
+    expect(paths).not.toContain('memory/leak.md');
+    expect(r.promptNames).not.toContain('leak');
+    expect(r.findings.filter((f) => f.code === 'skill_symlink_escaped')).toHaveLength(2);
   });
 
   it('raises no namespaced_prompt_skipped finding for a flat promptsDir', () => {
