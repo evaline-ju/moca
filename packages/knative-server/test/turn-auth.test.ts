@@ -873,4 +873,17 @@ describe('configRef from the exchange', () => {
       ),
     ).rejects.toMatchObject({ code: 'credential_unavailable' });
   });
+
+  it('refuses an empty or non-digest configRef rather than running without the bundle', async () => {
+    for (const configRef of ['', 'sha256:short', 'sha256:' + 'F'.repeat(64)]) {
+      await expect(
+        resolveTurnAuth(
+          { authorization: `Bearer ${sessionToken()}` },
+          { sessionId: 'sid-1' },
+          deps({ fetchImpl: reply({ configRef }) }),
+        ),
+        JSON.stringify(configRef),
+      ).rejects.toMatchObject({ code: 'credential_unavailable' });
+    }
+  });
 });

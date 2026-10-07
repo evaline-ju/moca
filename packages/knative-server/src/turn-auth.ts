@@ -206,7 +206,11 @@ async function exchange(token: string, deps: TurnAuthDeps): Promise<ExchangeResp
       'control plane returned an unknown credential header',
     );
   }
-  if (body.configRef !== undefined && typeof body.configRef !== 'string') {
+  // A present configRef that is not a digest would be dropped and the turn run without its bundle.
+  if (
+    body.configRef !== undefined &&
+    (typeof body.configRef !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(body.configRef))
+  ) {
     throw new CpError('credential_unavailable', 'control plane returned a malformed configRef');
   }
   return body as unknown as ExchangeResponse;
