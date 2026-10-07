@@ -38,4 +38,24 @@ describe.skipIf(!live)('mocactl live smoke (MOCACTL_LIVE_SMOKE=1)', () => {
     expect(frames.some((f) => f.type === 'text')).toBe(true);
     expect(frames.at(-1)!.type).toBe('done');
   }, 200_000);
+
+  it('promote then run --config gives the turn the promoted skill', () => {
+    const fixture = new URL('./fixtures/promote-skills', import.meta.url).pathname;
+    const p = run(['promote', fixture, '--json'], 60_000);
+    expect(p.status, p.stderr).toBe(0);
+    const { digest } = JSON.parse(p.stdout) as { digest: string };
+    const credential = process.env.MOCACTL_SMOKE_CREDENTIAL;
+    const r = run(
+      [
+        'run',
+        'Which promoted skills do you have? Answer with the skill name only.',
+        '--config',
+        digest,
+        ...(credential ? ['--option', `inferenceCredential=${credential}`] : []),
+      ],
+      180_000,
+    );
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain('moca-smoke-marker');
+  }, 260_000);
 });

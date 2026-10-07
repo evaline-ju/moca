@@ -162,8 +162,8 @@ POST /v1/config-bundles   auth: api   sessionScoped: false   operationId: 'putCo
 ### 2.4 Control plane: `configRef` on the session and in the exchange
 
 - `POST /v1/sessions` body gains an optional `configRef`. The handler validates it with
-  `assertValidDigest` (reused, not reimplemented) — a malformed value is a `400 { error:
-  'configRef_invalid' }` at creation time, before any turn is attempted. Reusing
+  `assertValidDigest` (reused, not reimplemented) — a malformed value is a
+  `400 { error: 'configRef_invalid' }` at creation time, before any turn is attempted. Reusing
   `knative-server`'s existing error code verbatim (not a differently-spelled sibling) is deliberate:
   it is the same concept — a malformed digest string — surfacing from a second call site.
 - It does **not** check the digest actually exists in Redis at this point — that would add a
@@ -195,9 +195,9 @@ callers below:
   Code lays it out); otherwise, if `<dir>/skills` or `<dir>/commands` exists, `<dir>` itself is the
   config root (the user pointed at a `.claude` directory). Anything else is refused before building:
   "no .claude/skills or .claude/commands under <dir>".
-- Treats the config root as **one scope**: `roots: { userDir: <root> }`, `promptsDir:
-  <root>/commands`. No `projectDir` and no `pluginDirs` — passing the same path as two scopes would
-  double-count skills by name, and plugins are outside "a set of skills in a directory."
+- Treats the config root as **one scope**: `roots: { userDir: <root> }`,
+  `promptsDir: <root>/commands`. No `projectDir` and no `pluginDirs` — passing the same path as two
+  scopes would double-count skills by name, and plugins are outside "a set of skills in a directory."
 - Omits `entry` (§2.1), `memoryDir`, and `contextFiles`.
 - Omits `inventory` — `mocactl` may run far from any `moca` checkout; preflight already degrades this
   to a warning.
@@ -229,10 +229,11 @@ the harness learns `configRef` from the exchange (§2.4).
 ### 2.6 Harness: `/v1/turn` applies the session's `configRef`
 
 - **Shared helper.** The resolve/overlay/cleanup sequence in `run-leaf.ts` (`runPromptLeaf`) moves,
-  with its comments, into `harness/src/promoted-config.ts` as `attachPromotedConfig({ digest,
-  sessionId, sandbox, redisUrl, deps })`, returning `{ promotedConfig, detach() }`. The memoised
-  `getBundleRedis` client moves with it. `run-leaf.ts` calls the helper; its existing tests
-  (`run-leaf-promoted.test.ts`) are the regression guard for the move.
+  with its comments, into `harness/src/promoted-config.ts` as
+  `attachPromotedConfig({ digest, sessionId, sandbox, redisUrl, deps })`, returning
+  `{ promotedConfig, detach() }`. The memoised `getBundleRedis` client moves with it. `run-leaf.ts`
+  calls the helper; its existing tests (`run-leaf-promoted.test.ts`) are the regression guard for
+  the move.
   - Semantics carried over exactly: no sandbox ⇒ resolve only (pi's tools then run in this pod, where
     the pod-side path is the right one); a sandbox ⇒ overlay with the leased transport or a
     `KubectlTransport` built for the purpose; the overlay is considered **attempted** before the
