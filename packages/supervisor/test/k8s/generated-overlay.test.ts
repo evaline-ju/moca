@@ -281,5 +281,17 @@ describe.skipIf(NO_KUBECTL)(
       );
       expect(cp.env).toContainEqual({ name: 'SH_SANDBOX_NAMESPACE', value: NS });
     });
+
+    it('keeps the sandbox tiers identical on the supervisor and the control plane through the env patches (P6.3 spec §7)', () => {
+      // The one overlay where write_overlay patches both Deployments' env: a patch that replaced the
+      // env list, or dropped an entry, would split the two (env-parity.test.ts checks base only).
+      const sup = container(find(objs, 'Deployment', 'moca-supervisor', NS), 'supervisor');
+      const cp = container(find(objs, 'Deployment', 'moca-control-plane', NS), 'control-plane');
+      for (const name of ['SH_SANDBOX_TIERS', 'SH_SANDBOX_DEFAULT_TIER']) {
+        expect(envVar(sup, name), `supervisor ${name}`).toBeDefined();
+        expect(envVar(cp, name), `control plane ${name}`).toBeDefined();
+        expect(envVar(sup, name), name).toEqual(envVar(cp, name));
+      }
+    });
   },
 );
