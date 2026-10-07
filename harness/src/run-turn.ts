@@ -860,10 +860,10 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
       acquired.placement,
     );
   } finally {
-    // Clear first, then release: if release throws, the interval is already gone rather than
-    // left running against a lease nobody holds.
-    if (leaseRenewal) clearInterval(leaseRenewal);
+    // Detach while the lease is still renewed: it is a remote exec that can outlast the lease TTL.
+    // Then clear before release, so a throwing release never leaves the interval running.
     await attached?.detach().catch(() => {});
+    if (leaseRenewal) clearInterval(leaseRenewal);
     await acquired.release().catch(() => {});
   }
 }

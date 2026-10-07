@@ -43,6 +43,30 @@ vi.mock('@earendil-works/pi-coding-agent', () => ({
 vi.mock('../src/promoted-config.js', () => ({
   attachPromotedConfig: (...args: unknown[]) => attachMock(...args),
 }));
+const { loaderOptionsSpy, selectMock } = vi.hoisted(() => ({
+  loaderOptionsSpy: vi.fn(),
+  selectMock: vi.fn(),
+}));
+vi.mock('../src/config-resolver.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/config-resolver.js')>();
+  return {
+    ...real,
+    promotedLoaderOptions: (...args: Parameters<typeof real.promotedLoaderOptions>) => {
+      loaderOptionsSpy(...args);
+      return real.promotedLoaderOptions(...args);
+    },
+  };
+});
+vi.mock('../src/select-sandbox.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/select-sandbox.js')>();
+  return {
+    ...real,
+    selectPoolSandbox: (...args: unknown[]) =>
+      selectMock.getMockImplementation()
+        ? selectMock(...args)
+        : real.selectPoolSandbox(...(args as Parameters<typeof real.selectPoolSandbox>)),
+  };
+});
 
 const { executeTurn } = await import('../src/run-turn.js');
 const digest = 'sha256:' + 'c'.repeat(64);
@@ -50,7 +74,10 @@ const sandbox = { config: { pod: 'p', namespace: 'n' } as never };
 
 beforeEach(() => {
   attachMock.mockClear();
-  detachMock.mockClear();
+  detachMock.mockReset();
+  detachMock.mockImplementation(async () => {});
+  loaderOptionsSpy.mockClear();
+  selectMock.mockReset();
 });
 
 describe('executeTurn configRef', () => {
@@ -123,5 +150,61 @@ describe('executeTurn configRef', () => {
       }),
     ).rejects.toThrow();
     expect(attachMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('executeTurn hands the attached bundle to the turn core', () => {
+  it('builds the resource loader from attached.promotedConfig', async () => {
+    await executeTurn({
+      prompt: 'hi',
+      sessionId: 'sess-1',
+      createIfAbsent: true,
+      sandbox,
+      configRef: digest,
+    }).catch(() => {});
+    expect(loaderOptionsSpy).toHaveBeenCalledWith({ digest: 'd' });
+  });
+
+  it('builds it with no promoted config when there is no configRef', async () => {
+    await executeTurn({ prompt: 'hi', sessionId: 'sess-1', createIfAbsent: true, sandbox }).catch(
+      () => {},
+    );
+    expect(loaderOptionsSpy).toHaveBeenCalledWith(undefined);
+  });
+});
+
+describe('executeTurn lease renewal around detach', () => {
+  it('keeps renewing the lease until the remote detach has finished, then releases', async () => {
+    const order: string[] = [];
+    selectMock.mockImplementation(async () => ({
+      config: sandbox.config,
+      leased: true,
+      sandboxId: 'sb-1',
+      heartbeat: async () => {},
+      release: async () => void order.push('release'),
+    }));
+    const setSpy = vi.spyOn(globalThis, 'setInterval');
+    const clearSpy = vi.spyOn(globalThis, 'clearInterval');
+    try {
+      detachMock.mockImplementation(async () => {
+        const handle = setSpy.mock.results.at(-1)?.value;
+        order.push(
+          clearSpy.mock.calls.some(([h]) => h === handle) ? 'detach:cleared' : 'detach:armed',
+        );
+      });
+      await executeTurn({
+        prompt: 'hi',
+        sessionId: 'sess-1',
+        createIfAbsent: true,
+        configRef: digest,
+        config: { cwd: process.cwd() } as never,
+      }).catch(() => {});
+      expect(setSpy).toHaveBeenCalled();
+      expect(order).toEqual(['detach:armed', 'release']);
+      expect(clearSpy).toHaveBeenCalledWith(setSpy.mock.results.at(-1)?.value);
+    } finally {
+      setSpy.mockRestore();
+      clearSpy.mockRestore();
+    }
   });
 });
