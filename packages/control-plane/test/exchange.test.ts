@@ -182,6 +182,29 @@ describe('exchangeCredential', () => {
     expect((await exchangeCredential(token, tiered)).sandboxTier).toBe('microvm');
   });
 
+  it('leaves the tier out once the deployment stops declaring tiers, whatever the record stored (P6.3)', async () => {
+    // Created as 'microvm' on a tiered deployment; then the tiers go. The record keeps 'microvm', but
+    // the untiered data plane does not filter on a tier, so the exchange must not name one.
+    const t = makeDeps({
+      config: {
+        exchangeToken: 'shared-abc', // notsecret
+        defaultInferenceEndpoint: undefined,
+        sandboxTiers: { names: ['container', 'microvm'], default: 'container' },
+      },
+    });
+    await seedCredential(t);
+    const created = await HANDLERS.createSession!(
+      ctx({ principal: alice, body: { sandbox: { tier: 'microvm' } } }),
+      { ...t, newId: () => 'sid-fixed' },
+    );
+    const { token } = created.body as { token: string };
+    expect((await t.index.get('sid-fixed'))?.sandboxTier).toBe('microvm');
+    const untiered = { ...t, config: { ...t.config, sandboxTiers: null } };
+    const res = await exchangeCredential(token, untiered);
+    expect(res.sessionId).toBe('sid-fixed');
+    expect(res).not.toHaveProperty('sandboxTier');
+  });
+
   it('returns a placeholder, not the real key, whenever the deployment has an injector', async () => {
     // Placeholder mode WINS whenever an injector exists, so adding one strictly NARROWS what the
     // harness may hold, and MU3 deletes direct mode outright (spec §3.6).

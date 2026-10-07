@@ -259,6 +259,16 @@ describe('projectResources', () => {
     expect(untiered.session!.sandboxTier).toBeNull();
   });
 
+  it('shows null for a tier stored while tiers were declared, once the deployment declares none', () => {
+    const out = projectResources(
+      { ...rec, sandboxTier: 'microvm' },
+      {},
+      { podName: null, phase: 'unknown', tenant: 't' },
+      null,
+    ) as Record<string, Record<string, unknown>>;
+    expect(out.session!.sandboxTier).toBeNull();
+  });
+
   it('never echoes a runtime field the harness invented', async () => {
     // The hash is written by the brain tier, so the projection emits only fields it knows about --
     // an `owner` written there must not surface as though the control plane had blessed it (§7.4).
@@ -306,6 +316,22 @@ describe('GET /v1/sessions/{id}/resources', () => {
     const body = res.body as Record<string, Record<string, unknown>>;
     expect(body.harness!.podName).toBe('h-1');
     expect(body.sandbox!.phase).toBe('unknown');
+  });
+
+  it('shows a null session tier on an untiered deployment, whatever the record stored', async () => {
+    const tiers = { names: ['container', 'microvm'], default: 'container' };
+    const d = makeDeps({ config: { sandboxTiers: tiers } });
+    await seedCredential(d);
+    await HANDLERS.createSession!(
+      ctx({ principal: alice, body: { sandbox: { tier: 'microvm' } } }),
+      d,
+    );
+    expect((await d.index.get('sid-fixed'))!.sandboxTier).toBe('microvm');
+    const res = await HANDLERS.getSessionResources!(
+      ctx({ principal: alice, params: { id: 'sid-fixed' } }),
+      { ...d, config: { ...d.config, sandboxTiers: null } },
+    );
+    expect((res.body as Record<string, Record<string, unknown>>).session!.sandboxTier).toBeNull();
   });
 
   it("shows a pre-P6.3 session's tier as today's default, and its self-reported placement", async () => {

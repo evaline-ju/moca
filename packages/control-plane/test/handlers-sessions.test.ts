@@ -284,6 +284,27 @@ describe('POST /v1/sessions', () => {
       const [s] = (page.body as { sessions: { sandboxTier: string | null }[] }).sessions;
       expect(s.sandboxTier).toBeNull();
     });
+
+    it('a tier stored while tiers were declared shows null in the list and get views once the deployment declares none', async () => {
+      // The record still says 'microvm', but an untiered data plane no longer filters on it: the
+      // views must go through viewTier, never read rec.sandboxTier directly.
+      const t = tiered();
+      await seedCredential(t);
+      await HANDLERS.createSession!(
+        ctx({ principal: alice, body: { sandbox: { tier: 'microvm' } } }),
+        t,
+      );
+      expect((await t.index.get('sid-fixed'))?.sandboxTier).toBe('microvm');
+      const untiered = { ...t, config: { ...t.config, sandboxTiers: null } };
+      const page = await HANDLERS.listSessions!(ctx({ principal: alice }), untiered);
+      const [s] = (page.body as { sessions: { sandboxTier: string | null }[] }).sessions;
+      expect(s.sandboxTier).toBeNull();
+      const one = await HANDLERS.getSession!(
+        ctx({ principal: alice, params: { id: 'sid-fixed' } }),
+        untiered,
+      );
+      expect((one.body as { sandboxTier: string | null }).sandboxTier).toBeNull();
+    });
   });
 });
 
