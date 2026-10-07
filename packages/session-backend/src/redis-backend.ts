@@ -127,7 +127,8 @@ export class RedisSessionBackend<E = unknown> implements LogStore<E> {
     await this.open();
     const start = fromPosition <= 1 ? '-' : `${fromPosition}-0`;
     const rows = await this.client.xRange(streamKey(sid), start, '+');
-    return rows.map((r): StoredEntry<E> => ({
+    // redis >=6.3 types the XRANGE reply as nullable; a missing stream reads as empty.
+    return (rows ?? []).map((r): StoredEntry<E> => ({
       position: Number(r.message.position),
       timestamp: Number(r.message.timestamp),
       session_id: sid,
