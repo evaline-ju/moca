@@ -327,6 +327,34 @@ describe('App', () => {
     expect(created[0]!.configRef).toBeUndefined();
   });
 
+  it('/promote with an expired login opens Login, warns, and does not reopen New Session', async () => {
+    const dir = skillsDir();
+    const cp = fakeControlPlane({
+      listCredentials: async () => [credential('anthropic')],
+      putConfigBundle: async () => {
+        throw new ApiError('control-plane', 401, 'token_expired');
+      },
+      pollDeviceAuth: async () => ({
+        token: 'a2',
+        subject: 'github:1',
+        displayName: 'Ada',
+        expiresAt: 4_000_000_000,
+      }),
+    });
+    const rt = testRuntime({ cp });
+    const { stdin, all, frame, until, ready } = mount(rt);
+    await ready();
+    await send(stdin, `/promote ${dir}`);
+    await until(() => all().includes('Log in with GitHub'));
+    await until(() => all().includes('your login expired — log in, then run /promote again'));
+    await until(() => rt.auth?.apiToken === 'a2' && !frame().includes('Log in with GitHub'));
+    await tick();
+    expect(frame()).not.toContain('New session');
+    expect(all()).not.toContain('config bundle sha256:');
+    expect(cp.calls).toContain('putConfigBundle');
+    expect(cp.calls).not.toContain('createSession');
+  });
+
   it('/promote of a bad directory notifies and creates nothing', async () => {
     const rt = testRuntime();
     const { stdin, frame, until, ready } = mount(rt);
@@ -336,6 +364,8 @@ describe('App', () => {
     const calls = (rt.cp as unknown as { calls: string[] }).calls;
     expect(calls).not.toContain('putConfigBundle');
     expect(calls).not.toContain('createSession');
+    await send(stdin, '/promote --clear');
+    await until(() => frame().includes('no config bundle pending'));
   });
 
   it('runs slash commands and reports unknown ones', async () => {

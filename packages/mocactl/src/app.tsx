@@ -411,7 +411,9 @@ export function App({ rt, opts, env, os, write }: AppProps) {
     promoteBundle: async (arg) => {
       if (arg === '--clear') {
         setPendingBundle(undefined);
-        return notify('config bundle dropped');
+        return notify(
+          pendingBundleRef.current ? 'config bundle dropped' : 'no config bundle pending',
+        );
       }
       if (!rt.cp) return notify('connect to a control plane first', 'warning');
       try {
@@ -420,7 +422,8 @@ export function App({ rt, opts, env, os, write }: AppProps) {
         notify(`promoted ${r.skills.length} skills — ${r.uploaded ? 'uploaded' : 'unchanged'}`);
         open({ name: 'new-session' });
       } catch (err) {
-        if (loginIfExpired(err, { name: 'new-session' })) return;
+        if (loginIfExpired(err, undefined))
+          return notify('your login expired — log in, then run /promote again', 'warning');
         notify(err instanceof PromoteError ? err.message : describeError(err), 'error');
       }
     },
