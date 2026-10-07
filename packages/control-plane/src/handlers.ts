@@ -195,6 +195,67 @@ async function auditBestEffort(
   }
 }
 
+/** The body of putConfigBundle; `seen` collects what the refusal audit row can name. */
+async function storeConfigBundle(
+  p: TokenClaims,
+  body: Record<string, unknown>,
+  deps: CpDeps,
+  seen: { configRef?: string; bytes?: number },
+): Promise<{ status: number; body: unknown }> {
+  const digest = body.digest;
+  if (typeof digest !== 'string') throw new CpError('invalid_request', 'digest must be a string');
+  try {
+    assertValidDigest(digest);
+  } catch {
+    throw new CpError('invalid_request', 'digest must be sha256:<64 lowercase hex>');
+  }
+  seen.configRef = digest;
+  if (typeof body.tar !== 'string' || body.tar.length === 0) {
+    throw new CpError('invalid_request', 'tar must be a non-empty base64 string');
+  }
+  // Buffer.from skips invalid characters, which would surface a garbled upload as digest_mismatch.
+  if (body.tar.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(body.tar)) {
+    throw new CpError('invalid_request', 'tar must be strict base64');
+  }
+  const tar = Buffer.from(body.tar, 'base64');
+  seen.bytes = tar.length;
+  if (tar.length > MAX_BUNDLE_BYTES) {
+    throw new CpError(
+      'invalid_request',
+      `bundle is ${tar.length} bytes; the limit is ${MAX_BUNDLE_BYTES} bytes`,
+    );
+  }
+  let uploaded: boolean;
+  let storedBytes = 0;
+  const nowMs = deps.now();
+  const limits = {
+    subjectBytes: deps.config.bundleSubjectBytes,
+    totalBytes: deps.config.bundleTotalBytes,
+  };
+  try {
+    ({ uploaded } = await putBundle(deps.bundles, digest, tar, undefined, async (bytes) => {
+      storedBytes = bytes;
+      await admitBundle(deps.bundles, limits, p.sub, bytes, nowMs);
+    }));
+    if (uploaded) await recordBundle(deps.bundles, p.sub, digest, storedBytes, nowMs);
+    else await refreshBundle(deps.bundles, digest, nowMs);
+  } catch (err) {
+    if (err instanceof CpError) throw err;
+    if (err instanceof BundleDigestMismatchError) throw new CpError('digest_mismatch', err.message);
+    console.error(
+      `[control-plane] putConfigBundle configRef=${digest}: ${(err as Error)?.message ?? String(err)}`,
+    );
+    throw new CpError('redis_unavailable', 'redis is not answering');
+  }
+  await auditBestEffort(deps, 'putConfigBundle', `configRef=${digest}`, {
+    subject: p.sub,
+    configRef: digest,
+    bytes: tar.length,
+    decision: uploaded ? 'config_bundle_uploaded' : 'config_bundle_unchanged',
+  });
+  return { status: 201, body: { digest, uploaded } };
+}
+
 /** Public view of a session record. `turns` comes from the display-only runtime hash. */
 async function sessionView(rec: SessionRecord, deps: CpDeps) {
   const runtime = await deps.index.getRuntime(rec.sessionId);
@@ -491,55 +552,20 @@ export const HANDLERS: Record<string, Handler> = {
 
   putConfigBundle: async (ctx, deps) => {
     const p = requirePrincipal(ctx);
-    const body = asRecord(ctx.body);
-    const digest = body.digest;
-    if (typeof digest !== 'string') throw new CpError('invalid_request', 'digest must be a string');
+    const seen: { configRef?: string; bytes?: number } = {};
     try {
-      assertValidDigest(digest);
-    } catch {
-      throw new CpError('invalid_request', 'digest must be sha256:<64 lowercase hex>');
-    }
-    if (typeof body.tar !== 'string' || body.tar.length === 0) {
-      throw new CpError('invalid_request', 'tar must be a non-empty base64 string');
-    }
-    // Buffer.from skips invalid characters, which would surface a garbled upload as digest_mismatch.
-    if (body.tar.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(body.tar)) {
-      throw new CpError('invalid_request', 'tar must be strict base64');
-    }
-    const tar = Buffer.from(body.tar, 'base64');
-    if (tar.length > MAX_BUNDLE_BYTES) {
-      throw new CpError(
-        'invalid_request',
-        `bundle is ${tar.length} bytes; the limit is ${MAX_BUNDLE_BYTES} bytes`,
-      );
-    }
-    let uploaded: boolean;
-    let storedBytes = 0;
-    const nowMs = deps.now();
-    const limits = {
-      subjectBytes: deps.config.bundleSubjectBytes,
-      totalBytes: deps.config.bundleTotalBytes,
-    };
-    try {
-      ({ uploaded } = await putBundle(deps.bundles, digest, tar, undefined, async (bytes) => {
-        storedBytes = bytes;
-        await admitBundle(deps.bundles, limits, p.sub, bytes, nowMs);
-      }));
-      if (uploaded) await recordBundle(deps.bundles, p.sub, digest, storedBytes, nowMs);
-      else await refreshBundle(deps.bundles, digest, nowMs);
+      return await storeConfigBundle(p, asRecord(ctx.body), deps, seen);
     } catch (err) {
-      if (err instanceof CpError) throw err;
-      if (err instanceof BundleDigestMismatchError)
-        throw new CpError('digest_mismatch', err.message);
-      throw new CpError('redis_unavailable', 'redis is not answering');
+      if (err instanceof CpError && err.code !== 'redis_unavailable') {
+        await auditBestEffort(deps, 'putConfigBundle', `refused=${err.code}`, {
+          subject: p.sub,
+          ...seen,
+          decision: 'config_bundle_refused',
+          reason: err.code,
+        });
+      }
+      throw err;
     }
-    await auditBestEffort(deps, 'putConfigBundle', `configRef=${digest}`, {
-      subject: p.sub,
-      configRef: digest,
-      bytes: tar.length,
-      decision: uploaded ? 'config_bundle_uploaded' : 'config_bundle_unchanged',
-    });
-    return { status: 201, body: { digest, uploaded } };
   },
 
   getSessionResources: async (ctx, deps) => {

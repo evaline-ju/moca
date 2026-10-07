@@ -3,16 +3,18 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it, onTestFinished } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import {
   buildBundle,
   bundleKey,
   DEFAULT_BUNDLE_TTL_SECONDS,
   MAX_BUNDLE_BYTES,
 } from '@moca/config-bundle';
+import { bundleOwnerKey } from '../src/bundle-budget.js';
 import { statusFor } from '../src/errors.js';
 import { HANDLERS } from '../src/handlers.js';
 import { buildHandler } from '../src/server.js';
+import type { fakeBundleRedis } from './helpers/fake-redis.js';
 import { alice, bob, codeOf, ctx, makeDeps, NOW_MS } from './helpers/deps.js';
 
 function bundle(text = 'hi') {
@@ -150,6 +152,52 @@ describe('POST /v1/config-bundles', () => {
   });
 });
 
+describe('POST /v1/config-bundles refusals', () => {
+  const refusals = (d: ReturnType<typeof makeDeps>) =>
+    (d.streams.get('sh:cp:audit') ?? []).filter((r) => r.decision === 'config_bundle_refused');
+
+  it('audits each refused upload with its reason code', async () => {
+    const d = makeDeps({ withStreams: true, config: { bundleSubjectBytes: 1 } });
+    const good = bundle();
+    const tries = [
+      { ...good, digest: 'sha256:' + 'a'.repeat(64) },
+      { digest: good.digest, tar: 'ab!=' },
+      { digest: good.digest, tar: Buffer.alloc(MAX_BUNDLE_BYTES + 1).toString('base64') },
+      good,
+    ];
+    for (const body of tries) {
+      await HANDLERS.putConfigBundle!(ctx({ principal: alice, body }), d).catch(() => undefined);
+    }
+    expect(refusals(d).map((r) => r.reason)).toEqual([
+      'digest_mismatch',
+      'invalid_request',
+      'invalid_request',
+      'bundle_quota_exceeded',
+    ]);
+    expect(refusals(d)[0]).toMatchObject({ subject: alice.sub, configRef: tries[0]!.digest });
+    expect(refusals(d)[2]!.bytes).toBe(String(MAX_BUNDLE_BYTES + 1));
+  });
+
+  it('logs a store failure with route context and answers 503 redis_unavailable', async () => {
+    const d = makeDeps({ withStreams: true });
+    d.bundles.exists = async () => {
+      throw new Error('ECONNRESET from the store');
+    };
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    onTestFinished(() => log.mockRestore());
+    const body = bundle();
+    expect(await codeOf(() => HANDLERS.putConfigBundle!(ctx({ principal: alice, body }), d))).toBe(
+      'redis_unavailable',
+    );
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('putConfigBundle'));
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('ECONNRESET from the store'));
+    expect(String(log.mock.calls[0]![0])).not.toContain(body.tar.slice(0, 40));
+    expect(refusals(d)).toEqual([]);
+  });
+});
+
+type FakeBundles = ReturnType<typeof fakeBundleRedis>;
+
 describe('POST /v1/config-bundles byte budget', () => {
   type Body = ReturnType<typeof bundle>;
   /** What Redis stores for a bundle -- the unit the budget counts. */
@@ -200,12 +248,11 @@ describe('POST /v1/config-bundles byte budget', () => {
     expect((await put(d, alice, a)).body).toMatchObject({ uploaded: true });
     expect((await put(d, alice, a)).body).toMatchObject({ uploaded: false });
     expect((await put(d, bob, a)).body).toMatchObject({ uploaded: false });
-    // Bob was not charged for alice's digest: he still has his whole budget for... nothing else
-    // fits globally, which is the global budget's job, not his.
-    await expect(put(d, bob, bundle('b'))).rejects.toMatchObject({
-      code: 'bundle_quota_exceeded',
-      message: expect.stringContaining('deployment'),
-    });
+    const owned = (sub: string) => [
+      ...((d.bundles as unknown as FakeBundles).zsets.get(bundleOwnerKey(sub))?.keys() ?? []),
+    ];
+    expect(owned(alice.sub)).toEqual([a.digest]);
+    expect(owned(bob.sub)).toEqual([]);
   });
 
   it('stops counting a bundle once its TTL has passed', async () => {

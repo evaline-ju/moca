@@ -239,6 +239,8 @@ export class OwnershipIndex {
     configRef?: string;
     bytes?: number;
     decision: string;
+    /** The error code of a refusal. */
+    reason?: string;
   }): Promise<void> {
     await this.guard(() =>
       this.redis.xAdd(AUDIT_STREAM, '*', {
@@ -250,6 +252,7 @@ export class OwnershipIndex {
         ...(entry.credential ? { credential: entry.credential } : {}),
         ...(entry.configRef ? { configRef: entry.configRef } : {}),
         ...(entry.bytes !== undefined ? { bytes: String(entry.bytes) } : {}),
+        ...(entry.reason ? { reason: entry.reason } : {}),
       }),
     );
   }
