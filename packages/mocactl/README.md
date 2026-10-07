@@ -33,6 +33,8 @@ onboarding never saves a discovered harness URL, so a harness the operator moves
 | Sessions (resume, rename, delete)    | `/sessions`, `/resume`  | `ctrl+x l`             |
 | New session                          | `/new`                  | `ctrl+x n`             |
 | Rename session                       | `/rename <title>`       | `ctrl+x r`             |
+| Promote skills for the next session  | `/promote DIR`          | —                      |
+| Drop the pending promoted bundle     | `/promote --clear`      | —                      |
 | Credentials                          | `/credentials`          | `ctrl+x k`             |
 | Toggle tool details / thinking       | `/details`, `/thinking` | `ctrl+x d`, `ctrl+x t` |
 | Copy last reply / export to Markdown | `/copy`, `/export`      | `ctrl+x y`, `ctrl+x x` |
@@ -57,6 +59,8 @@ keys in `config.json` under `keybinds`, e.g. `{ "session.new": "ctrl+x s" }`.
 mocactl login                               # device-flow login, prints the code
 mocactl doctor [--json]                     # seven checks, one fix per failure; exit 1 on failure
 mocactl run "prompt" [--session ID | --new] [--option inferenceCredential=NAME] [--json]
+mocactl promote DIR [--json]                # upload DIR's .claude/skills and .claude/commands
+mocactl run "prompt" --config DIGEST        # start the new session with that config bundle
 ```
 
 ```bash
@@ -69,6 +73,12 @@ mocactl credentials delete NAME [--json]    # exit 1 if you own no credential of
 ```
 
 `mocactl run` continues the session `--session` names, or starts a new one (`--new`, the default).
+
+`mocactl promote` prints the bundle digest to pass to `run --config`; in the TUI, `/promote DIR`
+attaches it to the next session you create. A session's bundle is fixed when it is created, so
+`--config` cannot be combined with `--session`. Rollout order: upgrade the harness before the
+control plane — an older harness ignores `configRef`, so turns would run without the skills and
+report no error.
 
 `mocactl credentials add` reads the secret from stdin, never from the command line, so it stays
 out of shell history and `ps`; it refuses a terminal on stdin (`read -rs KEY` first, or use

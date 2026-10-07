@@ -80,6 +80,8 @@ and apply it on the interactive turn path:
 - Negative / accepted cost: "read a Claude-Code-shaped directory into `BuildBundleInput`" has two
   implementations (the harness CLI's and `mocactl`'s). A third caller should factor it into
   `@moca/config-bundle`.
+- Negative / accepted cost: rollout order matters — the harness must be upgraded before the control
+  plane. An older harness ignores `configRef`, so turns would run without the skills and no error.
 - Follow-up owed: `GET /v1/config-bundles/{digest}` (metadata only) if bundle reuse across sessions
   turns out to matter.
 - Follow-up owed: a per-subject quota or rate limit on `POST /v1/config-bundles`. Uploads are
