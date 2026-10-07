@@ -3,6 +3,7 @@ import {
   SandboxPoolSaturatedError,
   SandboxPoolEmptyError,
   SandboxAffinityPendingError,
+  BundleNotFoundError,
 } from '@moca/harness/run-turn';
 import { turnErrorStatus, turnErrorHeaders, turnErrorCode } from '../src/server.js';
 
@@ -120,9 +121,7 @@ describe('turnErrorHeaders', () => {
 
 describe('an expired config bundle', () => {
   it('is 410 config_bundle_not_found, not a 500', () => {
-    const err = Object.assign(new Error('config bundle not found: sha256:' + 'a'.repeat(64)), {
-      name: 'BundleNotFoundError',
-    });
+    const err = new BundleNotFoundError('sha256:' + 'a'.repeat(64));
     expect(turnErrorStatus(err)).toBe(410);
     expect(turnErrorCode(410, err.message)).toBe('config_bundle_not_found');
   });

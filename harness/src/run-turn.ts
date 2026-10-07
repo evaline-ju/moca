@@ -51,6 +51,8 @@ import { attachPromotedConfig, type AttachedPromotedConfig } from './promoted-co
 // session waiting for its own briefly-absent sandbox). harness/package.json exposes no ./select-sandbox
 // subpath, and this is the module those callers already import.
 export { SandboxPoolSaturatedError, SandboxPoolEmptyError, SandboxAffinityPendingError };
+// Same reason: a promoted session's turn can fail with it, and server.ts maps it to 410.
+export { BundleNotFoundError } from '@moca/config-bundle';
 
 /**
  * One session store per process, not per turn.
