@@ -150,6 +150,32 @@ func TestDockerfilesProvideEveryProbedCapability(t *testing.T) {
 	}
 }
 
+// overlayRequires maps each binary the promoted-config overlay scripts run in the sandbox
+// (harness/src/config-overlay.ts) to the package that must provide it. Not advertised in `probed`,
+// so TestDockerfilesProvideEveryProbedCapability never saw them: a missing `tar` failed every
+// promoted turn with "config overlay failed (exit 127)" on a healthy, attached sandbox (ADR-0038).
+var overlayRequires = map[string]string{
+	"bash":   "bash",
+	"base64": "coreutils-single",
+	"find":   "findutils",
+	"flock":  "util-linux-core",
+	"gzip":   "gzip",
+	"tar":    "tar",
+}
+
+func TestDockerfilesProvideConfigOverlayTools(t *testing.T) {
+	for name, body := range dockerfiles(t) {
+		pkgs := runtimePackages(t, name, body)
+		for tool, pkg := range overlayRequires {
+			if !slices.Contains(pkgs, pkg) {
+				t.Errorf("%s does not install %q, which provides %q for the config overlay "+
+					"(harness/src/config-overlay.ts); promoted sessions would fail with exit 127. "+
+					"Runtime install list: %v", name, pkg, tool, pkgs)
+			}
+		}
+	}
+}
+
 // The two files are related only by a "see the same block in ./Dockerfile" comment, so nothing but a
 // test keeps their package sets in step. Drift here means one sandbox image silently differs from the
 // other depending on which build path an operator happened to use.
