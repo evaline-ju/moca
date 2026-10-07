@@ -261,8 +261,9 @@ the harness learns `configRef` from the exchange (§2.4).
 - **Valid digest, not found/expired (30-day TTL) at turn time:** the harness's `BundleNotFoundError`
   maps to **`410 { error: 'config_bundle_not_found' }`** on both the sync and SSE paths (410: it
   existed and is gone). It fails the turn loudly rather than running it without its skills. `mocactl`
-  maps that code to "this session's config bundle has expired — promote it again and start a new
-  session" (a new session, because a session's bundle is fixed at creation).
+  maps that code to "this session's config bundle has expired — promote the same directory again to restore it; if it changed, start a new session" (re-promoting the unchanged directory reproduces the same digest,
+  because digests are deterministic, and so revives the session; a changed directory has a new
+  digest, and a session's bundle is fixed at creation, so it needs a new session).
 - **A corrupt stored bundle** (`BundleDigestMismatchError` on read) stays a 500: it is an operator
   fault, not something the user can fix.
 - **In-app `/promote` failure:** reported via `h.notify(...)`; no pending bundle is set.

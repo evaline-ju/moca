@@ -80,6 +80,7 @@ describe('classify', () => {
 it('maps an expired config bundle to its own action and message', () => {
   const err = new ApiError('harness', 410, 'config_bundle_not_found');
   expect(classify(err)).toEqual({ kind: 'bundle-expired' });
-  expect(describeError(err)).toContain('promote');
-  expect(describeError(err)).toContain('new session');
+  expect(describeError(err)).toBe(
+    "this session's config bundle has expired — promote the same directory again to restore it; if it changed, start a new session",
+  );
 });

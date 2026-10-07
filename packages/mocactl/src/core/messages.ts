@@ -20,7 +20,7 @@ function describe(err: unknown): string {
       case 'session-gone':
         return 'that session no longer exists, or is not yours';
       case 'bundle-expired':
-        return "this session's config bundle has expired — promote it again and start a new session";
+        return "this session's config bundle has expired — promote the same directory again to restore it; if it changed, start a new session";
       case 'endpoint-unresolved':
         return `the inference credential has no gateway endpoint (${action.message}) — edit it in /credentials`;
       case 'operator-misconfigured':
