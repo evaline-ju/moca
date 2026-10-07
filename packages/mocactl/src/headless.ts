@@ -8,6 +8,7 @@ import {
 } from './core/credential-checks.js';
 import { formatDiagnostics, runDiagnostics } from './core/diagnostics.js';
 import { describeError } from './core/messages.js';
+import { PromoteError, promoteDirectory } from './core/promote.js';
 import { sanitizeRemote } from './core/sanitize.js';
 import { SessionManager, type ActiveSession } from './core/session-manager.js';
 import {
@@ -74,6 +75,7 @@ export interface RunOptions {
   options: Record<string, string>;
   json: boolean;
   signal?: AbortSignal;
+  configRef?: string;
 }
 
 /** False (with the reason on stderr) unless there is a control plane and a valid login for it. */
@@ -84,6 +86,36 @@ function ready(rt: Runtime, io: Io): rt is Runtime & Required<Pick<Runtime, 'cp'
     return false;
   }
   return true;
+}
+
+export async function cmdPromote(
+  rt: Runtime,
+  io: Io,
+  opts: { dir: string; json: boolean },
+): Promise<number> {
+  if (!ready(rt, io)) return 2;
+  try {
+    const r = await promoteDirectory(opts.dir, rt.cp);
+    if (opts.json) {
+      io.out(JSON.stringify(r) + '\n');
+      return 0;
+    }
+    io.out(`config root  ${r.configRoot}\n`);
+    io.out(`skills       ${r.skills.join(', ') || 'none'}\n`);
+    for (const d of r.dropped) io.out(`dropped      ${d.name}  (${d.reason})\n`);
+    io.out(`commands     ${r.prompts.join(', ') || 'none'}\n`);
+    if (r.report.trim()) io.out(`${r.report}\n`);
+    io.out(`bundle       ${r.digest}  (${r.uploaded ? 'uploaded' : 'unchanged'})\n`);
+    io.out(`start a session with:  mocactl run "…" --config ${r.digest}\n`);
+    return 0;
+  } catch (err) {
+    if (err instanceof PromoteError) {
+      io.err(err.message);
+      return err.exitCode;
+    }
+    io.err(describeError(err));
+    return 1;
+  }
 }
 
 export async function cmdRun(rt: Runtime, io: Io, opts: RunOptions): Promise<number> {
@@ -118,7 +150,9 @@ export async function cmdRun(rt: Runtime, io: Io, opts: RunOptions): Promise<num
         return 2;
       }
       try {
-        session = await manager.create(r.request);
+        session = await manager.create(
+          opts.configRef ? { ...r.request, configRef: opts.configRef } : r.request,
+        );
       } catch (err) {
         const refused = fieldRefusedByServer(err, SESSION_OPTION_FIELDS);
         if (!refused) throw err;

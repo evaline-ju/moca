@@ -1,10 +1,10 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_CONFIG, loadAuth, resolvePaths } from '../src/config.js';
 import { HarnessUntrustedError } from '../src/core/session-manager.js';
-import { cmdDoctor, cmdLogin, cmdRun, type Io } from '../src/headless.js';
+import { cmdDoctor, cmdLogin, cmdPromote, cmdRun, type Io } from '../src/headless.js';
 import type { Runtime } from '../src/runtime.js';
 import { ApiError } from '../src/api/errors.js';
 import { credential, doneFrame, fakeControlPlane, fakeHarness } from './helpers/fakes.js';
@@ -18,6 +18,16 @@ function io(): Io & { stdout: string; stderr: string[] } {
   };
   return o;
 }
+
+function project(files: Record<string, string>): string {
+  const root = mkdtempSync(join(tmpdir(), 'mocactl-promote-'));
+  for (const [rel, body] of Object.entries(files)) {
+    mkdirSync(join(root, rel, '..'), { recursive: true });
+    writeFileSync(join(root, rel), body);
+  }
+  return root;
+}
+const skill = (name: string) => `---\nname: ${name}\ndescription: d\n---\nbody\n`;
 
 function runtime(over: Partial<Runtime> = {}): Runtime {
   const paths = resolvePaths({}, mkdtempSync(join(tmpdir(), 'mocactl-rt-')));
@@ -273,5 +283,48 @@ describe('cmdLogin', () => {
     });
     expect(await cmdLogin(rt, o, ac.signal)).toBe(130);
     expect(o.stderr.join('\n')).not.toContain('login failed');
+  });
+});
+
+describe('cmdPromote', () => {
+  it('uploads, prints the digest and exits 0', async () => {
+    const o = io();
+    const p = project({ '.claude/skills/hello/SKILL.md': skill('hello') });
+    expect(await cmdPromote(runtime(), o, { dir: p, json: false })).toBe(0);
+    expect(o.stdout).toMatch(/sha256:[0-9a-f]{64}/);
+    expect(o.stdout).toContain('hello');
+  });
+
+  it('exits with the PromoteError code', async () => {
+    const o = io();
+    expect(await cmdPromote(runtime(), o, { dir: '/definitely/not/here', json: false })).toBe(1);
+    expect(o.stderr.join('\n')).toContain('no .claude/skills');
+  });
+
+  it('prints one JSON object with --json', async () => {
+    const o = io();
+    const p = project({ '.claude/skills/hello/SKILL.md': skill('hello') });
+    await cmdPromote(runtime(), o, { dir: p, json: true });
+    expect(JSON.parse(o.stdout)).toMatchObject({ uploaded: true, skills: ['hello'] });
+  });
+});
+
+describe('cmdRun --config', () => {
+  it('creates the session with configRef', async () => {
+    const created: unknown[] = [];
+    const rt = runtime({
+      cp: fakeControlPlane({
+        listCredentials: async () => [credential('anthropic')],
+        createSession: async (req) => (
+          created.push(req),
+          { sessionId: 's-new', token: 'st', expiresAt: 4_000_000_000 }
+        ),
+      }),
+    });
+    const digest = 'sha256:' + 'a'.repeat(64);
+    expect(
+      await cmdRun(rt, io(), { prompt: 'hi', options: {}, json: false, configRef: digest }),
+    ).toBe(0);
+    expect(created[0]).toMatchObject({ configRef: digest });
   });
 });

@@ -206,4 +206,22 @@ describe('main', () => {
     await main(['frobnicate'], {}, o, { buildRuntime: build });
     expect(o.errs[0]).toBe('ignoring unreadable x');
   });
+
+  it('promote needs exactly one directory', async () => {
+    expect(await main(['promote'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
+    expect(await main(['promote', 'a', 'b'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
+  });
+
+  it('rejects --config together with --session, and --config outside run', async () => {
+    const o = io();
+    expect(
+      await main(['run', 'hi', '--session', 's1', '--config', 'sha256:x'], {}, o, {
+        buildRuntime: fakeBuild,
+      }),
+    ).toBe(2);
+    expect(o.errs.join('')).toContain('--config');
+    expect(
+      await main(['sessions', '--config', 'sha256:x'], {}, io(), { buildRuntime: fakeBuild }),
+    ).toBe(2);
+  });
 });

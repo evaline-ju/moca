@@ -7,6 +7,7 @@ import {
   cmdCredentials,
   cmdDoctor,
   cmdLogin,
+  cmdPromote,
   cmdRun,
   cmdSessionDelete,
   cmdSessions,
@@ -19,6 +20,8 @@ export const USAGE = `usage:
   mocactl login                                  log in with the GitHub device flow
   mocactl doctor [--json]                        check the setup; one fix per failure
   mocactl run "prompt" [--session ID | --new] [--option key=value ...] [--json]
+  mocactl run "prompt" --config DIGEST            start the new session with a promoted config bundle
+  mocactl promote DIR [--json]                   upload DIR's .claude/skills and .claude/commands
   mocactl sessions [--json]                      list your sessions
   mocactl sessions delete ID [--json]
   mocactl credentials [--json]                   list your credentials (never their secrets)
@@ -81,6 +84,7 @@ export async function main(
         consumer: { type: 'string' },
         host: { type: 'string', multiple: true },
         endpoint: { type: 'string' },
+        config: { type: 'string' },
         setup: { type: 'boolean' },
         'no-animation': { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
@@ -112,6 +116,10 @@ export async function main(
       return 2;
     }
   }
+  if (values.config !== undefined && command !== 'run') {
+    io.err(`--config only applies to \`mocactl run\`\n${USAGE}`);
+    return 2;
+  }
   switch (command) {
     case 'login':
       return cmdLogin(rt, io, deps.signal);
@@ -128,6 +136,12 @@ export async function main(
         io.err(`--new and --session cannot be used together\n${USAGE}`);
         return 2;
       }
+      if (values.config !== undefined && values.session !== undefined) {
+        io.err(
+          `--config applies only to a new session; a session's bundle is fixed when it is created\n${USAGE}`,
+        );
+        return 2;
+      }
       let options: Record<string, string>;
       try {
         options = parseOptionFlags(values.option ?? []);
@@ -141,7 +155,12 @@ export async function main(
         options,
         json,
         signal: deps.signal,
+        configRef: values.config,
       });
+    }
+    case 'promote': {
+      if (rest.length !== 1) return usage(io);
+      return cmdPromote(rt, io, { dir: rest[0]!, json });
     }
     case 'sessions': {
       const [sub, id, ...extra] = rest;
