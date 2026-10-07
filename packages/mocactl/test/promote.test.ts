@@ -2,7 +2,12 @@ import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { PromoteError, promoteDirectory, resolveConfigRoot } from '../src/core/promote.js';
+import {
+  describePromotion,
+  PromoteError,
+  promoteDirectory,
+  resolveConfigRoot,
+} from '../src/core/promote.js';
 import { fakeControlPlane } from './helpers/fakes.js';
 
 function project(files: Record<string, string>): string {
@@ -133,5 +138,24 @@ describe('promoteDirectory', () => {
     await expect(
       promoteDirectory('/definitely/not/here', fakeControlPlane()),
     ).rejects.toBeInstanceOf(PromoteError);
+  });
+});
+
+describe('describePromotion', () => {
+  const r = (skills: number, prompts: number, warnings: number, uploaded = true) => ({
+    skills: Array.from({ length: skills }, (_, i) => `s${i}`),
+    prompts: Array.from({ length: prompts }, (_, i) => `p${i}`),
+    warnings,
+    uploaded,
+  });
+
+  it('counts in the singular and plural and names the directory in the --dry-run hint', () => {
+    expect(describePromotion(r(1, 1, 1), '~/work')).toBe(
+      'promoted 1 skill, 1 command — uploaded; 1 warning — run `mocactl promote ~/work --dry-run` to see it',
+    );
+    expect(describePromotion(r(0, 2, 3, false), 'x')).toBe(
+      'promoted 0 skills, 2 commands — unchanged; 3 warnings — run `mocactl promote x --dry-run` to see them',
+    );
+    expect(describePromotion(r(2, 0, 0), 'x')).toBe('promoted 2 skills, 0 commands — uploaded');
   });
 });

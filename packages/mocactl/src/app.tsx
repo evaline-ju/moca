@@ -11,7 +11,12 @@ import { CommandRegistry } from './commands/registry.js';
 import type { CachedAuth, TuiConfig } from './config.js';
 import { apiTokenValid, loginExpiryMinutes } from './core/auth.js';
 import { describeError } from './core/messages.js';
-import { promoteDirectory, PromoteError, type PromoteResult } from './core/promote.js';
+import {
+  describePromotion,
+  promoteDirectory,
+  PromoteError,
+  type PromoteResult,
+} from './core/promote.js';
 import { sanitizeRemote } from './core/sanitize.js';
 import {
   DOUBLE_ESC_MS,
@@ -419,14 +424,7 @@ export function App({ rt, opts, env, os, write }: AppProps) {
       try {
         const r = await promoteDirectory(arg, rt.cp);
         setPendingBundle(r);
-        const warned = r.warnings
-          ? `; ${r.warnings} warnings — run \`mocactl promote DIR --dry-run\` to see them`
-          : '';
-        notify(
-          `promoted ${r.skills.length} skills, ${r.prompts.length} commands — ` +
-            `${r.uploaded ? 'uploaded' : 'unchanged'}${warned}`,
-          r.warnings ? 'warning' : undefined,
-        );
+        notify(describePromotion(r, arg), r.warnings ? 'warning' : undefined);
         open({ name: 'new-session' });
       } catch (err) {
         if (loginIfExpired(err, undefined))

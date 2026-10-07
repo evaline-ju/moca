@@ -111,3 +111,20 @@ export async function promoteDirectory(
   });
   return { ...summary, uploaded };
 }
+
+const count = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`;
+
+/** The one-line TUI toast for a promotion; `dir` is the directory as the user typed it. */
+export function describePromotion(
+  r: Pick<PromoteResult, 'skills' | 'prompts' | 'warnings' | 'uploaded'>,
+  dir: string,
+): string {
+  const head =
+    `promoted ${count(r.skills.length, 'skill')}, ${count(r.prompts.length, 'command')} — ` +
+    (r.uploaded ? 'uploaded' : 'unchanged');
+  if (!r.warnings) return head;
+  return (
+    `${head}; ${count(r.warnings, 'warning')} — run \`mocactl promote ${dir} --dry-run\` ` +
+    `to see ${r.warnings === 1 ? 'it' : 'them'}`
+  );
+}

@@ -308,13 +308,12 @@ describe('App', () => {
     const { stdin, all, until, ready } = mount(rt);
     await ready();
     await send(stdin, `/promote ${dir}`);
-    // The toast wraps at the test terminal's width, so compare with whitespace collapsed.
-    const flat = () => all().replace(/\s+/g, ' ');
-    await until(() =>
-      flat().includes(
-        'promoted 1 skills, 1 commands — uploaded; 1 warnings — run `mocactl promote DIR --dry-run` to see them',
-      ),
-    );
+    // The toast wraps (even inside the path) at the test terminal's width, so compare unspaced.
+    const flat = () => all().replace(/\s+/g, '');
+    const want =
+      `promoted 1 skill, 1 command — uploaded; 1 warning — run ` +
+      `\`mocactl promote ${dir} --dry-run\` to see it`;
+    await until(() => flat().includes(want.replace(/\s+/g, '')));
   });
 
   it('/promote --clear drops the pending bundle without creating a session', async () => {
