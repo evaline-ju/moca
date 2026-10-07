@@ -58,6 +58,24 @@ describe('POST /v1/config-bundles', () => {
     ).toBe('digest_mismatch');
   });
 
+  it(
+    'refuses a tar with a negative entry size promptly, as digest_mismatch',
+    { timeout: 2000 },
+    async () => {
+      const h = Buffer.alloc(512);
+      h.write('evil.md', 0, 100, 'utf8');
+      h.write('-1000', 124, 12, 'ascii');
+      h.write('0', 156, 1, 'ascii');
+      const body = {
+        digest: 'sha256:' + 'c'.repeat(64),
+        tar: Buffer.concat([h, Buffer.alloc(1024)]).toString('base64'),
+      };
+      expect(
+        await codeOf(() => HANDLERS.putConfigBundle!(ctx({ principal: alice, body }), makeDeps())),
+      ).toBe('digest_mismatch');
+    },
+  );
+
   it('refuses a malformed digest and a missing tar', async () => {
     const d = makeDeps();
     const good = bundle();
