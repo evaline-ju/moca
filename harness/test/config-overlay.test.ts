@@ -1,5 +1,17 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { gzipSync } from 'node:zlib';
+import { execFileSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   configCacheDir,
   configRefsDir,
@@ -229,6 +241,107 @@ describe('buildConfigCleanupScript', () => {
 
   it('rejects an invalid digest rather than composing a path from it', () => {
     expect(() => buildConfigCleanupScript('leaf-1', "x'; rm -rf /; '")).toThrow(/invalid digest/i);
+  });
+});
+
+// Runs the real scripts against a temp root. flock is shimmed to a no-op (macOS has none); the
+// scripts' locking is pinned by the string assertions above, this block pins what they remove.
+describe('cleanup scripts, executed', () => {
+  let root: string;
+  let bin: string;
+  const sh = (script: string) =>
+    execFileSync('bash', ['-c', script.replaceAll('/workspace', `${root}/workspace`)], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+    }).toString();
+  const cache = () => `${root}${CACHE}`;
+  const refs = () => `${root}${REFS}`;
+  const link = (sid: string) => `${root}/workspace/leaves/${sid}/.sh-config`;
+  const linkExists = (sid: string) => {
+    try {
+      lstatSync(link(sid));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const acquireAndBind = (sid: string, refId?: string) => {
+    sh(buildCacheAcquireScript(DIGEST, refId ?? sid));
+    if (!existsSync(cache())) {
+      mkdirSync(cache(), { recursive: true });
+      writeFileSync(join(cache(), 'CLAUDE.md'), 'x');
+      chmodSync(join(cache(), 'CLAUDE.md'), 0o444);
+      chmodSync(cache(), 0o555);
+    }
+    sh(buildLeafBindScript(DIGEST, sid));
+  };
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'overlay-'));
+    bin = join(root, 'bin');
+    mkdirSync(bin);
+    mkdirSync(join(root, 'workspace'));
+    writeFileSync(join(bin, 'flock'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  });
+  afterEach(() => {
+    if (existsSync(cache())) chmodSync(cache(), 0o755);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('two turns of one session: releasing one keeps the session link and the cache', () => {
+    acquireAndBind('sess-1', 'sess-1.aaaa');
+    acquireAndBind('sess-1', 'sess-1.bbbb');
+    sh(buildConfigCleanupScript('sess-1', DIGEST, 'sess-1.aaaa'));
+    expect(existsSync(join(refs(), 'sess-1.aaaa'))).toBe(false);
+    expect(existsSync(join(refs(), 'sess-1.bbbb'))).toBe(true);
+    expect(linkExists('sess-1')).toBe(true);
+    expect(existsSync(join(cache(), 'CLAUDE.md'))).toBe(true);
+  });
+
+  it('releasing the last turn of a session removes the link and the cache', () => {
+    acquireAndBind('sess-1', 'sess-1.aaaa');
+    acquireAndBind('sess-1', 'sess-1.bbbb');
+    sh(buildConfigCleanupScript('sess-1', DIGEST, 'sess-1.aaaa'));
+    sh(buildConfigCleanupScript('sess-1', DIGEST, 'sess-1.bbbb'));
+    expect(linkExists('sess-1')).toBe(false);
+    expect(existsSync(cache())).toBe(false);
+    expect(existsSync(refs())).toBe(false);
+  });
+
+  it('a turn release keeps the cache while another session still holds a ref', () => {
+    acquireAndBind('sess-1', 'sess-1.aaaa');
+    acquireAndBind('sess-2', 'sess-2.cccc');
+    sh(buildConfigCleanupScript('sess-1', DIGEST, 'sess-1.aaaa'));
+    expect(linkExists('sess-1')).toBe(false);
+    expect(linkExists('sess-2')).toBe(true);
+    expect(existsSync(join(cache(), 'CLAUDE.md'))).toBe(true);
+  });
+
+  it('the /runs single-ref leaf (no refId) still removes its link and the last cache', () => {
+    acquireAndBind('leaf-1');
+    acquireAndBind('leaf-2');
+    sh(buildConfigCleanupScript('leaf-1', DIGEST));
+    expect(linkExists('leaf-1')).toBe(false);
+    expect(existsSync(join(cache(), 'CLAUDE.md'))).toBe(true);
+    sh(buildConfigCleanupScript('leaf-2', DIGEST));
+    expect(linkExists('leaf-2')).toBe(false);
+    expect(existsSync(cache())).toBe(false);
+  });
+
+  it('without a refId the cleanup script is the single-ref one, unchanged', () => {
+    expect(buildConfigCleanupScript('leaf-1', DIGEST)).toBe(
+      buildConfigCleanupScript('leaf-1', DIGEST, 'leaf-1'),
+    );
+    expect(buildConfigCleanupScript('leaf-1', DIGEST).split('\n')[1]).toBe(
+      `rm -f '/workspace/leaves/leaf-1/.sh-config' 2>/dev/null || true`,
+    );
+  });
+
+  it('rejects an unsafe refId as it does an unsafe sessionId', () => {
+    for (const bad of ['../x', 'a/b', '..', 'a b', "a'b"]) {
+      expect(() => buildConfigCleanupScript('sess-1', DIGEST, bad)).toThrow(/invalid sessionId/i);
+      expect(() => buildCacheAcquireScript(DIGEST, bad)).toThrow(/invalid sessionId/i);
+    }
+    expect(() => buildConfigCleanupScript('a b', DIGEST, 'ok.1')).toThrow(/invalid sessionId/i);
   });
 });
 

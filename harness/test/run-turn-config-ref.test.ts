@@ -35,8 +35,8 @@ vi.mock('@earendil-works/pi-coding-agent', () => ({
   DefaultResourceLoader: class {},
   getAgentDir: () => '/fake/agent-dir',
   SessionManager: {
-    create: () => ({ getSessionId: () => 'sess-1' }),
-    openFromCheckpoint: async () => ({ getSessionId: () => 'sess-1' }),
+    create: () => ({ getSessionId: () => 'opened-1' }),
+    openFromCheckpoint: async () => ({ getSessionId: () => 'opened-1' }),
   },
   SettingsManager: { create: () => ({}) },
 }));
@@ -67,11 +67,41 @@ describe('executeTurn configRef', () => {
     expect(attachMock).toHaveBeenCalledWith(
       expect.objectContaining({
         digest,
-        sessionId: 'sess-1',
+        sessionId: 'opened-1',
         sandbox: expect.objectContaining({ config: sandbox.config }),
       }),
     );
     expect(detachMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives every turn its own ref on the digest, distinct from the session id', async () => {
+    const turn = () =>
+      executeTurn({
+        prompt: 'hi',
+        sessionId: 'sess-1',
+        createIfAbsent: true,
+        sandbox,
+        configRef: digest,
+      }).catch(() => {});
+    await turn();
+    await turn();
+    const refIds = attachMock.mock.calls.map((c) => (c[0] as { refId?: string }).refId);
+    expect(refIds).toHaveLength(2);
+    for (const refId of refIds) expect(refId).toMatch(/^opened-1\.[0-9a-f]{32}$/);
+    expect(refIds[0]).not.toBe(refIds[1]);
+  });
+
+  it('a failing detach does not replace the turn outcome', async () => {
+    detachMock.mockRejectedValueOnce(new Error('detach boom'));
+    const err = await executeTurn({
+      prompt: 'hi',
+      sessionId: 'sess-1',
+      createIfAbsent: true,
+      sandbox,
+      configRef: digest,
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).not.toBe('detach boom');
   });
 
   it('does nothing without a configRef', async () => {

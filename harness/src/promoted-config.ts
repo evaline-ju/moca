@@ -79,6 +79,8 @@ export interface AttachedPromotedConfig {
 export async function attachPromotedConfig(opts: {
   digest: string;
   sessionId: string;
+  /** Keys this attach's ref on the digest; the session link stays keyed by `sessionId`. */
+  refId?: string;
   sandbox: PromotedSandbox | null;
   redisUrl?: string;
   deps?: PromotedConfigDeps;
@@ -100,7 +102,9 @@ export async function attachPromotedConfig(opts: {
     // never masks the leaf's actual verdict. Same transport fallback as the overlay below.
     const transport = sandbox.transport ?? KubectlTransport(sandbox.config);
     try {
-      await transport.exec(buildConfigCleanupScript(opts.sessionId, opts.digest), { timeout: 60 });
+      await transport.exec(buildConfigCleanupScript(opts.sessionId, opts.digest, opts.refId), {
+        timeout: 60,
+      });
     } catch {
       /* ignore */
     } finally {
@@ -121,6 +125,7 @@ export async function attachPromotedConfig(opts: {
       opts.digest,
       opts.sessionId,
       gzipSync(canonicalTar(resolved.entries)),
+      ...(opts.refId === undefined ? [] : [opts.refId]),
     );
     return {
       promotedConfig: {

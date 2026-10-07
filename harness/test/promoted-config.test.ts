@@ -74,6 +74,28 @@ describe('attachPromotedConfig', () => {
     );
   });
 
+  it('keys the ref by refId while the session link stays on sessionId', async () => {
+    kubectlTransportMock.mockClear();
+    const transport = {
+      exec: vi.fn(async () => ({ stdout: Buffer.from(''), exitCode: 0 })),
+      close: vi.fn(),
+    };
+    const opts = base({ refId: 's1.abc123', sandbox: { ...sandbox, transport } });
+    const a = await attachPromotedConfig(opts);
+    expect(opts.deps.overlayConfig).toHaveBeenCalledWith(
+      transport,
+      digest,
+      's1',
+      expect.any(Buffer),
+      's1.abc123',
+    );
+    await a.detach();
+    const script = (transport.exec.mock.calls[0] as unknown as [string])[0];
+    expect(script).toContain('rm -f "$REFS/s1.abc123"');
+    expect(script).not.toContain('rm -f "$REFS/s1"');
+    expect(script).toContain("'/workspace/leaves/s1/.sh-config'");
+  });
+
   it('tears the partial overlay down and rethrows when the overlay fails (#216)', async () => {
     kubectlTransportMock.mockClear();
     const opts = base();

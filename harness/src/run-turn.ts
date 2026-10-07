@@ -760,9 +760,12 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
     // After the renewal timer is armed: fetching and overlaying a multi-MB bundle can outlast a lease.
     if (input.configRef && !input.promotedConfig) {
       const { config: sandboxConfig, transport } = acquired.sandbox;
+      const sessionId = opened.sessionManager.getSessionId();
       attached = await attachPromotedConfig({
         digest: input.configRef,
-        sessionId: opened.sessionManager.getSessionId(),
+        sessionId,
+        // Per turn: concurrent turns of one session must not release each other's overlay.
+        refId: `${sessionId}.${randomUUID().replace(/-/g, '')}`,
         sandbox: sandboxConfig ? { config: sandboxConfig, transport } : null,
         redisUrl: input.config?.redisUrl,
       });
@@ -776,7 +779,7 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
     // Clear first, then release: if release throws, the interval is already gone rather than
     // left running against a lease nobody holds.
     if (leaseRenewal) clearInterval(leaseRenewal);
-    await attached?.detach();
+    await attached?.detach().catch(() => {});
     await acquired.release().catch(() => {});
   }
 }
