@@ -82,6 +82,10 @@ and apply it on the interactive turn path:
   `@moca/config-bundle`.
 - Follow-up owed: `GET /v1/config-bundles/{digest}` (metadata only) if bundle reuse across sessions
   turns out to matter.
+- Follow-up owed: a per-subject quota or rate limit on `POST /v1/config-bundles`. Uploads are
+  audited (`config_bundle_uploaded` / `config_bundle_unchanged`), but nothing bounds their volume.
+- Follow-up owed: LRU cleanup of the harness pod's `/tmp/sh-config` digest cache, which today grows
+  with every distinct digest a pod resolves.
 
 ## Amendments
 

@@ -32,6 +32,25 @@ describe('POST /v1/config-bundles', () => {
     expect(again.body).toEqual({ digest: body.digest, uploaded: false });
   });
 
+  it('audits each upload with the subject, digest, byte count and outcome', async () => {
+    const d = makeDeps({ withStreams: true });
+    const body = bundle();
+    await HANDLERS.putConfigBundle!(ctx({ principal: alice, body }), d);
+    const rows = d.streams.get('sh:cp:audit') ?? [];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      subject: alice.sub,
+      decision: 'config_bundle_uploaded',
+      configRef: body.digest,
+      bytes: String(Buffer.from(body.tar, 'base64').length),
+    });
+    await HANDLERS.putConfigBundle!(ctx({ principal: alice, body }), d);
+    expect((d.streams.get('sh:cp:audit') ?? [])[1]).toMatchObject({
+      decision: 'config_bundle_unchanged',
+      configRef: body.digest,
+    });
+  });
+
   it('refuses a digest that does not match the tar', async () => {
     const body = { ...bundle(), digest: 'sha256:' + 'a'.repeat(64) };
     expect(

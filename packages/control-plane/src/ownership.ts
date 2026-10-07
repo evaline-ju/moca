@@ -222,6 +222,8 @@ export class OwnershipIndex {
     subject: string;
     sessionId?: string;
     credential?: string;
+    configRef?: string;
+    bytes?: number;
     decision: string;
   }): Promise<void> {
     await this.guard(() =>
@@ -232,6 +234,8 @@ export class OwnershipIndex {
         ...(entry.sessionId ? { sessionId: entry.sessionId } : {}),
         // The credential NAME, never its value (spec §7.2).
         ...(entry.credential ? { credential: entry.credential } : {}),
+        ...(entry.configRef ? { configRef: entry.configRef } : {}),
+        ...(entry.bytes !== undefined ? { bytes: String(entry.bytes) } : {}),
       }),
     );
   }

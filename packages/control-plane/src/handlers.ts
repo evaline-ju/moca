@@ -160,15 +160,15 @@ async function turnInFlight(sessionId: string, deps: CpDeps): Promise<boolean> {
 async function auditBestEffort(
   deps: CpDeps,
   route: string,
-  name: string,
+  target: string,
   entry: Parameters<OwnershipIndex['audit']>[0],
 ): Promise<void> {
   try {
     await deps.index.audit(entry);
   } catch (err) {
     console.error(
-      `[control-plane] audit write failed for ${route} credential=${name}: ` +
-        `${(err as Error).message} -- the credential write itself SUCCEEDED`,
+      `[control-plane] audit write failed for ${route} ${target}: ` +
+        `${(err as Error).message} -- the write itself SUCCEEDED`,
     );
   }
 }
@@ -392,7 +392,7 @@ export const HANDLERS: Record<string, Handler> = {
     }
     const cred = parseCredentialBody(name, ctx.body);
     await deps.credentials.put(p.sub, cred);
-    await auditBestEffort(deps, 'putCredential', name, {
+    await auditBestEffort(deps, 'putCredential', `credential=${name}`, {
       subject: p.sub,
       credential: name,
       decision: 'credential_written',
@@ -425,7 +425,7 @@ export const HANDLERS: Record<string, Handler> = {
     const p = requirePrincipal(ctx);
     const name = validateCredentialName(ctx.params.name ?? '');
     await deps.credentials.delete(p.sub, name);
-    await auditBestEffort(deps, 'deleteCredential', name, {
+    await auditBestEffort(deps, 'deleteCredential', `credential=${name}`, {
       subject: p.sub,
       credential: name,
       decision: 'credential_deleted',
@@ -435,7 +435,7 @@ export const HANDLERS: Record<string, Handler> = {
   },
 
   putConfigBundle: async (ctx, deps) => {
-    requirePrincipal(ctx);
+    const p = requirePrincipal(ctx);
     const body = asRecord(ctx.body);
     const digest = body.digest;
     if (typeof digest !== 'string') throw new CpError('invalid_request', 'digest must be a string');
@@ -454,14 +454,21 @@ export const HANDLERS: Record<string, Handler> = {
         `bundle is ${tar.length} bytes; the limit is ${MAX_BUNDLE_BYTES} bytes`,
       );
     }
+    let uploaded: boolean;
     try {
-      const { uploaded } = await putBundle(deps.bundles, digest, tar);
-      return { status: 201, body: { digest, uploaded } };
+      ({ uploaded } = await putBundle(deps.bundles, digest, tar));
     } catch (err) {
       if (err instanceof BundleDigestMismatchError)
         throw new CpError('digest_mismatch', err.message);
       throw new CpError('redis_unavailable', 'redis is not answering');
     }
+    await auditBestEffort(deps, 'putConfigBundle', `configRef=${digest}`, {
+      subject: p.sub,
+      configRef: digest,
+      bytes: tar.length,
+      decision: uploaded ? 'config_bundle_uploaded' : 'config_bundle_unchanged',
+    });
+    return { status: 201, body: { digest, uploaded } };
   },
 
   getSessionResources: async (ctx, deps) => {
