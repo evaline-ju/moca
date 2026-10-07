@@ -52,7 +52,7 @@ export async function promoteDirectory(
     result = buildBundle({
       roots: { userDir: configRoot },
       promptsDir: join(configRoot, 'commands'),
-      mode: 'unattended',
+      mode: 'attended',
       sandboxImage: 'ghcr.io/rossoctl/moca-sandbox:latest',
       versions: { pi: 'unknown', harness: 'mocactl' },
     });

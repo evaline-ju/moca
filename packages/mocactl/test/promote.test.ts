@@ -41,6 +41,16 @@ describe('resolveConfigRoot', () => {
 });
 
 describe('promoteDirectory', () => {
+  it('builds for an attended session, so a dialogue skill draws no --mode warning', async () => {
+    const p = project({ '.claude/skills/brainstorming/SKILL.md': skill('brainstorming') });
+    const cp = fakeControlPlane({
+      putConfigBundle: async (req) => ({ digest: req.digest, uploaded: true }),
+    });
+    const r = await promoteDirectory(p, cp);
+    expect(r.skills).toEqual(['brainstorming']);
+    expect(r.report).not.toContain('--mode attended');
+  });
+
   it('builds without an entry, uploads, and reports what travelled', async () => {
     const p = project({
       '.claude/skills/hello/SKILL.md': skill('hello'),
