@@ -182,7 +182,7 @@ The generated overlay adds the §2.4 objects only when the ID list is non-empty.
 
 ## 6. `deploy/k8s/smoke.sh --tier p4`
 
-`--tier container` stays the default and runs today's 11 claims. `--tier p4`, which is OpenShift only, runs these claims:
+`--tier container` stays the default and runs the 11 claims of slice 2's time (P6.3 adds claim 12, session affinity). `--tier p4`, which is OpenShift only, runs these claims:
 
 1. The supervisor is ready.
 2. Every ID in `SH_P4_SANDBOX_IDS`, read from `moca-setup`, is in `sh:sandbox:records`, and no container-sandbox record is there.
@@ -219,7 +219,7 @@ The mock model gains scripts for claims 3–4, `K8S-SMOKE-P4-WRITE` and `K8S-SMO
   - P4 IDs are sticky, and an explicit empty value clears them;
   - tokens are generated once and kept;
   - a removed ID removes its key and its bundle;
-  - both tiers together are refused, and P4 IDs on kind are refused;
+  - both tiers together are refused (superseded by P6.3: a stack with both tiers is tiered, not refused), and P4 IDs on kind are refused;
   - the ID rule and duplicates;
   - bundle modes are 0700 and 0600;
   - no token anywhere in the argv log, raw or base64;

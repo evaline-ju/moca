@@ -2,7 +2,7 @@
 
 Version: 1.4 — October 2026 (v1.1: corrections from the implementation plan; v1.2: corrections from
 the implementation and its final review; v1.3: corrections from PR 2; v1.4: corrections from PR 3)
-Status: Proposed
+Status: Implemented — PRs #442, #444 and #454; accepted on the KVM rig and OpenShift 4.20.8 (#425)
 Milestone: **P6.3**, registered in [the milestone registry](README.md). This is slice 3 of epic
 rossoctl/moca#426, issue rossoctl/moca#425.
 Builds on (reuse, no redesign): [P6.1](2026-10-02-p6-on-kubernetes-slice1-design.md) (the P6 stack on
@@ -374,8 +374,8 @@ would exclude it.
 - **Data plane, boot.** `worker-boot.test.ts` forks the real worker: a duplicate tier and a
   default outside the list each exit 2 before `ready`, naming the variable; a valid pair boots.
 - **Env parity.** The k8s manifest test and `compose.test.sh` (§7).
-- **mocactl, unit.** `--tier`, the picker, the notice for `workspace_reset`, ignoring an unknown
-  frame type.
+- **mocactl, unit.** `--option sandboxTier=…`, the picker, the notice for `workspace_reset`,
+  ignoring an unknown frame type.
 - **Integration, real Redis.** Two fake workers in each of two tiers behind a real relay. Across many
   sessions every turn stays in its tier and on its affine sandbox, and new sessions still spread by
   load. A relay restart mid-run moves no session.
@@ -417,8 +417,8 @@ Three PRs, in order:
    `SandboxAffinityPendingError`, the `workspace_reset` frame, the runtime fields. With
    `SH_SANDBOX_TIERS` unset this is safe on its own, and it fixes the container-tier hop. It does not
    depend on P6.2.
-2. **Control plane and mocactl:** the session's tier, the exchange, discovery, the API docs, `--tier`,
-   the picker, the notice.
+2. **Control plane and mocactl:** the session's tier, the exchange, discovery, the API docs,
+   `--option sandboxTier=…`, the picker, the notice.
 3. **Deployment wiring and docs:** `deploy/vm`, `deploy/compose`, `deploy/microvm`, `deploy/k8s`
    (after P6.2 merges: it edits `setup.sh`), `P4-ON-P6.md`, the README runbook, the env-parity test,
    the Kind smoke claim, and the acceptance runs recorded on rossoctl/moca#425.
