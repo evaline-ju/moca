@@ -55,18 +55,21 @@ export function placeholderFor(subject: string): string {
  * because it was created while no tiers were declared, or a record written before P6.3 with no
  * field) -- TODAY's default, the tier such a session runs in. Naming the default here, rather than
  * leaving the data plane to apply its own SH_SANDBOX_DEFAULT_TIER, makes the exchange the one
- * source of truth for these sessions, so the placement cannot disagree with viewTier. '' only when
- * the deployment declares no tiers, which the exchange then leaves out: the untiered response stays
- * byte-identical.
+ * source of truth for these sessions, so the placement cannot disagree with viewTier.
+ *
+ * '' whenever the deployment declares no tiers, which the exchange then leaves out, so the untiered
+ * response stays byte-identical. That holds even for a record that stored a tier while tiers were
+ * declared: the data plane runs untiered then and filters nothing, so naming the stored tier would
+ * claim a placement that no longer happens (spec §3.3).
  */
 export function sessionTier(rec: SessionRecord, tiers: CpConfig['sandboxTiers']): string {
-  return rec.sandboxTier || tiers?.default || '';
+  return tiers ? rec.sandboxTier || tiers.default : '';
 }
 
 /**
  * The tier a session view shows (sessionView, projectResources): the tier the session runs in,
- * which is exactly what the exchange names (sessionTier). Null only when the deployment declares no
- * tiers.
+ * which is exactly what the exchange names (sessionTier). Null whenever the deployment declares no
+ * tiers, a stored tier included: the data plane runs untiered then, so no tier is in force.
  */
 export function viewTier(rec: SessionRecord, tiers: CpConfig['sandboxTiers']): string | null {
   return sessionTier(rec, tiers) || null;

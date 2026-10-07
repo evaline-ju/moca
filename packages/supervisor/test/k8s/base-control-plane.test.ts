@@ -10,6 +10,21 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s base: control plane', () => {
     expect(envVar(cp(), 'SH_CREDENTIAL_NAMESPACE')?.value).toBe('moca-credentials');
   });
 
+  it('reads the P6.3 sandbox tier settings from moca-settings (optional)', () => {
+    expect(envVar(cp(), 'SH_SANDBOX_TIERS')).toEqual({
+      name: 'SH_SANDBOX_TIERS',
+      valueFrom: {
+        configMapKeyRef: { name: 'moca-settings', key: 'SH_SANDBOX_TIERS', optional: true },
+      },
+    });
+    expect(envVar(cp(), 'SH_SANDBOX_DEFAULT_TIER')).toEqual({
+      name: 'SH_SANDBOX_DEFAULT_TIER',
+      valueFrom: {
+        configMapKeyRef: { name: 'moca-settings', key: 'SH_SANDBOX_DEFAULT_TIER', optional: true },
+      },
+    });
+  });
+
   it('may touch Secrets in moca-credentials, without list, and nothing about pods', () => {
     const role = find(render('base'), 'Role', 'moca-control-plane-credentials', 'moca-credentials');
     expect(role.rules).toEqual([

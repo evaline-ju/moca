@@ -1,8 +1,8 @@
 # P6 on Kubernetes, slice 3: sandbox tiers and session-to-sandbox affinity — Design
 
-Version: 1.3 — October 2026 (v1.1: corrections from the implementation plan; v1.2: corrections from
-the implementation and its final review; v1.3: corrections from PR 2)
-Status: Proposed
+Version: 1.4 — October 2026 (v1.1: corrections from the implementation plan; v1.2: corrections from
+the implementation and its final review; v1.3: corrections from PR 2; v1.4: corrections from PR 3)
+Status: Implemented — PRs #442, #444 and #454; accepted on the KVM rig and OpenShift 4.20.8 (#425)
 Milestone: **P6.3**, registered in [the milestone registry](README.md). This is slice 3 of epic
 rossoctl/moca#426, issue rossoctl/moca#425.
 Builds on (reuse, no redesign): [P6.1](2026-10-02-p6-on-kubernetes-slice1-design.md) (the P6 stack on
@@ -71,6 +71,22 @@ mocactl change; the deployment paths only set configuration.
    names that same default for such a session (it does not leave the data plane to apply its own),
    so the view and the placement come from one value. A `sandbox` body that is not an object is a
    400 `invalid_request`.
+
+### 0.4 v1.4 corrections
+
+1. **Tiers only on a mixed stack (§7).** `setup-microvm.sh` and `deploy/k8s/setup.sh` set
+   `SH_SANDBOX_TIERS=container,microvm` only when both tiers run, with `SH_SANDBOX_DEFAULT_TIER`
+   defaulting to `container`; a single-tier stack stays untiered. Why: a pre-P6.3
+   worker advertises no tier and a tiered selector excludes it.
+2. **An untiered deployment ignores a stored tier (§3.3).** The exchange omits it and the views
+   show `null`.
+3. **The data plane validates the tier settings at worker boot (§3.4)** and exits 2, like
+   `SH_SANDBOX_DISCOVERY`.
+4. **The env-parity test is two checks (§7, §8):** the k8s manifest test (supervisor and control
+   plane read the same `moca-settings` keys) and `compose.test.sh`. On the VM, `setup-microvm.sh`
+   writes ONE env file loaded by both units.
+5. **`SH_SANDBOX_DEFAULT_TIER` is a sticky `setup.sh` input (§7).**
+6. **A relay restart is not graceful today (§5).** Records are not cleared and no detach marks are written (#453); workers reattach within 1.8–4.7 s, so the intended behaviour (records disappear, 503 in the gap) will arrive with the SIGTERM handler.
 
 ## 1. Scope
 
@@ -153,11 +169,15 @@ tiers`), and `''` is stored.
   `SH_SANDBOX_TIERS`, and a `SH_SANDBOX_TIERS` without a default (unless it names exactly one tier,
   which is then the default).
 - `ExchangeResponse` gains `sandboxTier?: string`: the stored tier, or, for a record stored with
-  `''` or written before this slice (no field), the current default. It is omitted only when the
+  `''` or written before this slice (no field), the current default. It is omitted whenever the
   deployment declares no tiers, so the untiered response is byte-identical to before.
+- **An untiered deployment ignores a stored tier.** A record that stored a tier while tiers were
+  declared keeps it, but once the deployment declares none the data plane runs untiered and
+  filters nothing, so the exchange omits the tier and the views show `null`. Declaring the tiers
+  again brings the stored tier back.
 - Session listings, `GET /v1/sessions/{id}` and `GET /v1/sessions/{id}/resources`
   (`session.sandboxTier`) include `sandboxTier`: the tier the session runs in, by the exchange's
-  rule; `null` only when the deployment declares no tiers.
+  rule; `null` whenever the deployment declares no tiers.
 - `GET /v1/discovery` gains `sandboxTiers: { names: string[]; default: string } | null`.
 - `docs/api/openapi.yaml` and the client spec are updated with all of the above.
 
@@ -171,6 +191,11 @@ tiers`), and `''` is stored.
   `SH_SANDBOX_DEFAULT_TIER`; only on an untiered deployment is there no tier filter. A session turn
   normally carries a tier (the exchange names the default for a session that recorded none, §3.3);
   this fallback covers the unauthenticated and leaf paths above.
+- **The P6 worker validates `SH_SANDBOX_TIERS` and `SH_SANDBOX_DEFAULT_TIER` at boot**
+  (`worker.ts`, `parseSandboxTiers`), with the control plane's startup refusals (§3.3): a
+  duplicate, a bad name, several tiers with no default, or a default outside the list. It exits 2
+  before `ready`, like a bad `SH_SANDBOX_DISCOVERY`. The selection still reads the settings per
+  call; the boot check exists so a typo fails the bring-up, not the first turn.
 
 ### 3.5 Affinity (new, harness)
 
@@ -244,17 +269,17 @@ next turn may not be on the sandbox either of them reported. Closing that race i
 
 ## 5. Failure modes
 
-| Situation                                                    | Behaviour                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Relay restart                                                | On a graceful restart every record disappears (teardown), then the workers re-Hello under the same IDs. Affinity and detach keys are in Redis and untouched. Turns in the gap get 503: `SandboxAffinityPendingError` for a session with affinity, `SandboxPoolEmptyError` for one without. Each session is back on its own sandbox within seconds. A hard-killed relay can leave stale records, which turns may lease until the worker reattaches (pre-existing; not changed by this slice). |
-| Worker or pod restart                                        | P4: the workspace is on host disk and survives. Container tier: the pod returns under the same StatefulSet name, but its workspace is container-local and **lost by the existing design** (`deploy/k8s/base/sandbox.yaml`). Affinity still returns the session to the same ID, and no reset is recorded: the harness cannot see that loss. A documented limit.                                                                                                                               |
-| Host gone for good                                           | 503 for the grace period, then the fallback within the tier, with the reset recorded (§6).                                                                                                                                                                                                                                                                                                                                                                                                   |
-| The session's tier is empty or saturated                     | 503, as today. A session **never** moves to another tier.                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| Reading affinity or the detach key fails                     | The turn fails, as a failed lease read does today. It does not fall back to an unpinned selection: a Redis blip must not scatter sessions across sandboxes.                                                                                                                                                                                                                                                                                                                                  |
-| Writing affinity fails after the lease was taken             | The turn **proceeds**, with a warning. The lease is held and the sandbox is right. The next turn finds the old entry or none, and selects as in §4.                                                                                                                                                                                                                                                                                                                                          |
-| The session's tier is removed from `SH_SANDBOX_TIERS`        | The exchange returns the stored tier; nothing matches it; `SandboxPoolEmptyError`, naming the tier. The control plane does not rewrite stored tiers.                                                                                                                                                                                                                                                                                                                                         |
-| An unlabelled or mislabelled worker                          | Excluded while tiers are declared, with one log line per ID naming its ID and labels — for a missing label and for a label not in `SH_SANDBOX_TIERS` alike. An affine session waiting on it takes the grace path, not `retiered`.                                                                                                                                                                                                                                                            |
-| `SH_SANDBOX_TIERS` differs between control plane and workers | A session's tier may match no record (`SandboxPoolEmptyError`, naming the tier). Every deployment path sets both from one source, and an env-parity test guards it (§7).                                                                                                                                                                                                                                                                                                                     |
+| Situation                                                    | Behaviour                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Relay restart                                                | Records are not cleared today: `systemctl restart sh-relay` and pod restarts on K8s exit without running stream teardown (#453), so presence records remain and detach marks are not written. Workers reattach within 1.8–4.7 s; turns sent in that gap may lease a sandbox not yet re-Hello'd and fail with an in-turn exec error (`no live worker for sandbox '<id>'`), which the model retries. Affinity is unaffected: sessions return to their sandbox ID. The intended behaviour (records disappear, 503 `SandboxAffinityPendingError` in the gap) will land in #453. |
+| Worker or pod restart                                        | P4: the workspace is on host disk and survives. Container tier: the pod returns under the same StatefulSet name, but its workspace is container-local and **lost by the existing design** (`deploy/k8s/base/sandbox.yaml`). Affinity still returns the session to the same ID, and no reset is recorded: the harness cannot see that loss. A documented limit.                                                                                                                                                                                                              |
+| Host gone for good                                           | 503 for the grace period, then the fallback within the tier, with the reset recorded (§6).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| The session's tier is empty or saturated                     | 503, as today. A session **never** moves to another tier.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Reading affinity or the detach key fails                     | The turn fails, as a failed lease read does today. It does not fall back to an unpinned selection: a Redis blip must not scatter sessions across sandboxes.                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Writing affinity fails after the lease was taken             | The turn **proceeds**, with a warning. The lease is held and the sandbox is right. The next turn finds the old entry or none, and selects as in §4.                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| The session's tier is removed from `SH_SANDBOX_TIERS`        | The exchange returns the stored tier; nothing matches it; `SandboxPoolEmptyError`, naming the tier. The control plane does not rewrite stored tiers.                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| An unlabelled or mislabelled worker                          | Excluded while tiers are declared, with one log line per ID naming its ID and labels — for a missing label and for a label not in `SH_SANDBOX_TIERS` alike. An affine session waiting on it takes the grace path, not `retiered`.                                                                                                                                                                                                                                                                                                                                           |
+| `SH_SANDBOX_TIERS` differs between control plane and workers | A session's tier may match no record (`SandboxPoolEmptyError`, naming the tier). Every deployment path sets both from one source, and an env-parity test guards it (§7).                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 **Error mapping.** `SandboxAffinityPendingError` joins `turnErrorStatus`'s NO_CAPACITY set (503) and
 stays retryable in `classifyOutcome`, beside `SandboxPoolSaturatedError` and `SandboxPoolEmptyError`.
@@ -294,26 +319,43 @@ stays retryable in `classifyOutcome`, beside `SandboxPoolSaturatedError` and `Sa
 
 ## 7. Configuration and deployment paths
 
-| Variable                            | Read by                    | Default                 | Meaning                                                                      |
-| ----------------------------------- | -------------------------- | ----------------------- | ---------------------------------------------------------------------------- |
-| `SH_SANDBOX_TIERS`                  | control plane, supervisor  | unset                   | Comma-separated tier names. Unset: no tiers, no filtering.                   |
-| `SH_SANDBOX_DEFAULT_TIER`           | control plane, supervisor  | unset                   | Required with more than one tier; must be one of them.                       |
-| `SH_SANDBOX_AFFINITY_TTL_SECONDS`   | supervisor, relay          | `86400`                 | Affinity and detach-key TTL in seconds. Keep ≥ `SH_WORKSPACE_IDLE`.          |
-| `SH_SANDBOX_AFFINITY_GRACE_SECONDS` | supervisor                 | `60`                    | How long an absent affine sandbox is waited for before fallback, in seconds. |
-| `SANDBOX_TIER`                      | `worker`, `microvm-worker` | `container` / `microvm` | The worker's `moca.dev/tier` label. Empty: no label.                         |
+| Variable                            | Read by                                | Default                 | Meaning                                                                      |
+| ----------------------------------- | -------------------------------------- | ----------------------- | ---------------------------------------------------------------------------- |
+| `SH_SANDBOX_TIERS`                  | control plane, supervisor, worker boot | unset                   | Comma-separated tier names. Unset: no tiers, no filtering.                   |
+| `SH_SANDBOX_DEFAULT_TIER`           | control plane, supervisor, worker boot | unset                   | Required with more than one tier; must be one of them.                       |
+| `SH_SANDBOX_AFFINITY_TTL_SECONDS`   | supervisor, relay                      | `86400`                 | Affinity and detach-key TTL in seconds. Keep ≥ `SH_WORKSPACE_IDLE`.          |
+| `SH_SANDBOX_AFFINITY_GRACE_SECONDS` | supervisor                             | `60`                    | How long an absent affine sandbox is waited for before fallback, in seconds. |
+| `SANDBOX_TIER`                      | `worker`, `microvm-worker`             | `container` / `microvm` | The worker's `moca.dev/tier` label. Empty: no label.                         |
+
+**Tiers only on a mixed stack.** Both setup scripts declare tiers only when both tiers run, and
+leave a single-tier stack untiered: a pre-P6.3 worker advertises no tier, and a tiered selector
+would exclude it.
 
 - **`deploy/vm`, `deploy/compose`:** the env templates gain the variables, unset by default. A
   stack that sets nothing behaves as before, plus affinity.
-- **`deploy/microvm/setup-microvm.sh`:** when it attaches a P4 worker to a co-located P6 stack that
-  also runs containers, it adds `microvm` to `SH_SANDBOX_TIERS` and keeps the existing default.
-  `P4-ON-P6.md`'s "A P4-only host" section and its entry in the limits list are rewritten.
-- **`deploy/k8s/setup.sh`:** derives the tiers from what it deploys (`SH_SANDBOX_COUNT>0` adds
-  `container`, `SH_P4_SANDBOX_IDS` adds `microvm`, default `container` when both), writes them to
-  both the control plane's and the supervisor's settings, and **removes slice 2's
-  one-tier-per-stack guard** (`setup.sh`, the `SH_SANDBOX_COUNT=0` requirement). P6.2's single-host
-  limit is rewritten.
-- An **env-parity test** asserts that every path sets `SH_SANDBOX_TIERS` and
-  `SH_SANDBOX_DEFAULT_TIER` identically for the control plane and the supervisor.
+- **`deploy/microvm/setup-microvm.sh`:** on a mixed host (it attaches a P4 worker to a co-located
+  P6 stack that also runs containers; a stopped `sh-sandbox-*` counts), it writes ONE env file,
+  `microvm-tiers.env`, with `SH_SANDBOX_TIERS=container,microvm` and
+  `SH_SANDBOX_DEFAULT_TIER` set to its `SH_SANDBOX_DEFAULT_TIER` input, else the stored one, else
+  `container`, loaded by drop-ins into both `sh-supervisor` and `sh-control-plane`. A P4-only host
+  stays untiered, and so does a `--remote` host's own P6 (its only P4 worker attaches to the
+  cluster's relay): `--remote` removes the tier files a mixed local run wrote. The default is
+  sticky in `microvm-tiers.env` itself, so going P4-only removes that file and the stored
+  default with it; `deploy/k8s/setup.sh` keeps its default in `moca-setup`, through a
+  single-tier run. `P4-ON-P6.md`'s "A P4-only host"
+  section and its entry in the limits list are rewritten.
+- **`deploy/k8s/setup.sh`:** sets `SH_SANDBOX_TIERS=container,microvm` only when the stack runs
+  both (`SH_SANDBOX_COUNT>0` and `SH_P4_SANDBOX_IDS` non-empty), with `SH_SANDBOX_DEFAULT_TIER`
+  defaulting to `container`; otherwise both settings are `''`. It writes them to
+  `moca-settings`, which the control plane and the supervisor both read, and **removes slice 2's
+  one-tier-per-stack guard** (`setup.sh`, the `SH_SANDBOX_COUNT=0` requirement). P6.2's
+  single-host limit is rewritten. `SH_SANDBOX_DEFAULT_TIER` is a **sticky input**: stored in
+  `moca-setup` and reused when a re-run does not give it.
+- **Env parity** is two checks: the k8s manifest test (the supervisor and the control plane read
+  the same `moca-settings` keys) and `deploy/compose/tests/compose.test.sh`. The
+  `setup-microvm.sh` path needs no third: it writes one env file loaded by both units. A
+  hand-tiered `deploy/vm` stack does not have that file: its units load `control-plane.env` and
+  `supervisor.env` separately, so it must set both variables in both.
 
 ## 8. Testing
 
@@ -327,10 +369,13 @@ stays retryable in `classifyOutcome`, beside `SandboxPoolSaturatedError` and `Sa
   else.
 - **Workers, Go unit.** `SANDBOX_TIER` → `Hello.labels`, the defaults, and the empty value.
 - **Control plane, unit.** Validation at creation, the stored default surviving a later default
-  change, the exchange carrying the tier, an old record getting the default, discovery, the startup
-  refusals.
-- **mocactl, unit.** `--tier`, the picker, the notice for `workspace_reset`, ignoring an unknown
-  frame type.
+  change, the exchange carrying the tier, an old record getting the default, a stored tier ignored
+  once the deployment declares none, discovery, the startup refusals.
+- **Data plane, boot.** `worker-boot.test.ts` forks the real worker: a duplicate tier and a
+  default outside the list each exit 2 before `ready`, naming the variable; a valid pair boots.
+- **Env parity.** The k8s manifest test and `compose.test.sh` (§7).
+- **mocactl, unit.** `--option sandboxTier=…`, the picker, the notice for `workspace_reset`,
+  ignoring an unknown frame type.
 - **Integration, real Redis.** Two fake workers in each of two tiers behind a real relay. Across many
   sessions every turn stays in its tier and on its affine sandbox, and new sessions still spread by
   load. A relay restart mid-run moves no session.
@@ -372,8 +417,8 @@ Three PRs, in order:
    `SandboxAffinityPendingError`, the `workspace_reset` frame, the runtime fields. With
    `SH_SANDBOX_TIERS` unset this is safe on its own, and it fixes the container-tier hop. It does not
    depend on P6.2.
-2. **Control plane and mocactl:** the session's tier, the exchange, discovery, the API docs, `--tier`,
-   the picker, the notice.
+2. **Control plane and mocactl:** the session's tier, the exchange, discovery, the API docs,
+   `--option sandboxTier=…`, the picker, the notice.
 3. **Deployment wiring and docs:** `deploy/vm`, `deploy/compose`, `deploy/microvm`, `deploy/k8s`
    (after P6.2 merges: it edits `setup.sh`), `P4-ON-P6.md`, the README runbook, the env-parity test,
    the Kind smoke claim, and the acceptance runs recorded on rossoctl/moca#425.

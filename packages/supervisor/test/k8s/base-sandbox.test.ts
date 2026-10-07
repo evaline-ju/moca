@@ -15,6 +15,7 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s base: sandboxes and isolation', () => {
     expect(sts().spec.replicas).toBe(2);
     expect(sts().spec.podManagementPolicy).toBe('Parallel');
     expect(envVar(sbx(), 'RELAY_ADDR')?.value).toBe('sandbox-relay-attach.moca.svc:9443');
+    expect(envVar(sbx(), 'SANDBOX_TIER')?.value).toBe('container');
   });
 
   it('holds exactly one secret reference: the attach token', () => {

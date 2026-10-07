@@ -88,9 +88,12 @@ describe.skipIf(NO_KUBECTL)('the generated OCP overlay (setup.sh write_overlay)'
     expect(find(objs, 'StatefulSet', 'moca-sandbox', 'moca-sandbox').spec.replicas).toBe(3);
   });
 
-  it('stamps the settings hash on the control plane pod template', () => {
+  it('stamps the settings hash on the control plane and supervisor pod templates', () => {
     const cp = find(objs, 'Deployment', 'moca-control-plane', 'moca');
     expect(cp.spec.template.metadata.annotations['moca.dev/settings-hash']).toBe(HASH);
+    // The supervisor reads the sandbox tiers from moca-settings too (P6.3), so a change rolls it.
+    const sup = find(objs, 'Deployment', 'moca-supervisor', 'moca');
+    expect(sup.spec.template.metadata.annotations['moca.dev/settings-hash']).toBe(HASH);
   });
 
   it('renders nothing of P4 with no P4 IDs, so the relay matches slice 1', () => {
@@ -161,7 +164,9 @@ describe.skipIf(NO_KUBECTL)(
 describe.skipIf(NO_KUBECTL)(
   'the generated ocp-single overlay with Routes (setup.sh write_overlay)',
   () => {
-    const DIR = resolve(K8S_DIR, '.generated/test-ocp-single-routes');
+    // Not overlay-ocp-single-routes.test.ts's .generated/test-ocp-single-routes: vitest runs the two
+    // files in parallel, and each one's afterAll removes its directory under the other's kustomize.
+    const DIR = resolve(K8S_DIR, '.generated/test-generated-ocp-single-routes');
     const DOMAIN = 'example.test';
     const NS = 'moca-tenant-1';
     let objs: K8sObject[] = [];
@@ -207,6 +212,86 @@ describe.skipIf(NO_KUBECTL)(
       const supervisor = container(find(objs, 'Deployment', 'moca-supervisor', NS), 'supervisor');
       expect(envVar(supervisor, 'SH_RELAY_ADDR')?.value).toBe(`sandbox-relay-exec.${NS}.svc:9444`);
       find(objs, 'Service', 'moca-supervisor-tls', NS); // throws when absent
+    });
+
+    it('stamps the settings hash on both pod templates alongside the routes component', () => {
+      // The routes component and the --tls-secret volume patch both touch moca-supervisor; the
+      // settings-hash "add" must still create the annotations map exactly once and survive them.
+      for (const name of ['moca-control-plane', 'moca-supervisor']) {
+        const d = find(objs, 'Deployment', name, NS);
+        expect(d.spec.template.metadata.annotations, name).toEqual({
+          'moca.dev/settings-hash': HASH,
+        });
+      }
+      const containers = podSpec(find(objs, 'Deployment', 'moca-supervisor', NS)).containers.map(
+        (c: { name: string }) => c.name,
+      );
+      expect(containers).toEqual(expect.arrayContaining(['supervisor', 'tls']));
+    });
+  },
+);
+
+describe.skipIf(NO_KUBECTL)(
+  'the generated ocp-single overlay with a custom namespace (setup.sh write_overlay)',
+  () => {
+    // A custom namespace is the case where write_overlay also emits env patches for the supervisor
+    // and the control plane: the settings-hash patch is a second entry for the same Deployment, and
+    // kustomize must apply both.
+    const SINGLE_DIR = resolve(K8S_DIR, '.generated/test-ocp-single');
+    const NS = 'moca-tenant-1';
+    let objs: K8sObject[] = [];
+    beforeAll(() => {
+      execFileSync('bash', [WRITER, SINGLE_DIR], {
+        env: {
+          ...process.env,
+          GO_TARGET: 'ocp-single',
+          GO_NS: NS,
+          GO_SBX_NS: NS,
+          GO_SANDBOX_COUNT: '2',
+          GO_CLIENT_ID: 'Iv1.generated-overlay-test',
+          GO_SETTINGS_HASH: HASH,
+        },
+        stdio: ['ignore', 'ignore', 'inherit'],
+      });
+      const out = execFileSync('kubectl', ['kustomize', SINGLE_DIR], { encoding: 'utf8' });
+      objs = parseAllDocuments(out)
+        .map((d) => d.toJS() as K8sObject | null)
+        .filter((o): o is K8sObject => o !== null);
+    });
+    afterAll(() => {
+      rmSync(SINGLE_DIR, { recursive: true, force: true });
+    });
+
+    it('stamps the settings hash on both pod templates and keeps their env patches', () => {
+      for (const name of ['moca-control-plane', 'moca-supervisor']) {
+        const d = find(objs, 'Deployment', name, NS);
+        expect(d.spec.template.metadata.annotations, name).toEqual({
+          'moca.dev/settings-hash': HASH,
+        });
+      }
+      const sup = podSpec(find(objs, 'Deployment', 'moca-supervisor', NS)).containers.find(
+        (c: { name: string }) => c.name === 'supervisor',
+      );
+      expect(sup.env).toContainEqual({
+        name: 'SH_RELAY_ADDR',
+        value: `sandbox-relay-exec.${NS}.svc:9444`,
+      });
+      const cp = podSpec(find(objs, 'Deployment', 'moca-control-plane', NS)).containers.find(
+        (c: { name: string }) => c.name === 'control-plane',
+      );
+      expect(cp.env).toContainEqual({ name: 'SH_SANDBOX_NAMESPACE', value: NS });
+    });
+
+    it('keeps the sandbox tiers identical on the supervisor and the control plane through the env patches (P6.3 spec §7)', () => {
+      // The one overlay where write_overlay patches both Deployments' env: a patch that replaced the
+      // env list, or dropped an entry, would split the two (env-parity.test.ts checks base only).
+      const sup = container(find(objs, 'Deployment', 'moca-supervisor', NS), 'supervisor');
+      const cp = container(find(objs, 'Deployment', 'moca-control-plane', NS), 'control-plane');
+      for (const name of ['SH_SANDBOX_TIERS', 'SH_SANDBOX_DEFAULT_TIER']) {
+        expect(envVar(sup, name), `supervisor ${name}`).toBeDefined();
+        expect(envVar(cp, name), `control plane ${name}`).toBeDefined();
+        expect(envVar(sup, name), name).toEqual(envVar(cp, name));
+      }
     });
   },
 );

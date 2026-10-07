@@ -89,6 +89,23 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s base: supervisor', () => {
     });
   });
 
+  it('carries the P6.3 sandbox tier settings from moca-settings and the affinity timings', () => {
+    expect(envVar(sup(), 'SH_SANDBOX_TIERS')).toEqual({
+      name: 'SH_SANDBOX_TIERS',
+      valueFrom: {
+        configMapKeyRef: { name: 'moca-settings', key: 'SH_SANDBOX_TIERS', optional: true },
+      },
+    });
+    expect(envVar(sup(), 'SH_SANDBOX_DEFAULT_TIER')).toEqual({
+      name: 'SH_SANDBOX_DEFAULT_TIER',
+      valueFrom: {
+        configMapKeyRef: { name: 'moca-settings', key: 'SH_SANDBOX_DEFAULT_TIER', optional: true },
+      },
+    });
+    expect(envVar(sup(), 'SH_SANDBOX_AFFINITY_GRACE_SECONDS')?.value).toBe('60');
+    expect(envVar(sup(), 'SH_SANDBOX_AFFINITY_TTL_SECONDS')?.value).toBe('86400');
+  });
+
   it('admits nothing to the data port from the pod network, and the admin port from its own namespace only', () => {
     const p = find(render('base'), 'NetworkPolicy', 'moca-supervisor', 'moca');
     const ports = p.spec.ingress.flatMap((r: { ports: { port: number }[] }) =>

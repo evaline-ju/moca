@@ -101,6 +101,9 @@ describe('sessionTier (P6.3 spec §3.3)', () => {
     expect(sessionTier(base, tiers)).toBe('container');
     expect(sessionTier(base, null)).toBe('');
   });
+  it('a tier stored while tiers were declared is not shown once the deployment stops declaring them: the data plane no longer filters', () => {
+    expect(sessionTier({ ...base, sandboxTier: 'microvm' }, null)).toBe('');
+  });
 });
 
 describe('viewTier: the tier a session view shows', () => {
@@ -125,6 +128,9 @@ describe('viewTier: the tier a session view shows', () => {
   it('is null only when the deployment declares no tiers', () => {
     expect(viewTier({ ...base, sandboxTier: '' }, null)).toBeNull();
     expect(viewTier(base, null)).toBeNull();
+  });
+  it('a tier stored while tiers were declared is not shown once the deployment stops declaring them: the data plane no longer filters', () => {
+    expect(viewTier({ ...base, sandboxTier: 'microvm' }, null)).toBeNull();
   });
 });
 
@@ -174,6 +180,29 @@ describe('exchangeCredential', () => {
       },
     };
     expect((await exchangeCredential(token, tiered)).sandboxTier).toBe('microvm');
+  });
+
+  it('leaves the tier out once the deployment stops declaring tiers, whatever the record stored (P6.3)', async () => {
+    // Created as 'microvm' on a tiered deployment; then the tiers go. The record keeps 'microvm', but
+    // the untiered data plane does not filter on a tier, so the exchange must not name one.
+    const t = makeDeps({
+      config: {
+        exchangeToken: 'shared-abc', // notsecret
+        defaultInferenceEndpoint: undefined,
+        sandboxTiers: { names: ['container', 'microvm'], default: 'container' },
+      },
+    });
+    await seedCredential(t);
+    const created = await HANDLERS.createSession!(
+      ctx({ principal: alice, body: { sandbox: { tier: 'microvm' } } }),
+      { ...t, newId: () => 'sid-fixed' },
+    );
+    const { token } = created.body as { token: string };
+    expect((await t.index.get('sid-fixed'))?.sandboxTier).toBe('microvm');
+    const untiered = { ...t, config: { ...t.config, sandboxTiers: null } };
+    const res = await exchangeCredential(token, untiered);
+    expect(res.sessionId).toBe('sid-fixed');
+    expect(res).not.toHaveProperty('sandboxTier');
   });
 
   it('returns a placeholder, not the real key, whenever the deployment has an injector', async () => {

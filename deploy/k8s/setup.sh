@@ -6,19 +6,22 @@
 #                       [--relay-tls-cert FILE --relay-tls-key FILE] [--tls-secret NAME]
 #
 # Environment: SH_GITHUB_CLIENT_ID, SH_ADMIN_SUBJECTS, SH_ALLOW_OPERATOR_FALLBACK (default false),
-# SH_SANDBOX_COUNT (default 2; 0 runs no container sandboxes), SH_WAIT_SECONDS (default 120),
-# SH_P4_SANDBOX_IDS (ocp only: comma-separated IDs of P4 microVM hosts outside the cluster, each
-# attaching to the relay over TLS; needs SH_SANDBOX_COUNT=0 -- see
-# docs/specs/2026-10-04-p6-on-kubernetes-slice2-design.md), SH_SINGLE_NAMESPACE (ocp-single only:
-# the one namespace everything lands in; default moca-single, must already exist),
+# SH_SANDBOX_COUNT (default 2, at most 4 digits; 0 runs no container sandboxes), SH_WAIT_SECONDS
+# (default 120), SH_P4_SANDBOX_IDS (ocp only: comma-separated IDs of P4 microVM hosts outside the cluster, each
+# attaching to the relay over TLS; with SH_SANDBOX_COUNT>0 too, the stack is tiered
+# (SH_SANDBOX_DEFAULT_TIER, default container; spec P6.3 §7)), SH_SANDBOX_DEFAULT_TIER (container or
+# microvm: the tier a session gets when it names none, on a tiered stack), SH_SINGLE_NAMESPACE
+# (ocp-single only: the one namespace everything lands in; default moca-single, must already exist),
 # SH_ROUTE_DOMAIN (ocp-single only: opt in to Routes -- the public DNS domain whose hosts
 # moca.<domain> and moca-control-plane.<domain> are the Route hostnames; see README §12.5),
 # SH_SOURCE_ONLY=1 (define the functions and stop, for tests).
 #
 # Idempotent: a re-run converges and never rotates a secret. Inputs are sticky: a re-run keeps every
-# setting, --image, --sandbox-image (ocp), SH_SANDBOX_COUNT and SH_P4_SANDBOX_IDS it is not given; an
-# explicitly empty variable (SH_ADMIN_SUBJECTS=) clears it. No secret value is ever put on a command
-# line -- values travel through pipes and through the environment of the one jq that writes each Secret.
+# setting, --image, --sandbox-image (ocp), SH_SANDBOX_COUNT, SH_P4_SANDBOX_IDS,
+# SH_SANDBOX_DEFAULT_TIER (not kind) and, on ocp-single, SH_ROUTE_DOMAIN and --tls-secret it is not
+# given; an explicitly empty variable (SH_ADMIN_SUBJECTS=) clears it. No secret value is ever put on
+# a command line -- values travel through pipes and through the environment of the one jq that
+# writes each Secret.
 set -euo pipefail
 
 K8S_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,6 +45,8 @@ RELAY_TLS_KEY=''
 # P4 sandbox IDs (P6.2), space-separated once normalised; resolved against moca-setup in load_setup_inputs.
 P4_IDS=''
 P4_IDS_GIVEN=''
+# SH_SANDBOX_DEFAULT_TIER was set (even to empty) -- set in parse_args, resolved in load_setup_inputs.
+DEFAULT_TIER_GIVEN=''
 # ocp-single's namespace (README §12), validated in parse_args.
 SINGLE_NS=''
 # ocp-single's optional Routes (README §12.5): the public DNS domain when SH_ROUTE_DOMAIN opted in,
@@ -104,6 +109,14 @@ parse_args() {
   # Normalised and validated here, before anything touches a cluster. Unset means "the earlier run's
   # IDs" (load_setup_inputs); set-but-empty means none.
   P4_IDS_GIVEN="${SH_P4_SANDBOX_IDS+x}"
+  # Same rule for the default tier: unset keeps the earlier run's, set-but-empty clears it. A GIVEN
+  # value is checked here on every target, kind too, before anything touches a cluster (kind stores
+  # none, but a typo should not pass silently); a stored one is checked in load_setup_inputs.
+  DEFAULT_TIER_GIVEN="${SH_SANDBOX_DEFAULT_TIER+x}"
+  case "${SH_SANDBOX_DEFAULT_TIER-}" in
+  '' | container | microvm) ;;
+  *) die "SH_SANDBOX_DEFAULT_TIER='$SH_SANDBOX_DEFAULT_TIER' must be container or microvm" ;;
+  esac
   P4_IDS="$(normalize_p4_ids "${SH_P4_SANDBOX_IDS-}")"
   [[ -z "$P4_IDS" ]] || [[ "$TARGET" == ocp ]] ||
     die "SH_P4_SANDBOX_IDS ($P4_IDS) needs --target ocp: a P4 host outside the cluster reaches the relay through an OpenShift Route, and $TARGET has none"
@@ -133,10 +146,11 @@ parse_args() {
       die "SH_SINGLE_NAMESPACE='$SINGLE_NS' collides with the base's namespace names; pick a dedicated one"
   fi
   # Validated here, before anything touches a cluster; an unset or empty count is resolved later,
-  # from the earlier run's value (load_setup_inputs).
+  # from the earlier run's value (load_setup_inputs). At most 4 digits: $((10#...)) overflows
+  # silently on a longer one, and could come out negative ("not 0", so tiered; negative replicas).
   SH_SANDBOX_COUNT="${SH_SANDBOX_COUNT:-}"
-  [[ -z "$SH_SANDBOX_COUNT" || "$SH_SANDBOX_COUNT" =~ ^[0-9]+$ ]] ||
-    die "SH_SANDBOX_COUNT='$SH_SANDBOX_COUNT' must be a whole number (0 runs no container sandboxes)"
+  [[ -z "$SH_SANDBOX_COUNT" || "$SH_SANDBOX_COUNT" =~ ^[0-9]{1,4}$ ]] ||
+    die "SH_SANDBOX_COUNT='$SH_SANDBOX_COUNT' must be a whole number of at most 4 digits (0 runs no container sandboxes)"
   SH_WAIT_SECONDS="${SH_WAIT_SECONDS:-120}"
 }
 
@@ -271,21 +285,26 @@ normalize_p4_ids() {
   printf '%s' "$out"
 }
 
-# One sandbox tier per stack until slice 3 (#425), spec §4.2: the supervisor re-selects a sandbox on
-# every turn, so a session would hop between a container workspace and a microVM one.
-check_tiers() {
-  [[ -n "$P4_IDS" ]] || return 0
-  [[ "$SH_SANDBOX_COUNT" == 0 ]] ||
-    die "SH_P4_SANDBOX_IDS ($P4_IDS) with SH_SANDBOX_COUNT=$SH_SANDBOX_COUNT: one sandbox tier per stack until slice 3 (#425) -- the supervisor re-selects a sandbox every turn, so sessions would hop between container and microVM workspaces. Re-run with SH_SANDBOX_COUNT=0"
+# Sandbox tiers (P6.3, docs/specs/2026-10-04-p6-on-kubernetes-slice3-design.md §7): a stack with BOTH
+# container sandboxes and P4 hosts is tiered -- each session stays in the tier it was created in.
+# A single-tier stack stays untiered on purpose: a pre-P6.3 worker advertises no tier and a tiered
+# supervisor would exclude it, so tiering it would only risk capacity.
+derive_tiers() {
+  TIERS='' DEFAULT_TIER=''
+  [[ "$SH_SANDBOX_COUNT" != 0 && -n "$P4_IDS" ]] || return 0
+  TIERS='container,microvm'
+  DEFAULT_TIER="${STORED_DEFAULT_TIER:-container}"
+  log "two sandbox tiers (container, microvm; default $DEFAULT_TIER): each session stays in its tier"
 }
 
 # --- Sticky inputs (moca-setup) -------------------------------------------------------------------
 # A re-run is how an operator changes ONE input (README "Re-running"), so it must not reset the ones
 # it is not given: without this, a rotation recipe that sets one variable rolled an OCP stack back to
 # :latest, scaled the sandboxes back to 2 and the control plane to 0. --image, --sandbox-image,
-# SH_SANDBOX_COUNT and SH_P4_SANDBOX_IDS are kept in the non-secret ConfigMap moca-setup and reused
-# when not given. Kind ignores the stored images: it always runs the locally loaded dev.local tags, and
-# --image there only picks what to pull, so only the sandbox count is stored for it.
+# SH_SANDBOX_COUNT, SH_P4_SANDBOX_IDS and SH_SANDBOX_DEFAULT_TIER are kept in the non-secret ConfigMap
+# moca-setup and reused when not given. Kind ignores the stored images: it always runs the locally
+# loaded dev.local tags, and --image there only picks what to pull, so only the sandbox count is
+# stored for it (and kind runs no P4 hosts, so it is never tiered and keeps no default tier).
 load_setup_inputs() {
   local json stored
   json="$(configmap_json moca-setup)"
@@ -296,18 +315,36 @@ load_setup_inputs() {
       stored="$(cm_value "$json" SH_P4_SANDBOX_IDS)"
       P4_IDS="$(normalize_p4_ids "$stored")"
     }
+    # Stored even while the stack has one tier (ocp-single always does), unused until it has two.
+    # Validated here, before moca-setup is written below, so a refused value -- given or stored --
+    # stores nothing.
+    if [[ -n "$DEFAULT_TIER_GIVEN" ]]; then
+      STORED_DEFAULT_TIER="$SH_SANDBOX_DEFAULT_TIER" # parse_args has validated it
+    else
+      STORED_DEFAULT_TIER="$(cm_value "$json" SH_SANDBOX_DEFAULT_TIER)"
+      # A stored value names where it came from, and how to clear it, as the stored count's does.
+      case "$STORED_DEFAULT_TIER" in
+      '' | container | microvm) ;;
+      *) die "ConfigMap moca-setup holds SH_SANDBOX_DEFAULT_TIER='$STORED_DEFAULT_TIER', which must be container or microvm: re-run with SH_SANDBOX_DEFAULT_TIER set to one of them, or set but empty (SH_SANDBOX_DEFAULT_TIER=) to clear it" ;;
+      esac
+    fi
   fi
   [[ -n "$SH_SANDBOX_COUNT" ]] || SH_SANDBOX_COUNT="$(cm_value "$json" SH_SANDBOX_COUNT)"
   [[ -n "$SH_SANDBOX_COUNT" ]] || SH_SANDBOX_COUNT=2
-  [[ "$SH_SANDBOX_COUNT" =~ ^[0-9]+$ ]] ||
-    die "moca-setup holds SH_SANDBOX_COUNT='$SH_SANDBOX_COUNT': re-run with SH_SANDBOX_COUNT set to a whole number"
-  check_tiers
+  [[ "$SH_SANDBOX_COUNT" =~ ^[0-9]{1,4}$ ]] ||
+    die "moca-setup holds SH_SANDBOX_COUNT='$SH_SANDBOX_COUNT': re-run with SH_SANDBOX_COUNT set to a whole number of at most 4 digits"
+  # Normalised once, so every later comparison may be a string one: 00 is 0 (no container
+  # sandboxes, so untiered), and 08 is 8, not an octal error.
+  SH_SANDBOX_COUNT=$((10#$SH_SANDBOX_COUNT))
+  derive_tiers
   local data
   if is_kind; then
     data="$(jq -nc --arg n "$SH_SANDBOX_COUNT" '{SH_SANDBOX_COUNT: $n}')"
   else
     data="$(jq -nc --arg n "$SH_SANDBOX_COUNT" --arg i "$IMAGE" --arg s "$SANDBOX_IMAGE" --arg p "${P4_IDS// /,}" \
-      '{SH_SANDBOX_COUNT: $n, IMAGE: $i, SANDBOX_IMAGE: $s, SH_P4_SANDBOX_IDS: $p} | with_entries(select(.value != ""))')"
+      --arg t "$STORED_DEFAULT_TIER" \
+      '{SH_SANDBOX_COUNT: $n, IMAGE: $i, SANDBOX_IMAGE: $s, SH_P4_SANDBOX_IDS: $p, SH_SANDBOX_DEFAULT_TIER: $t}
+        | with_entries(select(.value != ""))')"
   fi
   # ocp-single adds its namespace, so a later smoke.sh finds it without being told
   # (smoke.sh reads this key to pick its own -n). SH_ROUTE_DOMAIN is sticky the same way as every
@@ -524,6 +561,12 @@ SUP_HOST=''
 CP_HOST=''
 RELAY_HOST=''
 SETTINGS_HASH=''
+# The sandbox tiers (derive_tiers): both '' on a single-tier stack. STORED_DEFAULT_TIER is the sticky
+# SH_SANDBOX_DEFAULT_TIER input as resolved by load_setup_inputs (possibly ''); DEFAULT_TIER is what
+# moca-settings gets.
+TIERS=''
+DEFAULT_TIER=''
+STORED_DEFAULT_TIER=''
 GEN_DIR=''
 RELAY_CA="$K8S_DIR/.generated/ocp/moca-relay-ca.crt"
 P4_BUNDLES="$K8S_DIR/.generated/ocp/p4"
@@ -558,14 +601,17 @@ sha256() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi | cut -d' ' -f1
 }
 
-# Non-secret settings, read by the control plane through configMapKeyRef. Env from a ConfigMap is read
-# only at container start, so write_overlay stamps SETTINGS_HASH on the control plane's pod template:
-# a change rolls it through the apply itself. Nothing remembers "changed" between runs, so a run that
-# writes new settings and then fails cannot lose the roll -- the next run renders the same new hash.
+# Non-secret settings, read by the control plane (and the tiers by the supervisor too) through
+# configMapKeyRef. Env from a ConfigMap is read only at container start, so write_overlay stamps
+# SETTINGS_HASH on both pod templates: a change rolls them through the apply itself. Nothing
+# remembers "changed" between runs, so a run that writes new settings and then fails cannot lose the
+# roll -- the next run renders the same new hash.
 #
 # Sticky: each input variable that is UNSET keeps the value moca-settings already holds; one that is
 # set, even to empty (SH_ADMIN_SUBJECTS=), replaces it. SH_PUBLIC_HARNESS_URL is not an input: it is
-# derived from the target (and the Route host) on every run.
+# derived from the target (and the Route host) on every run; nor are SH_SANDBOX_TIERS and
+# SH_SANDBOX_DEFAULT_TIER, which derive_tiers derives from the stack (its sticky input lives in
+# moca-setup). They are written even when '' so every stack hashes the same six keys.
 write_settings() {
   local before after admins fb
   before="$(configmap_json moca-settings)"
@@ -578,8 +624,9 @@ write_settings() {
   if [[ -n "${SH_ALLOW_OPERATOR_FALLBACK+x}" ]]; then fb="$SH_ALLOW_OPERATOR_FALLBACK"; else fb="$(cm_value "$before" SH_ALLOW_OPERATOR_FALLBACK)"; fi
   fb="${fb:-false}"
   after="$(jq -ncS --arg id "$CLIENT_ID" --arg admins "$admins" --arg url "$(public_harness_url)" \
-    --arg fb "$fb" \
-    '{SH_GITHUB_CLIENT_ID: $id, SH_ADMIN_SUBJECTS: $admins, SH_PUBLIC_HARNESS_URL: $url, SH_ALLOW_OPERATOR_FALLBACK: $fb}')"
+    --arg fb "$fb" --arg tiers "$TIERS" --arg dtier "$DEFAULT_TIER" \
+    '{SH_GITHUB_CLIENT_ID: $id, SH_ADMIN_SUBJECTS: $admins, SH_PUBLIC_HARNESS_URL: $url, SH_ALLOW_OPERATOR_FALLBACK: $fb,
+      SH_SANDBOX_TIERS: $tiers, SH_SANDBOX_DEFAULT_TIER: $dtier}')"
   jq -n --arg ns "$NS" --argjson data "$after" \
     '{apiVersion: "v1", kind: "ConfigMap", metadata: {name: "moca-settings", namespace: $ns}, data: $data}' |
     kc apply --server-side --force-conflicts --field-manager=moca-setup -f - >/dev/null
@@ -791,6 +838,11 @@ write_overlay() {
     # base/control-plane.yaml's pod template has no annotations, so "add" creates the map.
     printf '  - target: { kind: Deployment, name: moca-control-plane }\n    patch: |-\n      - { op: replace, path: /spec/replicas, value: %s }\n' "$cp_replicas"
     printf '      - { op: add, path: /spec/template/metadata/annotations, value: { moca.dev/settings-hash: "%s" } }\n' "$SETTINGS_HASH"
+    # The supervisor reads the tiers from moca-settings too (base/supervisor.yaml); roll it on a change.
+    # Its pod template has no annotations in any overlay either, ocp-single's supervisor entry below
+    # patches only env, and ocp-single's routes component (and the --tls-secret volume patch) touch
+    # only the containers and volumes, so this stays the one "add" of the map.
+    printf '  - target: { kind: Deployment, name: moca-supervisor }\n    patch: |-\n      - { op: add, path: /spec/template/metadata/annotations, value: { moca.dev/settings-hash: "%s" } }\n' "$SETTINGS_HASH"
     printf '  - target: { kind: StatefulSet, name: moca-sandbox }\n    patch: |-\n      - { op: replace, path: /spec/replicas, value: %s }\n' "$SH_SANDBOX_COUNT"
     if [[ "$TARGET" == ocp ]]; then
       printf '  - target: { kind: Route, name: moca }\n    patch: |-\n      - { op: replace, path: /spec/host, value: %s }\n' "$SUP_HOST"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # deploy/microvm/p4-turn-smoke.sh
 #
-# Drives real harness turns through the P6 supervisor on a P4-only host and checks that they ran in
+# Drives real harness turns through the P6 supervisor on a P4 host and checks that they ran in
 # microVMs (#369 acceptance). Needs the supervisor pointed at a model that follows the P4-SMOKE-*
 # scripts -- deploy/microvm/mock-anthropic.mjs via SH_MODEL_CUSTOM/SH_MODEL_BASE_URL (P4-ON-P6.md).
 # By default it posts unauthenticated /turn calls, for a P6 install with SH_REQUIRE_AUTH=false.
@@ -12,6 +12,12 @@
 # XDG_CONFIG_HOME, and stores a bearer inference credential that points at the loopback mock model.
 # Session B belongs to a second subject. The token is written by node straight into 0600 files, never
 # onto an argv or into a shell variable.
+#
+# A TIERED host (P6.3: container sandboxes too, so setup-microvm.sh wrote $SH_ENV_DIR/microvm-tiers.env)
+# runs each session in the tier it was created in. With --auth every session this driver creates asks
+# for the microvm tier (--option sandboxTier=microvm). Without --auth a turn carries no session token,
+# so it runs in the process default tier (spec §3.4): that file must say SH_SANDBOX_DEFAULT_TIER=microvm.
+# An untiered host must be P4-only, as before: there every sandbox would be a candidate.
 #
 # The /turn contract it relies on (packages/knative-server/src/server.ts, harness/src/run-turn.ts):
 #   - a NEW session is created by omitting sessionId; the response names it. A sessionId the backend
@@ -39,6 +45,11 @@ FAILURE_PATHS=0
 # (deploy/vm/setup-vm.sh's SH_CRED_DIR), the client, and where the stored credential sends the model.
 : "${MOCA_ROOT:=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 : "${MOCA_CRED_DIR:=/etc/serverless-harness/credentials}"
+# setup-microvm.sh's env dir: microvm-tiers.env there marks a tiered host.
+: "${SH_ENV_DIR:=/etc/serverless-harness}"
+TIERS_ENV="$SH_ENV_DIR/microvm-tiers.env"
+TIERED=0
+[ -f "$TIERS_ENV" ] && TIERED=1
 # MOCACTL, if set, is a command line split on whitespace; unset, it is the checkout's own mocactl, kept
 # as an array so a checkout path with a space in it still works.
 if [ -n "${MOCACTL:-}" ]; then read -ra MOCACTL_CMD <<<"$MOCACTL"
@@ -85,6 +96,16 @@ check() { if [ "$2" = "$3" ]; then echo "  ok: $1" | tee -a "$OUT/SUMMARY"; else
 json_field() {
   node -e 'try { const v = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))[process.argv[2]];
     process.stdout.write(typeof v === "string" ? v : "") } catch {}' "$1" "$2"
+}
+# env_file_value <key> <file>: the last <key>= value, one pair of surrounding quotes stripped the way
+# systemd's EnvironmentFile= strips them (setup-microvm.sh's env_value).
+env_file_value() {
+  local v
+  v="$( (grep -E "^$1=" "$2" 2>/dev/null || true) | tail -1 | cut -d= -f2-)"
+  if ((${#v} >= 2)); then
+    case "$v" in \"*\") v="${v#\"}"; v="${v%\"}" ;; \'*\') v="${v#\'}"; v="${v%\'}" ;; esac
+  fi
+  printf '%s' "$v"
 }
 # login_as <subject>: the api token a device-flow login would return, minted with the control plane's
 # own key, written as mocactl's auth.json under $OUT/xdg-<subject> and as a curl header file. Both
@@ -133,6 +154,8 @@ turn_mocactl() {
   local dir="$OUT/xdg-${4:-a}" rc bound=()
   local args=(run "$3" --control-plane-url "$CP" --harness-url "$SUP")
   if [ -n "$2" ]; then args+=(--session "$2"); else args+=(--option "inferenceCredential=$SMOKE_CREDENTIAL"); fi
+  # A session keeps the tier it was created in, so only a new one names it.
+  if [ -z "$2" ] && [ "$TIERED" = 1 ]; then args+=(--option sandboxTier=microvm); fi
   # A hung turn must end the check, not the driver. timeout(1) is coreutils (the rig has it); without
   # it the turn is unbounded.
   # --foreground keeps mocactl in the driver's process group, so a Ctrl-C on the driver reaches it
@@ -188,8 +211,17 @@ running_vm() {
 echo "== preconditions" | tee "$OUT/SUMMARY"
 check "the microVM worker is in the pool" \
   "$(podman exec sh-redis redis-cli HEXISTS sh:sandbox:records "$MICROVM_SANDBOX_ID")" "1"
-check "no container sandbox exists (P4-only host)" \
-  "$(podman ps -a --format '{{.Names}}' --filter 'name=^sh-sandbox-' | wc -l | tr -d ' ')" "0"
+if [ "$TIERED" = 1 ]; then
+  check "the host is tiered (container, microvm)" "$(env_file_value SH_SANDBOX_TIERS "$TIERS_ENV")" "container,microvm"
+  # --auth names the tier on every session it creates; an unauthenticated turn gets the default.
+  if [ "$AUTH" != 1 ]; then
+    check "unauthenticated turns run in the default tier, so $TIERS_ENV must set SH_SANDBOX_DEFAULT_TIER=microvm (else use --auth, or re-run setup-microvm.sh with SH_SANDBOX_DEFAULT_TIER=microvm)" \
+      "$(env_file_value SH_SANDBOX_DEFAULT_TIER "$TIERS_ENV")" "microvm"
+  fi
+else
+  check "no container sandbox exists (P4-only host)" \
+    "$(podman ps -a --format '{{.Names}}' --filter 'name=^sh-sandbox-' | wc -l | tr -d ' ')" "0"
+fi
 
 if [ "$AUTH" = 1 ]; then
   echo "== control plane: two subjects, each a stand-in for mocactl login" | tee -a "$OUT/SUMMARY"
