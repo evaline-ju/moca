@@ -46,15 +46,12 @@ export class BundleDigestMismatchError extends Error {
  * identical content and the write is skipped. Verify the digest matches the tar first to prevent
  * key poisoning: a mismatched pair blocks any correct write under that digest for 30 days.
  */
-export async function putBundle(
-  redis: BundleRedisLike,
-  digest: string,
-  tar: Buffer,
-  ttlSeconds: number = DEFAULT_BUNDLE_TTL_SECONDS,
-  /** Called for a NEW digest only, with the length of the value about to be stored; throw to refuse. */
-  admit?: (storedBytes: number) => Promise<void>,
-): Promise<{ uploaded: boolean }> {
-  // Verify digest matches tar before anything else
+/**
+ * Verify `tar` against `digest` and return the exact string `putBundle` stores for it: the verified
+ * content only, re-canonicalised (no `lockfile.json`, no trailing data), so the stored bytes are a
+ * function of the digest and the first uploader cannot pin anything unchecked for everyone.
+ */
+export function prepareBundle(digest: string, tar: Buffer): string {
   let content: ReturnType<typeof untar>;
   try {
     content = untar(tar).filter((e) => e.path !== LOCKFILE_PATH);
@@ -63,17 +60,22 @@ export async function putBundle(
   }
   const actual = contentDigest(content);
   if (actual !== digest) throw new BundleDigestMismatchError(digest, actual);
+  return gzipSync(canonicalTar(content)).toString('base64');
+}
 
+export async function putBundle(
+  redis: BundleRedisLike,
+  digest: string,
+  tar: Buffer,
+  ttlSeconds: number = DEFAULT_BUNDLE_TTL_SECONDS,
+): Promise<{ uploaded: boolean }> {
+  const value = prepareBundle(digest, tar);
   const key = bundleKey(digest);
   if ((await redis.exists(key)) > 0) {
     // Refresh TTL on skip: re-promotion must not let bundles age out while in active use
     await redis.expire(key, ttlSeconds);
     return { uploaded: false };
   }
-  // Only the verified content, re-canonicalised: the stored bytes are a function of the digest, so
-  // the first uploader cannot pin an unchecked lockfile.json or trailing data for everyone.
-  const value = gzipSync(canonicalTar(content)).toString('base64');
-  await admit?.(value.length);
   await redis.set(key, value, { EX: ttlSeconds });
   return { uploaded: true };
 }

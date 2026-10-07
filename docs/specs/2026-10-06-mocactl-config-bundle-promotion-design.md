@@ -153,8 +153,10 @@ POST /v1/config-bundles   auth: api   sessionScoped: false   operationId: 'putCo
   `BundleDigestMismatchError` maps to `400 { error: 'digest_mismatch' }`.
 - **Response:** `201 { digest, uploaded }` — `uploaded: false` means the digest already existed and
   only its TTL was refreshed.
-- **Byte budget.** A NEW digest is charged its stored size (the gzip+base64 value) to the subject
-  that first stored it; one over the subject's `SH_BUNDLE_SUBJECT_BYTES` (32 MiB) or the deployment's
+- **Byte budget.** A NEW digest is charged its stored size (the gzip+base64 value, floored at
+  4 KiB for its key and index overhead) to the subject that first stored it; admit, charge and store
+  are serialized in-process (the control plane runs as a single replica), and the charge is recorded
+  before the store and rolled back if it fails; one over the subject's `SH_BUNDLE_SUBJECT_BYTES` (32 MiB) or the deployment's
   `SH_BUNDLE_TOTAL_BYTES` (64 MiB) is refused with `429 bundle_quota_exceeded`. Re-uploading a stored
   digest is free. Entries (zsets `sh:cp:bundles:all` and `sh:cp:bundles:owner:<subjectHash>`, scored
   by expiry, plus hash `sh:cp:bundles:meta`) age out with the bundle's TTL.

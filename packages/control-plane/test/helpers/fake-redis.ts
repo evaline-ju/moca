@@ -135,6 +135,10 @@ export function fakeBundleRedis(): BundleRedisLike &
         .sort((a, b) => a[1] - b[1])
         .map(([v]) => v);
     },
+    async zRem(key, member) {
+      z(key).delete(member);
+      return 1;
+    },
     async zRemRangeByScore(key, min, max) {
       for (const [v, score] of z(key)) if (inRange(score, min, max)) z(key).delete(v);
       return 1;

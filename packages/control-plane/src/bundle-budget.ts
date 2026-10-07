@@ -15,6 +15,7 @@ export interface BundleBudgetRedisLike {
     opts: { BY: 'SCORE' },
   ): Promise<string[]>;
   zRemRangeByScore(key: string, min: number | string, max: number | string): Promise<unknown>;
+  zRem(key: string, member: string): Promise<unknown>;
   hSet(key: string, values: Record<string, string>): Promise<unknown>;
   hmGet(key: string, fields: string[]): Promise<(string | null)[]>;
   hDel(key: string, fields: string[]): Promise<unknown>;
@@ -29,6 +30,12 @@ export const BUNDLES_ALL_KEY = 'sh:cp:bundles:all';
 export const BUNDLES_META_KEY = 'sh:cp:bundles:meta';
 const ownerZsetFor = (hash: string): string => `sh:cp:bundles:owner:${hash}`;
 export const bundleOwnerKey = (subject: string): string => ownerZsetFor(subjectHash(subject));
+
+/**
+ * The least a bundle is charged. A tiny bundle's value is ~100 B but its key, TTL, meta field and two
+ * zset members cost Redis ~700-800 B, and each upload sums every live entry, so the floor bounds N.
+ */
+export const MIN_BUNDLE_CHARGE_BYTES = 4096;
 
 export interface BundleBudgetLimits {
   subjectBytes: number;
@@ -46,7 +53,7 @@ function parseMeta(raw: string | null): { bytes: number; owner: string } | null 
 
 /**
  * Refuse a NEW digest of `bytes` stored bytes that would take `subject` or the deployment past its
- * budget. Two concurrent uploads can both pass and overshoot by at most one bundle each; no lock.
+ * budget. Only sound under `withBundleLock`: admit, record and store must not interleave.
  */
 export async function admitBundle(
   redis: BundleBudgetRedisLike,
@@ -127,4 +134,27 @@ export async function touchBundle(
 ): Promise<void> {
   await redis.expire(bundleKey(digest), DEFAULT_BUNDLE_TTL_SECONDS);
   await refreshBundle(redis, digest, nowMs);
+}
+
+let tail: Promise<unknown> = Promise.resolve();
+
+/**
+ * Run `fn` after every earlier caller's has settled. In-process only: this assumes the control plane
+ * runs as a single replica (deploy/k8s renders 0 or 1), so one queue serializes every budget write.
+ */
+export function withBundleLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = tail.then(fn, fn);
+  tail = run.catch(() => undefined);
+  return run;
+}
+
+/** Undo `recordBundle` for a digest whose SET failed. */
+export async function unrecordBundle(
+  redis: BundleBudgetRedisLike,
+  subject: string,
+  digest: string,
+): Promise<void> {
+  await redis.zRem(BUNDLES_ALL_KEY, digest);
+  await redis.zRem(bundleOwnerKey(subject), digest);
+  await redis.hDel(BUNDLES_META_KEY, [digest]);
 }

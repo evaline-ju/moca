@@ -10,7 +10,12 @@ import {
   DEFAULT_BUNDLE_TTL_SECONDS,
   MAX_BUNDLE_BYTES,
 } from '@moca/config-bundle';
-import { bundleOwnerKey } from '../src/bundle-budget.js';
+import {
+  BUNDLES_ALL_KEY,
+  BUNDLES_META_KEY,
+  bundleOwnerKey,
+  MIN_BUNDLE_CHARGE_BYTES,
+} from '../src/bundle-budget.js';
 import { statusFor } from '../src/errors.js';
 import { HANDLERS } from '../src/handlers.js';
 import { buildHandler } from '../src/server.js';
@@ -208,13 +213,72 @@ describe('POST /v1/config-bundles byte budget', () => {
       bundleKey(body.digest),
     )!.length;
   }
+  /** What the budget charges: the stored length, floored for key and index overhead. */
+  const charge = async (body: Body) => Math.max(await storedBytes(body), MIN_BUNDLE_CHARGE_BYTES);
   const put = (d: ReturnType<typeof makeDeps>, principal: typeof alice, body: Body) =>
     HANDLERS.putConfigBundle!(ctx({ principal, body }), d);
+
+  it('charges a tiny bundle the 4 KiB floor, so the subject budget fills after budget/4096', async () => {
+    const d = makeDeps({
+      config: { bundleSubjectBytes: 5 * MIN_BUNDLE_CHARGE_BYTES, bundleTotalBytes: 1 << 30 },
+    });
+    for (let i = 0; i < 5; i++) {
+      expect((await put(d, alice, bundle(`tiny-${i}`))).body).toMatchObject({ uploaded: true });
+    }
+    await expect(put(d, alice, bundle('tiny-5'))).rejects.toMatchObject({
+      code: 'bundle_quota_exceeded',
+    });
+  });
+
+  it('serializes concurrent new uploads: exactly the ones that fit succeed', async () => {
+    const d = makeDeps({
+      config: { bundleSubjectBytes: 3 * MIN_BUNDLE_CHARGE_BYTES, bundleTotalBytes: 1 << 30 },
+    });
+    const bodies = Array.from({ length: 8 }, (_, i) => bundle(`par-${i}`));
+    const results = await Promise.allSettled(bodies.map((b) => put(d, alice, b)));
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(3);
+    const refused = results.filter((r) => r.status === 'rejected');
+    expect(refused).toHaveLength(5);
+    for (const r of refused) {
+      expect((r as PromiseRejectedResult).reason).toMatchObject({ code: 'bundle_quota_exceeded' });
+    }
+    expect((d.bundles as unknown as FakeBundles).store.size).toBe(3);
+  });
+
+  it('charges before storing and rolls the charge back when the SET fails', async () => {
+    const d = makeDeps();
+    const fake = d.bundles as unknown as FakeBundles;
+    const seenAtSet: number[] = [];
+    d.bundles.set = async () => {
+      seenAtSet.push(fake.zsets.get(BUNDLES_ALL_KEY)?.size ?? 0);
+      throw new Error('OOM command not allowed');
+    };
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    onTestFinished(() => log.mockRestore());
+    const body = bundle('rollback');
+    expect(await codeOf(() => put(d, alice, body))).toBe('redis_unavailable');
+    expect(seenAtSet).toEqual([1]);
+    expect(fake.zsets.get(BUNDLES_ALL_KEY)?.size ?? 0).toBe(0);
+    expect(fake.zsets.get(bundleOwnerKey(alice.sub))?.size ?? 0).toBe(0);
+    expect(fake.hashes.get(BUNDLES_META_KEY)?.size ?? 0).toBe(0);
+  });
+
+  it('stores nothing when recording the charge fails', async () => {
+    const d = makeDeps();
+    const fake = d.bundles as unknown as FakeBundles;
+    d.bundles.hSet = async () => {
+      throw new Error('ECONNRESET');
+    };
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    onTestFinished(() => log.mockRestore());
+    expect(await codeOf(() => put(d, alice, bundle('norecord')))).toBe('redis_unavailable');
+    expect(fake.store.size).toBe(0);
+  });
 
   it('refuses a new digest that would exceed the per-subject budget, naming it', async () => {
     const a = bundle('a');
     const b = bundle('b');
-    const limit = (await storedBytes(a)) + (await storedBytes(b)) - 1;
+    const limit = (await charge(a)) + (await charge(b)) - 1;
     const d = makeDeps({ config: { bundleSubjectBytes: limit, bundleTotalBytes: 1 << 30 } });
     await put(d, alice, a);
     await expect(put(d, alice, b)).rejects.toMatchObject({
@@ -228,7 +292,7 @@ describe('POST /v1/config-bundles byte budget', () => {
   it('refuses a new digest that would exceed the global budget across subjects', async () => {
     const a = bundle('a');
     const b = bundle('b');
-    const limit = (await storedBytes(a)) + (await storedBytes(b)) - 1;
+    const limit = (await charge(a)) + (await charge(b)) - 1;
     const d = makeDeps({ config: { bundleSubjectBytes: 1 << 30, bundleTotalBytes: limit } });
     await put(d, alice, a);
     await expect(put(d, bob, b)).rejects.toMatchObject({
@@ -243,7 +307,7 @@ describe('POST /v1/config-bundles byte budget', () => {
 
   it('always accepts a re-upload of a stored digest, at a full budget, by anyone', async () => {
     const a = bundle('a');
-    const size = await storedBytes(a);
+    const size = await charge(a);
     const d = makeDeps({ config: { bundleSubjectBytes: size, bundleTotalBytes: size } });
     expect((await put(d, alice, a)).body).toMatchObject({ uploaded: true });
     expect((await put(d, alice, a)).body).toMatchObject({ uploaded: false });
@@ -258,7 +322,7 @@ describe('POST /v1/config-bundles byte budget', () => {
   it('stops counting a bundle once its TTL has passed', async () => {
     const a = bundle('a');
     const b = bundle('b');
-    const limit = (await storedBytes(a)) + (await storedBytes(b)) - 1;
+    const limit = (await charge(a)) + (await charge(b)) - 1;
     let now = NOW_MS;
     const d = makeDeps({
       config: { bundleSubjectBytes: limit, bundleTotalBytes: limit },
@@ -273,7 +337,7 @@ describe('POST /v1/config-bundles byte budget', () => {
   it('a re-upload refreshes the budget entry, so it keeps counting', async () => {
     const a = bundle('a');
     const b = bundle('b');
-    const limit = (await storedBytes(a)) + (await storedBytes(b)) - 1;
+    const limit = (await charge(a)) + (await charge(b)) - 1;
     let now = NOW_MS;
     const d = makeDeps({
       config: { bundleSubjectBytes: limit, bundleTotalBytes: 1 << 30 },

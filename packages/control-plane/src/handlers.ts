@@ -2,15 +2,19 @@ import {
   assertValidDigest,
   BundleDigestMismatchError,
   bundleKey,
+  DEFAULT_BUNDLE_TTL_SECONDS,
   MAX_BUNDLE_BYTES,
-  putBundle,
+  prepareBundle,
   type BundleRedisLike,
 } from '@moca/config-bundle';
 import {
   admitBundle,
+  MIN_BUNDLE_CHARGE_BYTES,
   recordBundle,
   refreshBundle,
   touchBundle,
+  unrecordBundle,
+  withBundleLock,
   type BundleBudgetRedisLike,
 } from './bundle-budget.js';
 import { CpError } from './errors.js';
@@ -228,19 +232,37 @@ async function storeConfigBundle(
     );
   }
   let uploaded: boolean;
-  let storedBytes = 0;
   const nowMs = deps.now();
   const limits = {
     subjectBytes: deps.config.bundleSubjectBytes,
     totalBytes: deps.config.bundleTotalBytes,
   };
+  const key = bundleKey(digest);
+  /** A stored digest is free: refresh it and report it unchanged. */
+  const refreshed = async () => {
+    if ((await deps.bundles.exists(key)) === 0) return false;
+    await deps.bundles.expire(key, DEFAULT_BUNDLE_TTL_SECONDS);
+    await refreshBundle(deps.bundles, digest, nowMs);
+    return true;
+  };
   try {
-    ({ uploaded } = await putBundle(deps.bundles, digest, tar, undefined, async (bytes) => {
-      storedBytes = bytes;
-      await admitBundle(deps.bundles, limits, p.sub, bytes, nowMs);
-    }));
-    if (uploaded) await recordBundle(deps.bundles, p.sub, digest, storedBytes, nowMs);
-    else await refreshBundle(deps.bundles, digest, nowMs);
+    const value = prepareBundle(digest, tar);
+    uploaded =
+      !(await refreshed()) &&
+      (await withBundleLock(async () => {
+        if (await refreshed()) return false; // stored by a concurrent upload while we queued
+        const charged = Math.max(value.length, MIN_BUNDLE_CHARGE_BYTES);
+        await admitBundle(deps.bundles, limits, p.sub, charged, nowMs);
+        // Charged before the SET, so a stored bundle is never left uncharged.
+        await recordBundle(deps.bundles, p.sub, digest, charged, nowMs);
+        try {
+          await deps.bundles.set(key, value, { EX: DEFAULT_BUNDLE_TTL_SECONDS });
+        } catch (err) {
+          await unrecordBundle(deps.bundles, p.sub, digest).catch(() => undefined);
+          throw err;
+        }
+        return true;
+      }));
   } catch (err) {
     if (err instanceof CpError) throw err;
     if (err instanceof BundleDigestMismatchError) throw new CpError('digest_mismatch', err.message);
