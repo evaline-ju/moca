@@ -29,6 +29,15 @@ function setup(cp = cpWith('a'), over: Partial<Parameters<typeof NewSessionOverl
 }
 
 describe('NewSessionOverlay', () => {
+  it('shows a pending config bundle as an info line', async () => {
+    const { lastFrame } = setup(cpWith('a', 'b'), {
+      bundle: { digest: 'sha256:' + 'a'.repeat(64), skills: 2, dropped: 1 },
+    });
+    await tick();
+    expect(lastFrame()).toContain('config bundle sha256:aaaaaaaaaaaa');
+    expect(lastFrame()).toContain('2 skills, 1 dropped');
+  });
+
   it('creates straight away with a single credential', async () => {
     const { onCreate, lastFrame } = setup();
     await waitFor(() => onCreate.mock.calls.length > 0, 1000, lastFrame);

@@ -1,5 +1,7 @@
 import { EventEmitter } from 'node:events';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { render as inkRender } from 'ink';
 import { render } from 'ink-testing-library';
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
@@ -255,6 +257,85 @@ describe('App', () => {
     expect(all()).toContain('› hi there');
     expect(frame()).toContain('hi there'); // the auto title, in the status line
     expect(loadConfig(rt.paths).config.lastUsed).toEqual({ inferenceCredential: 'anthropic' });
+  });
+
+  const skillsDir = () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mocactl-app-promote-'));
+    mkdirSync(join(dir, '.claude/skills/hello'), { recursive: true });
+    writeFileSync(
+      join(dir, '.claude/skills/hello/SKILL.md'),
+      '---\nname: hello\ndescription: d\n---\nx\n',
+    );
+    return dir;
+  };
+
+  it('/promote attaches the bundle to the next session only', async () => {
+    const dir = skillsDir();
+    const created: Array<{ configRef?: string }> = [];
+    const rt = testRuntime({
+      cp: fakeControlPlane({
+        listCredentials: async () => [credential('anthropic')],
+        createSession: async (req) => (
+          created.push(req),
+          { sessionId: `s-${created.length}`, token: 'st', expiresAt: 4_000_000_000 }
+        ),
+      }),
+      harness: fakeHarness([{ frames: [doneFrame('s-1')] }, { frames: [doneFrame('s-2')] }]),
+    });
+    const { stdin, all, frame, until, ready } = mount(rt);
+    await ready();
+    await send(stdin, `/promote ${dir}`);
+    await until(() => all().includes('config bundle sha256:'));
+    await until(() => created.length === 1);
+    expect(created[0]!.configRef).toMatch(/^sha256:/);
+    await until(() => !frame().includes('New session'));
+    await tick();
+    await send(stdin, '/new');
+    await until(() => created.length === 2);
+    expect(created[1]!.configRef).toBeUndefined();
+  });
+
+  it('/promote --clear drops the pending bundle without creating a session', async () => {
+    const dir = skillsDir();
+    const created: Array<{ configRef?: string }> = [];
+    const rt = testRuntime({
+      cp: fakeControlPlane({
+        listCredentials: async () => [credential('a'), credential('b')],
+        createSession: async (req) => (
+          created.push(req),
+          { sessionId: `s-${created.length}`, token: 'st', expiresAt: 4_000_000_000 }
+        ),
+      }),
+    });
+    const { stdin, frame, until, ready } = mount(rt);
+    await ready();
+    await send(stdin, `/promote ${dir}`);
+    await until(() => frame().includes('config bundle sha256:') && frame().includes('Inference'));
+    await tick();
+    stdin.write(KEY.escape);
+    await until(() => !frame().includes('New session'));
+    await tick();
+    await send(stdin, '/promote --clear');
+    await until(() => frame().includes('config bundle dropped'));
+    expect(created).toHaveLength(0);
+    await send(stdin, '/new');
+    await until(() => frame().includes('Inference'));
+    expect(frame()).not.toContain('config bundle sha256:');
+    await tick();
+    stdin.write(KEY.enter);
+    await until(() => created.length === 1);
+    expect(created[0]!.configRef).toBeUndefined();
+  });
+
+  it('/promote of a bad directory notifies and creates nothing', async () => {
+    const rt = testRuntime();
+    const { stdin, frame, until, ready } = mount(rt);
+    await ready();
+    await send(stdin, '/promote /definitely/not/here');
+    await until(() => frame().includes('no .claude/skills'));
+    const calls = (rt.cp as unknown as { calls: string[] }).calls;
+    expect(calls).not.toContain('putConfigBundle');
+    expect(calls).not.toContain('createSession');
   });
 
   it('runs slash commands and reports unknown ones', async () => {

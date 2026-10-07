@@ -24,6 +24,7 @@ export interface CommandHost {
   composeInEditor(): void | Promise<void>;
   cycleTheme(): void;
   notify(message: string): void;
+  promoteBundle(arg: string): void | Promise<void>;
   quit(): void;
 }
 
@@ -43,6 +44,12 @@ export const BUILTIN_COMMANDS: Command<CommandHost>[] = [
     slash: ['new'],
     keybind: 'ctrl+x n',
     run: (h) => h.newSession(),
+  },
+  {
+    id: 'session.promote',
+    title: 'Promote a skills directory for the next session',
+    slash: ['promote'],
+    run: (h, arg) => (arg ? h.promoteBundle(arg) : h.prefillInput('/promote ')),
   },
   {
     id: 'session.rename',
