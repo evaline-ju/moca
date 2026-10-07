@@ -4,15 +4,24 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, onTestFinished } from 'vitest';
-import { buildBundle, MAX_BUNDLE_BYTES } from '@moca/config-bundle';
+import {
+  buildBundle,
+  bundleKey,
+  DEFAULT_BUNDLE_TTL_SECONDS,
+  MAX_BUNDLE_BYTES,
+} from '@moca/config-bundle';
+import { statusFor } from '../src/errors.js';
 import { HANDLERS } from '../src/handlers.js';
 import { buildHandler } from '../src/server.js';
-import { alice, codeOf, ctx, makeDeps } from './helpers/deps.js';
+import { alice, bob, codeOf, ctx, makeDeps, NOW_MS } from './helpers/deps.js';
 
-function bundle() {
+function bundle(text = 'hi') {
   const root = mkdtempSync(join(tmpdir(), 'cp-bundle-'));
   mkdirSync(join(root, 'skills/hello'), { recursive: true });
-  writeFileSync(join(root, 'skills/hello/SKILL.md'), '---\nname: hello\ndescription: d\n---\nhi\n');
+  writeFileSync(
+    join(root, 'skills/hello/SKILL.md'),
+    `---\nname: hello\ndescription: d\n---\n${text}\n`,
+  );
   const r = buildBundle({
     roots: { userDir: root },
     mode: 'unattended',
@@ -127,5 +136,95 @@ describe('POST /v1/config-bundles', () => {
       body: payload,
     });
     expect(res.status).toBe(201);
+  });
+});
+
+describe('POST /v1/config-bundles byte budget', () => {
+  type Body = ReturnType<typeof bundle>;
+  /** What Redis stores for a bundle -- the unit the budget counts. */
+  async function storedBytes(body: Body): Promise<number> {
+    const d = makeDeps();
+    await HANDLERS.putConfigBundle!(ctx({ principal: alice, body }), d);
+    return (d.bundles as unknown as { store: Map<string, string> }).store.get(
+      bundleKey(body.digest),
+    )!.length;
+  }
+  const put = (d: ReturnType<typeof makeDeps>, principal: typeof alice, body: Body) =>
+    HANDLERS.putConfigBundle!(ctx({ principal, body }), d);
+
+  it('refuses a new digest that would exceed the per-subject budget, naming it', async () => {
+    const a = bundle('a');
+    const b = bundle('b');
+    const limit = (await storedBytes(a)) + (await storedBytes(b)) - 1;
+    const d = makeDeps({ config: { bundleSubjectBytes: limit, bundleTotalBytes: 1 << 30 } });
+    await put(d, alice, a);
+    await expect(put(d, alice, b)).rejects.toMatchObject({
+      code: 'bundle_quota_exceeded',
+      message: expect.stringMatching(new RegExp(`your .*${limit} bytes`)),
+    });
+    // Another subject still has room.
+    expect((await put(d, bob, b)).status).toBe(201);
+  });
+
+  it('refuses a new digest that would exceed the global budget across subjects', async () => {
+    const a = bundle('a');
+    const b = bundle('b');
+    const limit = (await storedBytes(a)) + (await storedBytes(b)) - 1;
+    const d = makeDeps({ config: { bundleSubjectBytes: 1 << 30, bundleTotalBytes: limit } });
+    await put(d, alice, a);
+    await expect(put(d, bob, b)).rejects.toMatchObject({
+      code: 'bundle_quota_exceeded',
+      message: expect.stringMatching(new RegExp(`deployment.*${limit} bytes`)),
+    });
+  });
+
+  it('answers 429 for bundle_quota_exceeded', () => {
+    expect(statusFor('bundle_quota_exceeded')).toBe(429);
+  });
+
+  it('always accepts a re-upload of a stored digest, at a full budget, by anyone', async () => {
+    const a = bundle('a');
+    const size = await storedBytes(a);
+    const d = makeDeps({ config: { bundleSubjectBytes: size, bundleTotalBytes: size } });
+    expect((await put(d, alice, a)).body).toMatchObject({ uploaded: true });
+    expect((await put(d, alice, a)).body).toMatchObject({ uploaded: false });
+    expect((await put(d, bob, a)).body).toMatchObject({ uploaded: false });
+    // Bob was not charged for alice's digest: he still has his whole budget for... nothing else
+    // fits globally, which is the global budget's job, not his.
+    await expect(put(d, bob, bundle('b'))).rejects.toMatchObject({
+      code: 'bundle_quota_exceeded',
+      message: expect.stringContaining('deployment'),
+    });
+  });
+
+  it('stops counting a bundle once its TTL has passed', async () => {
+    const a = bundle('a');
+    const b = bundle('b');
+    const limit = (await storedBytes(a)) + (await storedBytes(b)) - 1;
+    let now = NOW_MS;
+    const d = makeDeps({
+      config: { bundleSubjectBytes: limit, bundleTotalBytes: limit },
+      now: () => now,
+    });
+    await put(d, alice, a);
+    now += DEFAULT_BUNDLE_TTL_SECONDS * 1000 + 1;
+    (d.bundles as unknown as { store: Map<string, string> }).store.delete(bundleKey(a.digest));
+    expect((await put(d, alice, b)).body).toMatchObject({ uploaded: true });
+  });
+
+  it('a re-upload refreshes the budget entry, so it keeps counting', async () => {
+    const a = bundle('a');
+    const b = bundle('b');
+    const limit = (await storedBytes(a)) + (await storedBytes(b)) - 1;
+    let now = NOW_MS;
+    const d = makeDeps({
+      config: { bundleSubjectBytes: limit, bundleTotalBytes: 1 << 30 },
+      now: () => now,
+    });
+    await put(d, alice, a);
+    now += DEFAULT_BUNDLE_TTL_SECONDS * 1000 - 1000;
+    await put(d, alice, a);
+    now += 2000;
+    await expect(put(d, alice, b)).rejects.toMatchObject({ code: 'bundle_quota_exceeded' });
   });
 });

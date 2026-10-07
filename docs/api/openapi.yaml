@@ -71,6 +71,7 @@ components:
             - session_not_found
             - session_mismatch
             - digest_mismatch
+            - bundle_quota_exceeded
             - configRef_invalid
             - credential_required
             - credential_ambiguous
@@ -541,7 +542,8 @@ paths:
       summary: Upload a client-built config bundle (ADR-0038)
       description: |
         Content-addressed: the server re-hashes the tar and refuses a mismatch. Idempotent; a digest
-        that already exists only has its TTL refreshed. The decoded tar may be at most 8 MiB.
+        that already exists only has its TTL refreshed. The decoded tar may be at most 8 MiB. New
+        digests count against a per-subject and a deployment-wide byte budget (429 when full).
       security: [{ sessionToken: [] }]
       requestBody:
         required: true
@@ -566,6 +568,14 @@ paths:
                   uploaded: { type: boolean, description: false when it already existed }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '429':
+          description: |
+            `bundle_quota_exceeded`: storing this NEW digest would exceed the caller's
+            (`SH_BUNDLE_SUBJECT_BYTES`) or the deployment's (`SH_BUNDLE_TOTAL_BYTES`) byte budget.
+            A digest that is already stored is always accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /internal/credentials:
     post:
       operationId: exchangeCredential

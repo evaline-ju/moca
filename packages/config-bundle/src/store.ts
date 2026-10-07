@@ -51,6 +51,8 @@ export async function putBundle(
   digest: string,
   tar: Buffer,
   ttlSeconds: number = DEFAULT_BUNDLE_TTL_SECONDS,
+  /** Called for a NEW digest only, with the length of the value about to be stored; throw to refuse. */
+  admit?: (storedBytes: number) => Promise<void>,
 ): Promise<{ uploaded: boolean }> {
   // Verify digest matches tar before anything else
   let actual: string;
@@ -67,7 +69,9 @@ export async function putBundle(
     await redis.expire(key, ttlSeconds);
     return { uploaded: false };
   }
-  await redis.set(key, gzipSync(tar).toString('base64'), { EX: ttlSeconds });
+  const value = gzipSync(tar).toString('base64');
+  await admit?.(value.length);
+  await redis.set(key, value, { EX: ttlSeconds });
   return { uploaded: true };
 }
 

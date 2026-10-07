@@ -84,3 +84,11 @@ it('maps an expired config bundle to its own action and message', () => {
     "this session's config bundle has expired — promote the same directory again to restore it; if it changed, start a new session",
   );
 });
+
+it('maps a full config-bundle budget to its own action and one-line message', () => {
+  const err = new ApiError('control-plane', 429, 'bundle_quota_exceeded', 'over budget');
+  expect(classify(err)).toEqual({ kind: 'bundle-quota' });
+  expect(describeError(err)).toBe(
+    "the control plane's config-bundle storage is full for your account or the deployment — try again later or ask the operator",
+  );
+});

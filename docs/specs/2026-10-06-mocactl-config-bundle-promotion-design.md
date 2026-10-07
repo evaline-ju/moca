@@ -153,6 +153,11 @@ POST /v1/config-bundles   auth: api   sessionScoped: false   operationId: 'putCo
   `BundleDigestMismatchError` maps to `400 { error: 'digest_mismatch' }`.
 - **Response:** `201 { digest, uploaded }` — `uploaded: false` means the digest already existed and
   only its TTL was refreshed.
+- **Byte budget.** A NEW digest is charged its stored size (the gzip+base64 value) to the subject
+  that first stored it; one over the subject's `SH_BUNDLE_SUBJECT_BYTES` (32 MiB) or the deployment's
+  `SH_BUNDLE_TOTAL_BYTES` (64 MiB) is refused with `429 bundle_quota_exceeded`. Re-uploading a stored
+  digest is free. Entries (zsets `sh:cp:bundles:all` and `sh:cp:bundles:owner:<subjectHash>`, scored
+  by expiry, plus hash `sh:cp:bundles:meta`) age out with the bundle's TTL.
 - **Redis:** `CpDeps` gains `bundles: BundleRedisLike`, wired in `main.ts` to the same node-redis
   client `OwnershipIndex` already uses.
 - **No ownership record.** Intentionally just content-addressed storage, structurally identical to

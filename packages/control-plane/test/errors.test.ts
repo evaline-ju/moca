@@ -24,6 +24,7 @@ const EXPECTED: Record<CpErrorCode, number> = {
   session_not_found: 404,
   session_mismatch: 400,
   digest_mismatch: 400,
+  bundle_quota_exceeded: 429,
   configRef_invalid: 400,
   credential_required: 400,
   credential_ambiguous: 400,

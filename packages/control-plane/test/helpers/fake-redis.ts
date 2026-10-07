@@ -1,4 +1,5 @@
 import type { BundleRedisLike } from '@moca/config-bundle';
+import type { BundleBudgetRedisLike } from '../../src/bundle-budget.js';
 import type { CpRedisLike } from '../../src/ownership.js';
 
 /**
@@ -72,11 +73,40 @@ export function fakeRedis() {
   return { redis, hashes, zsets, streams, ops };
 }
 
-/** In-memory BundleRedisLike for the bundle upload route. */
-export function fakeBundleRedis(): BundleRedisLike & { store: Map<string, string> } {
+/** Parse a node-redis score bound: a number, '+inf'/'-inf', or '(' for exclusive. */
+function scoreBound(v: number | string): { bound: number; exclusive: boolean } {
+  const s = String(v);
+  if (s === '+inf') return { bound: Infinity, exclusive: false };
+  if (s === '-inf') return { bound: -Infinity, exclusive: false };
+  return s.startsWith('(')
+    ? { bound: Number(s.slice(1)), exclusive: true }
+    : { bound: Number(s), exclusive: false };
+}
+
+/** In-memory BundleRedisLike + the budget surface, for the bundle upload route. */
+export function fakeBundleRedis(): BundleRedisLike &
+  BundleBudgetRedisLike & {
+    store: Map<string, string>;
+    zsets: Map<string, Map<string, number>>;
+    hashes: Map<string, Map<string, string>>;
+  } {
   const store = new Map<string, string>();
+  const zsets = new Map<string, Map<string, number>>();
+  const hashes = new Map<string, Map<string, string>>();
+  const z = (k: string) => zsets.get(k) ?? zsets.set(k, new Map()).get(k)!;
+  const h = (k: string) => hashes.get(k) ?? hashes.set(k, new Map()).get(k)!;
+  const inRange = (score: number, min: number | string, max: number | string) => {
+    const lo = scoreBound(min);
+    const hi = scoreBound(max);
+    return (
+      (lo.exclusive ? score > lo.bound : score >= lo.bound) &&
+      (hi.exclusive ? score < hi.bound : score <= hi.bound)
+    );
+  };
   return {
     store,
+    zsets,
+    hashes,
     async set(key, value) {
       store.set(key, value);
       return 'OK';
@@ -89,6 +119,33 @@ export function fakeBundleRedis(): BundleRedisLike & { store: Map<string, string
     },
     async expire() {
       return 1;
+    },
+    async zAdd(key, member) {
+      z(key).set(member.value, member.score);
+      return 1;
+    },
+    async zRange(key, min, max, opts) {
+      if (opts?.BY !== 'SCORE') throw new Error('this fake only serves BY SCORE');
+      return [...z(key)]
+        .filter(([, score]) => inRange(score, min, max))
+        .sort((a, b) => a[1] - b[1])
+        .map(([v]) => v);
+    },
+    async zRemRangeByScore(key, min, max) {
+      for (const [v, score] of z(key)) if (inRange(score, min, max)) z(key).delete(v);
+      return 1;
+    },
+    async hSet(key, values) {
+      for (const [f, v] of Object.entries(values)) h(key).set(f, v);
+      return 1;
+    },
+    async hmGet(key, fields) {
+      if (fields.length === 0) throw new Error('ERR wrong number of arguments for HMGET');
+      return fields.map((f) => h(key).get(f) ?? null);
+    },
+    async hDel(key, fields) {
+      for (const f of fields) h(key).delete(f);
+      return fields.length;
     },
   };
 }

@@ -67,6 +67,22 @@ describe('putBundle', () => {
     expect(r.sets).toBe(before);
   });
 
+  it('asks admit with the exact stored length, for a new digest only, and a refusal stores nothing', async () => {
+    const r = fakeRedis();
+    const asked: number[] = [];
+    await expect(
+      putBundle(r, digest, tar, undefined, async (n) => {
+        asked.push(n);
+        throw new Error('full');
+      }),
+    ).rejects.toThrow('full');
+    expect(r.store.size).toBe(0);
+    await putBundle(r, digest, tar, undefined, async (n) => void asked.push(n));
+    expect(asked[1]).toBe(r.store.get(bundleKey(digest))!.length);
+    await putBundle(r, digest, tar, undefined, async (n) => void asked.push(n));
+    expect(asked).toHaveLength(2);
+  });
+
   it('sets a TTL', async () => {
     const seen: Array<{ EX?: number } | undefined> = [];
     const r = fakeRedis();

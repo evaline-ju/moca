@@ -3,6 +3,7 @@ import type { BundleRedisLike } from '@moca/config-bundle';
 import { fileURLToPath } from 'node:url';
 import type { KeyObject } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
+import type { BundleBudgetRedisLike } from './bundle-budget.js';
 import { keksFromBase64 } from './envelope.js';
 import type { CredentialStore, InferenceAuthHeader } from './credential-store.js';
 import { directModeMismatch } from './exchange.js';
@@ -54,6 +55,15 @@ function urlEnv(env: NodeJS.ProcessEnv, name: string): string | undefined {
   return v.slice(0, end);
 }
 
+/** A byte budget: unset means the default, anything but a positive integer refuses to boot. */
+function byteBudgetEnv(env: NodeJS.ProcessEnv, name: string, def: number): number {
+  const v = env[name];
+  if (v === undefined || v === '') return def;
+  if (!/^[1-9][0-9]*$/.test(v))
+    throw new Error(`${name} must be a positive integer (bytes), got "${v}"`);
+  return Number(v);
+}
+
 export function portFromEnv(env: NodeJS.ProcessEnv): number {
   return intEnv(env, 'SH_CONTROL_PLANE_PORT', 8080);
 }
@@ -93,6 +103,8 @@ export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
     sandboxNamespace: env.SH_SANDBOX_NAMESPACE || 'default',
     publicHarnessUrl: urlEnv(env, 'SH_PUBLIC_HARNESS_URL'),
     sandboxTiers: parseSandboxTiers(env),
+    bundleSubjectBytes: byteBudgetEnv(env, 'SH_BUNDLE_SUBJECT_BYTES', 32 * 1024 * 1024),
+    bundleTotalBytes: byteBudgetEnv(env, 'SH_BUNDLE_TOTAL_BYTES', 64 * 1024 * 1024),
   };
   checkInferenceConfig(config);
   return config;
@@ -273,7 +285,7 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
       if (client.isOpen) client.destroy();
     },
     index: new OwnershipIndex(client as unknown as CpRedisLike),
-    bundles: client as unknown as BundleRedisLike,
+    bundles: client as unknown as BundleRedisLike & BundleBudgetRedisLike,
     credentials: credentialStoreFromEnv(env),
     identity: new GithubOAuthProvider({
       clientId: env.SH_GITHUB_CLIENT_ID!,

@@ -49,6 +49,8 @@ export function makeDeps(
       injectorConfigured: false,
       sandboxNamespace: 'default',
       sandboxTiers: null,
+      bundleSubjectBytes: 32 * 1024 * 1024,
+      bundleTotalBytes: 64 * 1024 * 1024,
       ...configOver,
     },
     now: () => NOW_MS,

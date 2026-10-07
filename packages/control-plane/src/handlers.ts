@@ -5,6 +5,12 @@ import {
   putBundle,
   type BundleRedisLike,
 } from '@moca/config-bundle';
+import {
+  admitBundle,
+  recordBundle,
+  refreshBundle,
+  type BundleBudgetRedisLike,
+} from './bundle-budget.js';
 import { CpError } from './errors.js';
 import {
   resolveInferenceName,
@@ -50,13 +56,17 @@ export interface CpConfig {
    * configFromEnv refuses a list it cannot serve, so a session is never validated against a typo.
    */
   sandboxTiers: SandboxTiers | null;
+  /** Stored config-bundle bytes one subject may hold (`SH_BUNDLE_SUBJECT_BYTES`). */
+  bundleSubjectBytes: number;
+  /** Stored config-bundle bytes the whole deployment may hold (`SH_BUNDLE_TOTAL_BYTES`). */
+  bundleTotalBytes: number;
 }
 
 export interface CpDeps {
   index: OwnershipIndex;
   credentials: CredentialStore;
   /** Content-addressed config bundles (ADR-0038); the same Redis the ownership index uses. */
-  bundles: BundleRedisLike;
+  bundles: BundleRedisLike & BundleBudgetRedisLike;
   identity: IdentityProvider;
   signer: { kid: string; mint(input: MintInput): string };
   /**
@@ -500,9 +510,21 @@ export const HANDLERS: Record<string, Handler> = {
       );
     }
     let uploaded: boolean;
+    let storedBytes = 0;
+    const nowMs = deps.now();
+    const limits = {
+      subjectBytes: deps.config.bundleSubjectBytes,
+      totalBytes: deps.config.bundleTotalBytes,
+    };
     try {
-      ({ uploaded } = await putBundle(deps.bundles, digest, tar));
+      ({ uploaded } = await putBundle(deps.bundles, digest, tar, undefined, async (bytes) => {
+        storedBytes = bytes;
+        await admitBundle(deps.bundles, limits, p.sub, bytes, nowMs);
+      }));
+      if (uploaded) await recordBundle(deps.bundles, p.sub, digest, storedBytes, nowMs);
+      else await refreshBundle(deps.bundles, digest, nowMs);
     } catch (err) {
+      if (err instanceof CpError) throw err;
       if (err instanceof BundleDigestMismatchError)
         throw new CpError('digest_mismatch', err.message);
       throw new CpError('redis_unavailable', 'redis is not answering');

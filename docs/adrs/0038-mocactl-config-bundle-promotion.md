@@ -84,8 +84,9 @@ and apply it on the interactive turn path:
   plane. An older harness ignores `configRef`, so turns would run without the skills and no error.
 - Follow-up owed: `GET /v1/config-bundles/{digest}` (metadata only) if bundle reuse across sessions
   turns out to matter.
-- Follow-up owed: a per-subject quota or rate limit on `POST /v1/config-bundles`. Uploads are
-  audited (`config_bundle_uploaded` / `config_bundle_unchanged`), but nothing bounds their volume.
+- Positive: uploads are bounded by a per-subject (`SH_BUNDLE_SUBJECT_BYTES`, 32 MiB) and a
+  deployment-wide (`SH_BUNDLE_TOTAL_BYTES`, 64 MiB) budget of stored bytes; a new digest over either
+  is refused with `429 bundle_quota_exceeded`, and entries age out with the bundle's 30-day TTL.
 - Follow-up owed: LRU cleanup of the harness pod's `/tmp/sh-config` digest cache, which today grows
   with every distinct digest a pod resolves.
 
