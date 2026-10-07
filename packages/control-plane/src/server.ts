@@ -132,8 +132,30 @@ export function buildHandler(deps: CpDeps): (req: IncomingMessage, res: ServerRe
 
 export function startControlPlane(deps: CpDeps, port = 8080, host?: string): Server {
   const server = createServer(buildHandler(deps));
+  // Stop accepting and let in-flight requests finish, THEN release Redis (#434): closing it first
+  // would fail those requests with redis_unavailable on the way out. A close() that throws must not
+  // keep the process alive past the SIGTERM.
+  //
+  // close() reaps the keep-alive connections idle when it is called, but not one whose request was
+  // in flight and goes idle afterwards (#436): the ingress would hold that socket, and with it the
+  // exit and the Redis release, for keepAliveTimeout. So while draining, each finished response
+  // reaps whatever is idle by then.
+  let draining = false;
+  server.on('request', (_req, res) => {
+    res.once('finish', () => {
+      if (draining) setImmediate(() => server.closeIdleConnections());
+    });
+  });
   const onSigterm = () => {
-    server.close(() => process.exit(0));
+    draining = true;
+    server.close(() => {
+      void Promise.resolve()
+        .then(() => deps.close?.())
+        .catch((err: unknown) =>
+          console.error('[control-plane] close on SIGTERM failed:', (err as Error)?.message ?? err),
+        )
+        .finally(() => process.exit(0));
+    });
   };
   process.on('SIGTERM', onSigterm);
   // A production process calls this once; a test suite calls it once per test. Without removing the

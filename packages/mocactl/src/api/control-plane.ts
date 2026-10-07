@@ -81,7 +81,7 @@ export class ControlPlaneClient implements ControlPlaneApi {
     return this.json('POST', '/v1/auth/device', { auth: false });
   }
 
-  async pollDeviceAuth(deviceCode: string): Promise<ApiLogin | 'pending'> {
+  async pollDeviceAuth(deviceCode: string): Promise<ApiLogin | 'pending' | 'expired'> {
     try {
       return await this.json<ApiLogin>('POST', '/v1/auth/device/token', {
         auth: false,
@@ -89,6 +89,7 @@ export class ControlPlaneClient implements ControlPlaneApi {
       });
     } catch (err) {
       if (err instanceof ApiError && err.code === 'authorization_pending') return 'pending';
+      if (err instanceof ApiError && err.code === 'device_code_expired') return 'expired';
       throw err;
     }
   }

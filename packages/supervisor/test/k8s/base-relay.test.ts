@@ -65,6 +65,11 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s base: relay', () => {
     ]);
   });
 
+  it('carries the P6.3 detach-mark TTL setting', () => {
+    const c = container(dep(), 'sandbox-relay');
+    expect(envVar(c, 'SH_SANDBOX_AFFINITY_TTL_SECONDS')?.value).toBe('86400');
+  });
+
   it('reads per-sandbox tokens from an OPTIONAL mounted Secret (P6.2 §2.5)', () => {
     const c = container(dep(), 'sandbox-relay');
     expect(envVar(c, 'SH_RELAY_TOKEN_DIR')?.value).toBe('/run/relay-tokens');

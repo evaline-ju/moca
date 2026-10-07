@@ -1,0 +1,17 @@
+# ocp-single's optional Routes (README §12.5). A Component, not files in the parent overlay:
+# setup.sh's generated overlay lists it only when SH_ROUTE_DOMAIN is set, so a stack without Routes
+# renders exactly as §12 does. The domain cannot be read at cluster scope with namespace rights,
+# so the hosts stay placeholders here -- the generated overlay patches them to moca.<domain> and
+# moca-control-plane.<domain>. The supervisor's TLS source is a Secret named moca-supervisor-tls;
+# which Secret that is (--tls-secret, --tls-cert or a generated self-signed one) is resolved by
+# setup.sh, which patches the volume's secretName when it is something else. The sidecar names its
+# image in full: this component is applied after the overlay's image transformer has already run,
+# so a placeholder would never be rewritten (overlays/ocp/p4-relay's rule).
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - service.yaml
+  - route.yaml
+  - network-policy.yaml
+patches:
+  - path: patch-supervisor-tls.yaml

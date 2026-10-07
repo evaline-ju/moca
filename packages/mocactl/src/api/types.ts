@@ -32,6 +32,11 @@ export interface SessionSummary {
   lastTurnAt: number | null;
   turns: number;
   configRef?: string | null;
+  /**
+   * The sandbox tier the session runs in (P6.3); null when the deployment declares no tiers, absent
+   * before P6.3.
+   */
+  sandboxTier?: string | null;
 }
 
 export interface SessionPage {
@@ -43,6 +48,7 @@ export interface CreateSessionRequest {
   credentials?: { inference?: string };
   /** A promoted config bundle digest; fixed for the session's life (ADR-0038). */
   configRef?: string;
+  sandbox?: { tier?: string };
 }
 
 export interface SessionToken {
@@ -77,6 +83,8 @@ export interface PutCredentialRequest {
 /** GET /v1/discovery: where the rest of the deployment is, readable before login. */
 export interface Discovery {
   harnessUrl: string | null;
+  /** P6.3. Optional so a pre-P6.3 control plane, which omits it, still parses. */
+  sandboxTiers?: { names: string[]; default: string } | null;
 }
 
 export interface ControlPlaneApi {
@@ -84,7 +92,8 @@ export interface ControlPlaneApi {
   readyz(): Promise<void>;
   discovery(): Promise<Discovery>;
   startDeviceAuth(): Promise<DeviceStart>;
-  pollDeviceAuth(deviceCode: string): Promise<ApiLogin | 'pending'>;
+  /** 'pending' until approved; 'expired' once the code lapsed unapproved (start a new one). */
+  pollDeviceAuth(deviceCode: string): Promise<ApiLogin | 'pending' | 'expired'>;
   me(): Promise<Me>;
   listSessions(opts?: { limit?: number; cursor?: number }): Promise<SessionPage>;
   createSession(req: CreateSessionRequest): Promise<CreatedSession>;

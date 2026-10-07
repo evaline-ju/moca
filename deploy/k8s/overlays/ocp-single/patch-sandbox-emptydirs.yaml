@@ -1,0 +1,23 @@
+# /workspace and /home/sandbox as emptyDirs. The image bakes both as 1001:0 mode 775
+# (remote-worker/Dockerfile): writable by any UID under the nonroot-v2 SCC's gid 0, which is why
+# the base can pin runAsUser 1001 -- but an SCC-assigned UID/GID owns neither. The emptyDirs are
+# group-owned by the assigned fsGroup, so agent tools (git, pip, editors) work again.
+#
+# Nothing baked is lost: /home/sandbox is only install -d in the image, and the workspace is
+# documented container-local in the base (lost on restart either way). With slice 3 (#425) a
+# session stays in its sandbox tier, so the loss on a sandbox pod restart is the same trade as
+# the base's.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: moca-sandbox, namespace: moca-sandbox }
+spec:
+  template:
+    spec:
+      containers:
+        - name: sandbox
+          volumeMounts:
+            - { name: workspace, mountPath: /workspace }
+            - { name: home, mountPath: /home/sandbox }
+      volumes:
+        - { name: workspace, emptyDir: {} }
+        - { name: home, emptyDir: {} }

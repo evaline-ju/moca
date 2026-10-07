@@ -7,7 +7,8 @@ import { HANDLERS } from '../src/handlers.js';
 import { makeDeps, ctx, alice, bob, codeOf, seedCredential } from './helpers/deps.js';
 import type { RunKubectl } from '../src/kubectl.js';
 import { defaultRunKubectl } from '../src/kubectl.js';
-import type { SessionRecord } from '../src/ownership.js';
+import { OwnershipIndex, type SessionRecord } from '../src/ownership.js';
+import { fakeRedis } from './helpers/fake-redis.js';
 
 const rec: SessionRecord = {
   sessionId: 'sid-1',
@@ -141,6 +142,7 @@ describe('projectResources', () => {
       createdAt: 1_757_000_000_000,
       lastTurnAt: 1_757_000_001_000,
       turns: 3,
+      sandboxTier: null,
     });
     expect(out.harness).toEqual({ mode: 'knative', podName: 'h-1', revision: 'r-1', ready: true });
     expect(out.sandbox).toEqual({
@@ -176,6 +178,96 @@ describe('projectResources', () => {
     expect(out.harness).toEqual({ mode: 'knative', podName: null, revision: null, ready: false });
     expect(out.session.turns).toBe(0);
     expect(out.session.lastTurnAt).toBeNull();
+  });
+
+  it('projects placement from the runtime report, and the session tier from the record (P6.3)', () => {
+    // Tiered: on an untiered deployment a stored tier is not shown (viewTier, spec §3.3).
+    const tiers = { names: ['container', 'microvm'], default: 'container' };
+    const out = projectResources(
+      { ...rec, sandboxTier: 'microvm' },
+      {
+        sandboxId: 'm-1',
+        sandboxTier: 'microvm',
+        workspaceResetAt: '1757000002000',
+        workspaceResetFrom: 'm-0',
+      },
+      { podName: null, phase: 'unknown', tenant: 'github:1234' },
+      tiers,
+    ) as Record<string, Record<string, unknown> | null>;
+    expect(out.session!.sandboxTier).toBe('microvm');
+    expect(out.placement).toEqual({
+      sandboxId: 'm-1',
+      tier: 'microvm',
+      workspaceReset: { at: 1_757_000_002_000, from: 'm-0' },
+    });
+  });
+
+  it('placement is null until a leased turn has reported, and workspaceReset null until a reset', () => {
+    const none = projectResources(
+      rec,
+      {},
+      { podName: null, phase: 'unknown', tenant: 't' },
+    ) as Record<string, unknown>;
+    expect(none.placement).toBeNull();
+    const plain = projectResources(
+      rec,
+      { sandboxId: 'c-0', sandboxTier: '' },
+      { podName: null, phase: 'unknown', tenant: 't' },
+    ) as Record<string, Record<string, unknown>>;
+    expect(plain.placement).toEqual({ sandboxId: 'c-0', tier: null, workspaceReset: null });
+    // Self-reported, so untrusted: a garbage time is no reset we can show, never `at: NaN`.
+    const garbage = projectResources(
+      rec,
+      { sandboxId: 'c-1', workspaceResetAt: 'not-a-time', workspaceResetFrom: 'c-0' },
+      { podName: null, phase: 'unknown', tenant: 't' },
+    ) as Record<string, Record<string, unknown>>;
+    expect(garbage.placement).toEqual({ sandboxId: 'c-1', tier: null, workspaceReset: null });
+  });
+
+  it("shows today's default tier for a session recorded before P6.3, like the session view", () => {
+    // `rec` has no sandboxTier field at all: written before P6.3. The exchange hands such a session
+    // today's default, so that is the tier it actually runs in -- and what the view must show.
+    const tiers = { names: ['container', 'microvm'], default: 'container' };
+    const out = projectResources(
+      rec,
+      {},
+      { podName: null, phase: 'unknown', tenant: 't' },
+      tiers,
+    ) as Record<string, Record<string, unknown>>;
+    expect(out.session!.sandboxTier).toBe('container');
+  });
+
+  it("shows today's default for a record stored with '', matching its placement", () => {
+    // '' was stored while the deployment declared no tiers. The exchange leaves the tier out for
+    // it, and the data plane gives it today's default -- so session.sandboxTier must agree with
+    // placement.tier rather than contradict it with null.
+    const tiers = { names: ['container', 'microvm'], default: 'container' };
+    const out = projectResources(
+      { ...rec, sandboxTier: '' },
+      { sandboxId: 'c-0', sandboxTier: 'container' },
+      { podName: null, phase: 'unknown', tenant: 't' },
+      tiers,
+    ) as Record<string, Record<string, unknown>>;
+    expect(out.session!.sandboxTier).toBe('container');
+    expect(out.placement!.tier).toBe('container');
+    // Null only when the deployment declares no tiers at all.
+    const untiered = projectResources(
+      { ...rec, sandboxTier: '' },
+      {},
+      { podName: null, phase: 'unknown', tenant: 't' },
+      null,
+    ) as Record<string, Record<string, unknown>>;
+    expect(untiered.session!.sandboxTier).toBeNull();
+  });
+
+  it('shows null for a tier stored while tiers were declared, once the deployment declares none', () => {
+    const out = projectResources(
+      { ...rec, sandboxTier: 'microvm' },
+      {},
+      { podName: null, phase: 'unknown', tenant: 't' },
+      null,
+    ) as Record<string, Record<string, unknown>>;
+    expect(out.session!.sandboxTier).toBeNull();
   });
 
   it('never echoes a runtime field the harness invented', async () => {
@@ -225,5 +317,52 @@ describe('GET /v1/sessions/{id}/resources', () => {
     const body = res.body as Record<string, Record<string, unknown>>;
     expect(body.harness!.podName).toBe('h-1');
     expect(body.sandbox!.phase).toBe('unknown');
+  });
+
+  it('shows a null session tier on an untiered deployment, whatever the record stored', async () => {
+    const tiers = { names: ['container', 'microvm'], default: 'container' };
+    const d = makeDeps({ config: { sandboxTiers: tiers } });
+    await seedCredential(d);
+    await HANDLERS.createSession!(
+      ctx({ principal: alice, body: { sandbox: { tier: 'microvm' } } }),
+      d,
+    );
+    expect((await d.index.get('sid-fixed'))!.sandboxTier).toBe('microvm');
+    const res = await HANDLERS.getSessionResources!(
+      ctx({ principal: alice, params: { id: 'sid-fixed' } }),
+      { ...d, config: { ...d.config, sandboxTiers: null } },
+    );
+    expect((res.body as Record<string, Record<string, unknown>>).session!.sandboxTier).toBeNull();
+  });
+
+  it("shows a pre-P6.3 session's tier as today's default, and its self-reported placement", async () => {
+    const f = fakeRedis();
+    const d = makeDeps({
+      index: new OwnershipIndex(f.redis),
+      config: { sandboxTiers: { names: ['container', 'microvm'], default: 'container' } },
+    });
+    await seedCredential(d);
+    await HANDLERS.createSession!(ctx({ principal: alice, body: {} }), d);
+    // Strip the field createSession stored: a record written before P6.3 has none at all.
+    const key = [...f.hashes.keys()].find((k) => f.hashes.get(k)?.sandboxTier !== undefined)!;
+    delete f.hashes.get(key)!.sandboxTier;
+    expect((await d.index.get('sid-fixed'))!.sandboxTier).toBeUndefined();
+    await d.index.putRuntime('sid-fixed', {
+      sandboxId: 'c-1',
+      sandboxTier: 'container',
+      workspaceResetAt: '1757000002000',
+      workspaceResetFrom: 'c-0',
+    });
+    const res = await HANDLERS.getSessionResources!(
+      ctx({ principal: alice, params: { id: 'sid-fixed' } }),
+      d,
+    );
+    const body = res.body as Record<string, Record<string, unknown>>;
+    expect(body.session!.sandboxTier).toBe('container');
+    expect(body.placement).toEqual({
+      sandboxId: 'c-1',
+      tier: 'container',
+      workspaceReset: { at: 1_757_000_002_000, from: 'c-0' },
+    });
   });
 });

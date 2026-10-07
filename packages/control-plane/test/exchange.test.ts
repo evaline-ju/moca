@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { checkExchangeAuth, exchangeCredential, placeholderFor } from '../src/exchange.js';
+import {
+  checkExchangeAuth,
+  exchangeCredential,
+  placeholderFor,
+  sessionTier,
+  viewTier,
+} from '../src/exchange.js';
 import { HANDLERS, type CpDeps } from '../src/handlers.js';
 import { OwnershipIndex, type CpRedisLike } from '../src/ownership.js';
 import { makeDeps, ctx, alice, codeOf, seedCredential } from './helpers/deps.js';
@@ -70,6 +76,66 @@ describe('placeholderFor', () => {
   });
 });
 
+describe('sessionTier (P6.3 spec §3.3)', () => {
+  const tiers = { names: ['container', 'microvm'], default: 'container' };
+  const base = {
+    sessionId: 's',
+    owner: 'o',
+    tenant: 'o',
+    createdAt: 0,
+    state: 'active' as const,
+    poolSelector: null,
+    credentialName: '',
+    configRef: null,
+    tombstone: false,
+  };
+  it('is the stored tier', () => {
+    expect(sessionTier({ ...base, sandboxTier: 'microvm' }, tiers)).toBe('microvm');
+  });
+  it("is TODAY's default for a session created while no tiers were declared, now that some are", () => {
+    expect(sessionTier({ ...base, sandboxTier: '' }, tiers)).toBe('container');
+  });
+  it('is "" only when the deployment declares no tiers', () => {
+    expect(sessionTier({ ...base, sandboxTier: '' }, null)).toBe('');
+  });
+  it("is TODAY's default for a record written before P6.3", () => {
+    expect(sessionTier(base, tiers)).toBe('container');
+    expect(sessionTier(base, null)).toBe('');
+  });
+  it('a tier stored while tiers were declared is not shown once the deployment stops declaring them: the data plane no longer filters', () => {
+    expect(sessionTier({ ...base, sandboxTier: 'microvm' }, null)).toBe('');
+  });
+});
+
+describe('viewTier: the tier a session view shows', () => {
+  const tiers = { names: ['container', 'microvm'], default: 'container' };
+  const base = {
+    sessionId: 's',
+    owner: 'o',
+    tenant: 'o',
+    createdAt: 0,
+    state: 'active' as const,
+    poolSelector: null,
+    credentialName: '',
+    configRef: null,
+    tombstone: false,
+  };
+  it('is the stored tier', () => {
+    expect(viewTier({ ...base, sandboxTier: 'microvm' }, tiers)).toBe('microvm');
+  });
+  it("is today's default for '' or a pre-P6.3 record, as the data plane runs it", () => {
+    expect(viewTier({ ...base, sandboxTier: '' }, tiers)).toBe('container');
+    expect(viewTier(base, tiers)).toBe('container');
+  });
+  it('is null only when the deployment declares no tiers', () => {
+    expect(viewTier({ ...base, sandboxTier: '' }, null)).toBeNull();
+    expect(viewTier(base, null)).toBeNull();
+  });
+  it('a tier stored while tiers were declared is not shown once the deployment stops declaring them: the data plane no longer filters', () => {
+    expect(viewTier({ ...base, sandboxTier: 'microvm' }, null)).toBeNull();
+  });
+});
+
 describe('exchangeCredential', () => {
   let d: CpDeps;
   beforeEach(async () => {
@@ -88,6 +154,57 @@ describe('exchangeCredential', () => {
       sessionId: 'sid-fixed',
       subject: 'github:1234',
     });
+  });
+
+  it('returns the session tier when it has one (P6.3)', async () => {
+    const t = makeDeps({
+      config: {
+        exchangeToken: 'shared-abc', // notsecret
+        defaultInferenceEndpoint: undefined,
+        sandboxTiers: { names: ['container', 'microvm'], default: 'microvm' },
+      },
+    });
+    await seedCredential(t);
+    const token = await sessionToken(t); // creates the session: no tier requested, so the default
+    expect((await exchangeCredential(token, t)).sandboxTier).toBe('microvm');
+  });
+
+  it("names TODAY's default for a session created while no tiers were declared (P6.3)", async () => {
+    // Created untiered (stored ''), then the deployment declares tiers: the exchange names the
+    // default the session now runs in, so the data plane never applies a default of its own.
+    const token = await sessionToken(d);
+    expect((await d.index.get('sid-fixed'))?.sandboxTier).toBe('');
+    const tiered = {
+      ...d,
+      config: {
+        ...d.config,
+        sandboxTiers: { names: ['container', 'microvm'], default: 'microvm' },
+      },
+    };
+    expect((await exchangeCredential(token, tiered)).sandboxTier).toBe('microvm');
+  });
+
+  it('leaves the tier out once the deployment stops declaring tiers, whatever the record stored (P6.3)', async () => {
+    // Created as 'microvm' on a tiered deployment; then the tiers go. The record keeps 'microvm', but
+    // the untiered data plane does not filter on a tier, so the exchange must not name one.
+    const t = makeDeps({
+      config: {
+        exchangeToken: 'shared-abc', // notsecret
+        defaultInferenceEndpoint: undefined,
+        sandboxTiers: { names: ['container', 'microvm'], default: 'container' },
+      },
+    });
+    await seedCredential(t);
+    const created = await HANDLERS.createSession!(
+      ctx({ principal: alice, body: { sandbox: { tier: 'microvm' } } }),
+      { ...t, newId: () => 'sid-fixed' },
+    );
+    const { token } = created.body as { token: string };
+    expect((await t.index.get('sid-fixed'))?.sandboxTier).toBe('microvm');
+    const untiered = { ...t, config: { ...t.config, sandboxTiers: null } };
+    const res = await exchangeCredential(token, untiered);
+    expect(res.sessionId).toBe('sid-fixed');
+    expect(res).not.toHaveProperty('sandboxTier');
   });
 
   it('returns a placeholder, not the real key, whenever the deployment has an injector', async () => {
@@ -336,6 +453,25 @@ describe('readyz', () => {
     });
     expect(await codeOf(() => HANDLERS.readyz!(ctx(), d))).toBe('redis_unavailable');
     expect(get).not.toHaveBeenCalled();
+  });
+
+  it('fails fast when the client is ready but Redis never answers the probe (#434)', async () => {
+    // Connected but wedged: node-redis reports ready, and the GET just never comes back. Unbounded,
+    // readyz would fail only at the kubelet's probe timeout, as a timeout rather than a 503.
+    const get = vi.fn(() => new Promise<never>(() => undefined));
+    const d = makeDeps({
+      index: { get } as unknown as OwnershipIndex,
+      redisReady: () => true,
+      readyzTimeoutMs: 20,
+    });
+    const started = Date.now();
+    const code = await Promise.race([
+      codeOf(() => HANDLERS.readyz!(ctx(), d)),
+      new Promise<string>((resolve) => setTimeout(() => resolve('hung'), 1000).unref()),
+    ]);
+    expect(code).toBe('redis_unavailable');
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(get).toHaveBeenCalledTimes(1);
   });
 
   it('is ok when the client is ready and the index answers', async () => {

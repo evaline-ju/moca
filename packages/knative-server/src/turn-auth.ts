@@ -9,7 +9,7 @@ import {
   type CpRedisLike,
   type ExchangeResponse,
 } from '@moca/control-plane';
-import type { UpstreamCredential } from '@moca/harness/run-turn';
+import type { TurnResult, UpstreamCredential } from '@moca/harness/run-turn';
 
 /**
  * Caller authentication on the `/turn` path (MU1 spec §4.3, §4.3.1, §5.3).
@@ -31,6 +31,8 @@ export interface TurnAuth {
   anthropicBaseUrl: string;
   /** The session's config bundle, from the control plane -- never from the request (ADR-0038). */
   configRef?: string;
+  /** The session's sandbox tier from the exchange (P6.3); absent ⇒ the data plane's default. */
+  sandboxTier?: string;
 }
 
 export interface TurnAuthDeps {
@@ -256,6 +258,10 @@ export async function resolveTurnAuth(
     },
     anthropicBaseUrl: resolved.anthropicBaseUrl,
     ...(resolved.configRef ? { configRef: resolved.configRef } : {}),
+    // Only a non-empty string is trusted; anything else is "no tier", never an odd value in a filter.
+    ...(typeof resolved.sandboxTier === 'string' && resolved.sandboxTier
+      ? { sandboxTier: resolved.sandboxTier }
+      : {}),
   };
 }
 
@@ -319,6 +325,7 @@ export function authenticateSubject(
 export function runtimeFieldsForTurn(
   env: NodeJS.ProcessEnv,
   phase: 'start' | 'end',
+  sandbox?: TurnResult['sandbox'],
 ): Record<string, string> {
   const now = String(Date.now());
   const fields: Record<string, string> = {};
@@ -331,6 +338,18 @@ export function runtimeFieldsForTurn(
   else {
     fields.turnEndedAt = now;
     fields.lastTurnAt = now;
+  }
+  // P6.3 spec §6: where the turn actually ran, known only once it has (hence 'end', from the result).
+  if (sandbox) {
+    fields.sandboxId = sandbox.id;
+    // Written even as '' (no tiers declared), unlike the fields above: the runtime hash write
+    // merges, so leaving it out would keep a previous turn's tier beside this turn's sandboxId.
+    // The resources view shows '' as null.
+    fields.sandboxTier = sandbox.tier;
+    if (sandbox.workspaceReset) {
+      fields.workspaceResetAt = now;
+      fields.workspaceResetFrom = sandbox.workspaceReset.from;
+    }
   }
   return fields;
 }

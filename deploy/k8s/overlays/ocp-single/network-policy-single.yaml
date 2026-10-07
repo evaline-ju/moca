@@ -1,0 +1,44 @@
+# The one namespace's default-deny (both directions, every pod) and DNS, replacing base's three
+# per-namespace default-denies and two allow-dns policies (deleted via $patch: delete, else the
+# collapsed names collide). DNS is openshift-dns on 5353, as overlays/ocp's allow-openshift-dns:
+# on OpenShift the DNS Service's port 53 is served by dns-default pods listening on 5353. All
+# four resolving workloads share the namespace, so one policy covers them; Redis resolves nothing
+# and gets nothing.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: moca-single
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: moca-single
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values:
+          - moca-supervisor
+          - sandbox-relay
+          - moca-control-plane
+          - moca-sandbox
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-dns
+      ports:
+        - protocol: UDP
+          port: 5353
+        - protocol: TCP
+          port: 5353

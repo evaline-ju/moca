@@ -5,6 +5,7 @@ import {
   parseOptionFlags,
   resolveSessionOptions,
   fieldRefusedByServer,
+  sandboxTierField,
 } from '../src/core/session-options.js';
 import { ApiError } from '../src/api/errors.js';
 import { credential, fakeControlPlane } from './helpers/fakes.js';
@@ -43,6 +44,15 @@ describe('resolveSessionOptions', () => {
     expect(
       fieldRefusedByServer(new Error('credential_required'), SESSION_OPTION_FIELDS),
     ).toBeUndefined();
+  });
+
+  it('maps a refusal to the field by its refusal code, whatever the field order', () => {
+    const refused = new ApiError('control-plane', 400, 'credential_required', 'no credential');
+    const reversed = [...SESSION_OPTION_FIELDS].reverse();
+    expect(reversed[0].key).toBe('sandboxTier');
+    expect(fieldRefusedByServer(refused, reversed)?.key).toBe('inferenceCredential');
+    // The tier field may also be left to the server, but no refusal is about it.
+    expect(fieldRefusedByServer(refused, [sandboxTierField])).toBeUndefined();
   });
 
   it('picks the only inference credential silently, ignoring other consumers', async () => {
@@ -95,6 +105,123 @@ describe('resolveSessionOptions', () => {
       {},
     );
     expect(r.status).toBe('needs-input');
+  });
+});
+
+describe('sandboxTierField (P6.3)', () => {
+  const api = (sandboxTiers: { names: string[]; default: string } | null) =>
+    fakeControlPlane({ discovery: async () => ({ harnessUrl: null, sandboxTiers }) });
+
+  it('offers the declared tiers, marking the default', async () => {
+    expect(
+      await sandboxTierField.source(api({ names: ['container', 'microvm'], default: 'container' })),
+    ).toEqual([
+      { value: 'container', label: 'container', isDefault: true },
+      { value: 'microvm', label: 'microvm' },
+    ]);
+  });
+
+  it('is skipped entirely when the deployment declares no tiers', async () => {
+    const r = await resolveSessionOptions(api(null), [sandboxTierField], {}, {});
+    expect(r).toEqual({ status: 'ready', values: {}, request: {} });
+  });
+
+  it('interactive: asks, preselecting the server default when nothing was used last', async () => {
+    const r = await resolveSessionOptions(
+      api({ names: ['container', 'microvm'], default: 'microvm' }),
+      [sandboxTierField],
+      {},
+      {},
+    );
+    expect(r.status).toBe('needs-input');
+    expect(r.status === 'needs-input' && r.defaultValue).toBe('microvm');
+  });
+
+  it('NON-interactive: an omitted tier is left to the server default, never a refusal', async () => {
+    const r = await resolveSessionOptions(
+      api({ names: ['container', 'microvm'], default: 'container' }),
+      [sandboxTierField],
+      {},
+      {},
+      { interactive: false },
+    );
+    expect(r).toEqual({ status: 'ready', values: {}, request: {} });
+  });
+
+  it('a given tier goes into the request as sandbox.tier', async () => {
+    const r = await resolveSessionOptions(
+      api({ names: ['container', 'microvm'], default: 'container' }),
+      [sandboxTierField],
+      { sandboxTier: 'microvm' },
+      {},
+    );
+    expect(r).toMatchObject({ status: 'ready', request: { sandbox: { tier: 'microvm' } } });
+  });
+
+  it('a tier used last beats the server default as the preselection', async () => {
+    const r = await resolveSessionOptions(
+      api({ names: ['container', 'microvm'], default: 'container' }),
+      [sandboxTierField],
+      {},
+      { sandboxTier: 'microvm' },
+    );
+    expect(r.status === 'needs-input' && r.defaultValue).toBe('microvm');
+  });
+
+  it('skips the field when the control plane predates /v1/discovery (a 404, with --harness-url)', async () => {
+    const cp = fakeControlPlane({
+      discovery: async () => {
+        throw new ApiError('control-plane', 404, 'http_404');
+      },
+      listCredentials: async () => [credential('anthropic')],
+    });
+    const r = await resolveSessionOptions(cp, SESSION_OPTION_FIELDS, {}, {});
+    expect(r).toEqual({
+      status: 'ready',
+      values: { inferenceCredential: 'anthropic' },
+      request: { credentials: { inference: 'anthropic' } },
+    });
+  });
+
+  it('lets any other discovery failure propagate', async () => {
+    const cp = fakeControlPlane({
+      discovery: async () => {
+        throw new ApiError('control-plane', 500, 'internal_error');
+      },
+    });
+    await expect(resolveSessionOptions(cp, [sandboxTierField], {}, {})).rejects.toMatchObject({
+      status: 500,
+      code: 'internal_error',
+    });
+  });
+
+  it('treats a malformed sandboxTiers in discovery as no tiers, not a TypeError', async () => {
+    // Discovery is a remote body: anything but { names: string[], default: string } offers nothing.
+    for (const bad of [
+      {},
+      { names: 'container', default: 'container' },
+      { names: ['container', 7], default: 'container' },
+      { names: ['container'] },
+      'container',
+    ]) {
+      const cp = fakeControlPlane({
+        discovery: async () => ({ harnessUrl: null, sandboxTiers: bad as never }),
+      });
+      expect(await sandboxTierField.source(cp)).toEqual([]);
+      const r = await resolveSessionOptions(cp, [sandboxTierField], {}, {});
+      expect(r).toEqual({ status: 'ready', values: {}, request: {} });
+    }
+  });
+
+  it('a given tier on a deployment with none is blocked, saying so', async () => {
+    const r = await resolveSessionOptions(
+      api(null),
+      [sandboxTierField],
+      { sandboxTier: 'microvm' },
+      {},
+    );
+    expect(r.status).toBe('blocked');
+    expect(r.status === 'blocked' && r.field.emptyHint).toContain('declares no sandbox tiers');
   });
 });
 

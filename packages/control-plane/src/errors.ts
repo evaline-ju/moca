@@ -31,6 +31,7 @@ export const CP_ERROR_CODES = [
   'credential_unavailable',
   'endpoint_unresolved',
   'authorization_pending',
+  'device_code_expired',
   'identity_provider_misconfigured',
   'redis_unavailable',
   'internal_error',
@@ -65,6 +66,9 @@ const STATUS: Record<CpErrorCode, number> = {
   // 428 Precondition Required: the device-flow poll has a distinct status so a polling client needs
   // no body inspection to tell "not yet" from "denied" (plan gap #8).
   authorization_pending: 428,
+  // 410 Gone: the device code itself is spent, so polling it again cannot succeed. A distinct code
+  // so a client offers a fresh one (#431) without string-matching GitHub's `expired_token`.
+  device_code_expired: 410,
   // 502: the upstream identity provider refused the control plane's OWN configuration (device flow
   // off, unknown client id). Not 401 -- nothing the caller presents can fix it -- and a distinct code
   // so a client tells the user "ask the operator" without string-matching GitHub's text (#405).

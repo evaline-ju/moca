@@ -41,6 +41,11 @@ describe('ControlPlaneClient', () => {
     expect(calls[0].body).toEqual({ deviceCode: 'd' });
   });
 
+  it('maps 410 device_code_expired on the device poll to "expired"', async () => {
+    const { fetch } = scriptedFetch(json({ error: 'device_code_expired' }, 410));
+    expect(await client(fetch).pollDeviceAuth('d')).toBe('expired');
+  });
+
   it('passes list paging as query parameters', async () => {
     const { fetch, calls } = scriptedFetch(json({ sessions: [], nextCursor: null }));
     await client(fetch).listSessions({ limit: 20, cursor: 123 });

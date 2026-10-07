@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { runTurn, executeTurn, type TurnConfig } from '@moca/harness/run-turn';
+import { runTurn, executeTurn, type TurnConfig, type TurnResult } from '@moca/harness/run-turn';
 import { terminalFrame, type TurnStreamFrame } from '@moca/harness/turn-stream';
 import {
   runLeaf,
@@ -92,6 +92,7 @@ export function buildConfig(auth?: TurnAuth | null): TurnConfig {
       cwd: process.env.HARNESS_CWD || process.cwd(),
       anthropicBaseUrl: auth.anthropicBaseUrl,
       upstreamCredential: auth.credential,
+      ...(auth.sandboxTier ? { sandboxTier: auth.sandboxTier } : {}),
       ...server,
     };
   }
@@ -173,18 +174,26 @@ async function handleTurn(req: IncomingMessage, res: ServerResponse): Promise<vo
     if (auth) {
       // Best-effort pod-identity reporting (spec §7.4). Never gates the turn on Redis.
       void deps.reportRuntime?.(auth.sessionId, runtimeFieldsForTurn(process.env, 'start'));
+      let result: TurnResult | undefined;
+      // Where the turn ran, captured as soon as it is leased: a turn that throws has no result to read
+      // it from, and the report must still show a session that lost its workspace (P6.3 spec §6).
+      let placement: TurnResult['sandbox'];
       try {
-        const result = await executeTurn({
+        result = await executeTurn({
           prompt,
           sessionId: auth.sessionId,
           config: buildConfig(auth),
           // A control-plane-minted session id must not 404 its first turn (plan gap #1).
           createIfAbsent: true,
           configRef: auth.configRef,
+          onPlacement: (p) => (placement = p),
         });
         res.writeHead(200, JSON_HEADERS).end(JSON.stringify(result));
       } finally {
-        void deps.reportRuntime?.(auth.sessionId, runtimeFieldsForTurn(process.env, 'end'));
+        void deps.reportRuntime?.(
+          auth.sessionId,
+          runtimeFieldsForTurn(process.env, 'end', result?.sandbox ?? placement),
+        );
       }
       return;
     }
@@ -193,7 +202,7 @@ async function handleTurn(req: IncomingMessage, res: ServerResponse): Promise<vo
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const status = turnErrorStatus(err);
-    res.writeHead(status, turnErrorHeaders(status)).end(
+    res.writeHead(status, turnErrorHeaders(status, err)).end(
       JSON.stringify({
         error: turnErrorCode(status, message),
         ...(sessionId ? { sessionId } : {}),
@@ -230,7 +239,12 @@ async function handleTurn(req: IncomingMessage, res: ServerResponse): Promise<vo
  * was observed, not hypothesised. The paired test constructs the REAL class, so this string stays
  * pinned to the class rather than drifting from it.
  */
-const NO_CAPACITY = new Set(['SandboxPoolSaturatedError', 'SandboxPoolEmptyError']);
+const NO_CAPACITY = new Set([
+  'SandboxPoolSaturatedError',
+  'SandboxPoolEmptyError',
+  // P6.3: the session's own sandbox is briefly absent. Same advice: retry after Retry-After.
+  'SandboxAffinityPendingError',
+]);
 
 export function turnErrorStatus(err: unknown): number {
   if (err instanceof Error && err.name === 'BundleNotFoundError') return 410;
@@ -260,9 +274,25 @@ export function turnErrorCode(status: number, message: string): string {
  * re-attempts acquisition (see §4.3 above); on `/turn` the session is already open by the time the
  * acquire runs, and re-entering `executeTurn` to retry would re-open it. That asymmetry is real and
  * E8 reads the region it shows up in, so it is worth stating rather than quietly matching.
+ *
+ * When `err` is a SandboxAffinityPendingError carrying a grace-relative retry interval, use its
+ * `retryInMs` instead — proportional backoff, capped at 10 s so a sandbox returning early is still
+ * noticed quickly.
  */
-export function turnErrorHeaders(status: number): Record<string, string> {
+export function turnErrorHeaders(status: number, err?: unknown): Record<string, string> {
   if (status !== 503) return JSON_HEADERS;
+  if (
+    err &&
+    typeof err === 'object' &&
+    'name' in err &&
+    err.name === 'SandboxAffinityPendingError' &&
+    'retryInMs' in err &&
+    typeof err.retryInMs === 'number' &&
+    Number.isFinite(err.retryInMs)
+  ) {
+    const seconds = Math.min(10, Math.max(1, Math.ceil(err.retryInMs / 1000)));
+    return { ...JSON_HEADERS, 'Retry-After': String(seconds) };
+  }
   return { ...JSON_HEADERS, 'Retry-After': String(saturationWaitConfig().retryAfterS) };
 }
 
@@ -315,8 +345,11 @@ async function handleTurnStream(
   const { writeFrame, stop } = makeFrameWriter(res, intEnv('SH_TURN_STREAM_KEEPALIVE_MS', 20000));
   const effectiveSessionId = auth?.sessionId ?? sessionId;
   if (auth) void deps.reportRuntime?.(auth.sessionId, runtimeFieldsForTurn(process.env, 'start'));
+  let result: TurnResult | undefined;
+  // As in the JSON path: a turn that throws after its lease still reports where it ran (P6.3 spec §6).
+  let placement: TurnResult['sandbox'];
   try {
-    const result = await executeTurn({
+    result = await executeTurn({
       prompt,
       sessionId: effectiveSessionId,
       config: buildConfig(auth),
@@ -326,6 +359,7 @@ async function handleTurnStream(
       ...(auth?.configRef ? { configRef: auth.configRef } : {}),
       onEvent: (f) => writeFrame(f),
       signal: ac.signal,
+      onPlacement: (p) => (placement = p),
     });
     // Terminal frame derived from TurnResult — same facts a sync caller reads (§3.4). Not attempted
     // after a disconnect (socket is gone; would EPIPE).
@@ -336,7 +370,7 @@ async function handleTurnStream(
       // still returns real 404 JSON, byte-identical to the sync path (§3.4 regime 2).
       const message = err instanceof Error ? err.message : String(err);
       const status = turnErrorStatus(err);
-      res.writeHead(status, turnErrorHeaders(status)).end(
+      res.writeHead(status, turnErrorHeaders(status, err)).end(
         JSON.stringify({
           error: turnErrorCode(status, message),
           ...(sessionId ? { sessionId } : {}),
@@ -360,7 +394,11 @@ async function handleTurnStream(
     }
   } finally {
     stop();
-    if (auth) void deps.reportRuntime?.(auth.sessionId, runtimeFieldsForTurn(process.env, 'end'));
+    if (auth)
+      void deps.reportRuntime?.(
+        auth.sessionId,
+        runtimeFieldsForTurn(process.env, 'end', result?.sandbox ?? placement),
+      );
     if (!res.writableEnded) res.end();
   }
 }

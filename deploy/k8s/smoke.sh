@@ -18,6 +18,10 @@
 # sandboxes are P4 microVM hosts outside the cluster (SH_P4_SANDBOX_IDS). Claims 1, 5 and 6 are the
 # container tier's; P2-P4 replace 2-4; P6 probes the relay Route; P7 (only with SMOKE_P4_ADD_ID=<a
 # scratch id>) re-runs setup.sh to add that id and back, and proves the relay was not restarted.
+#
+# A tiered stack (P6.3, #425: container sandboxes AND P4 hosts, SH_SANDBOX_TIERS in moca-settings):
+# every session names the tier this smoke tests, so either smoke is right whatever the default tier.
+# Claim 12 (container tier only) proves a session's turns return to the sandbox of its first.
 set -euo pipefail
 
 if [[ "${K8S_LIVE_SMOKE:-}" != 1 ]]; then
@@ -37,7 +41,7 @@ while [[ $# -gt 0 ]]; do
   *) echo "smoke.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done
-case "$TARGET" in kind | kind-ci | ocp) ;; *) echo "smoke.sh: --target must be kind, kind-ci or ocp" >&2; exit 2 ;; esac
+case "$TARGET" in kind | kind-ci | ocp | ocp-single) ;; *) echo "smoke.sh: --target must be kind, kind-ci, ocp or ocp-single" >&2; exit 2 ;; esac
 case "$TIER" in container | p4) ;; *) echo "smoke.sh: --tier must be container or p4" >&2; exit 2 ;; esac
 if [[ "$TIER" == p4 ]]; then
   [[ "$TARGET" == ocp ]] || { echo "smoke.sh: --tier p4 needs --target ocp (P4 hosts reach the relay through an OpenShift Route)" >&2; exit 2; }
@@ -48,6 +52,15 @@ kc() { if [[ "$TARGET" == kind* ]]; then kubectl --context kind-moca "$@"; else 
 
 NS=moca
 SBX=moca-sandbox
+# ocp-single: every workload shares the one namespace the stack was installed in
+# (SH_SINGLE_NAMESPACE, default moca-single). An exported SH_SINGLE_NAMESPACE wins; otherwise it is
+# read from the moca-setup ConfigMap in the kubeconfig's current namespace (the read needs a
+# namespace to find the one it names), and the default covers a ConfigMap that cannot be read.
+if [[ "$TARGET" == ocp-single ]]; then
+  NS="${SH_SINGLE_NAMESPACE:-$(kc get configmap moca-setup -o jsonpath='{.data.SH_SINGLE_NAMESPACE}' 2>/dev/null || true)}"
+  NS="${NS:-moca-single}"
+  SBX="$NS"
+fi
 OUT="$(mktemp -d)"
 chmod 700 "$OUT"
 PIDS=''
@@ -74,12 +87,35 @@ wait_for() { local n="$1"; shift; for _ in $(seq "$n"); do "$@" && return 0; sle
 note() { echo "  note $1"; }
 summary() { printf '\nPASS=%s FAIL=%s\n' "$PASS" "$FAIL"; [[ "$FAIL" == 0 ]]; }
 
+# kind-ci runs the in-pod mock model; ocp-single has no mock (README §12.2), so its smoke needs a
+# real model credential like --target ocp does.
 if [[ "$TARGET" == kind-ci ]]; then
   : "${SMOKE_MODEL_URL:=http://127.0.0.1:18099}" "${SMOKE_MODEL_TOKEN:=mock-not-a-secret}"
 fi
 [[ -n "${SMOKE_MODEL_URL:-}" && -n "${SMOKE_MODEL_TOKEN:-}" ]] ||
   { echo "smoke.sh: --target $TARGET needs SMOKE_MODEL_URL and SMOKE_MODEL_TOKEN" >&2; exit 2; }
 SMOKE_MODEL_KIND="${SMOKE_MODEL_KIND:-bearer}"
+
+# The stack's sandbox tiers (P6.3, #425): setup.sh writes SH_SANDBOX_TIERS=container,microvm to
+# moca-settings only on a mixed stack, '' otherwise (kind and ocp-single are never tiered). A tiered
+# stack puts a session that names no tier in its DEFAULT tier, which may be either, so every session
+# here names the one this smoke tests: then both smokes are right on a mixed stack whatever its
+# default. An untiered control plane refuses a session that names a tier, so there the body is {}.
+# A failed read is not an empty value (P2's setup_read is the same rule): it is a FAIL, because an
+# unreadable moca-settings cannot say "untiered", and treating it so could run a P4 smoke's turns in
+# a container, or pass P2 on the wrong check. The sessions then post {} so the other claims still run.
+tiers_read=1
+tiers="$(kc -n "$NS" get configmap moca-settings -o jsonpath='{.data.SH_SANDBOX_TIERS}' 2>"$OUT/tiers.err")" ||
+  { tiers_read=0; tiers=''; }
+SESSION_BODY='{}'
+if [[ "$tiers_read" == 0 ]]; then
+  ko "could not read configmap moca-settings (SH_SANDBOX_TIERS), so this run cannot tell whether the stack is tiered: $(head -c 300 "$OUT/tiers.err" 2>/dev/null)"
+elif [[ -n "$tiers" ]]; then
+  want_tier=container
+  [[ "$TIER" != p4 ]] || want_tier=microvm
+  SESSION_BODY="$(jq -nc --arg t "$want_tier" '{sandbox: {tier: $t}}')"
+  note "this stack is tiered ($tiers): every session asks for the $want_tier tier"
+fi
 
 HARNESS=http://127.0.0.1:18080
 ADMIN=http://127.0.0.1:18081
@@ -113,7 +149,7 @@ body="$(curl -s "$ADMIN/readyz" || true)"
 if jq -e '.ready == true and .workers > 0 and .healthy == .workers' >/dev/null 2>&1 <<<"$body"; then ok "$body"; else ko "readyz: $body"; fi
 
 if [[ "$TIER" == p4 ]]; then
-  claim P2 "every P4 sandbox in SH_P4_SANDBOX_IDS is attached through the relay, and no container sandbox is"
+  claim P2 "every P4 sandbox in SH_P4_SANDBOX_IDS is attached through the relay; untiered, no container sandbox is; tiered, each P4 record advertises the microvm tier"
   # A failed read is not an empty value: only a readable moca-setup can say "no P4 tier".
   setup_read=1
   ids="$(kc -n "$NS" get configmap moca-setup -o jsonpath='{.data.SH_P4_SANDBOX_IDS}' 2>"$OUT/p2-setup.err")" ||
@@ -136,6 +172,20 @@ if [[ "$TIER" == p4 ]]; then
     done
   fi
   containers="$(grep -E '^moca-sandbox-[0-9]+$' <<<"$keys" | tr '\n' ' ' || true)"
+  containers="${containers% }"
+  # A tiered stack (P6.3) runs container sandboxes beside its P4 hosts on purpose, so there the check
+  # is the other half of tiering: the supervisor leases a microvm session only to a record whose
+  # labels advertise moca.dev/tier=microvm (the relay stores the worker's Hello labels as the
+  # record's .labels), and a P4 host without it gets no sessions at all.
+  unlabelled=''
+  if [[ "$tiers_read" == 1 && -n "$tiers" && -n "$ids" && -z "$bad" && -z "$missing" ]]; then
+    for id in ${p4_ids[@]+"${p4_ids[@]}"}; do
+      # The id matched $idre above, so it is safe inside the quoted redis-cli argument.
+      rec="$(kc -n "$NS" exec redis-0 -- sh -c "redis-cli HGET sh:sandbox:records '$id'" 2>/dev/null || true)"
+      rt="$(jq -r '.labels["moca.dev/tier"] // empty' <<<"$rec" 2>/dev/null || true)"
+      [[ "$rt" == microvm ]] || unlabelled="$unlabelled $id (tier '$rt')"
+    done
+  fi
   if [[ "$setup_read" == 0 ]]; then
     ko "could not read configmap moca-setup: $(head -c 300 "$OUT/p2-setup.err" 2>/dev/null)"
   elif [[ -z "$ids" ]]; then
@@ -144,10 +194,18 @@ if [[ "$TIER" == p4 ]]; then
     ko "moca-setup SH_P4_SANDBOX_IDS holds invalid id(s):$bad (setup.sh writes only ids matching $idre)"
   elif [[ -n "$missing" ]]; then
     ko "not in sh:sandbox:records:$missing (have: $(tr '\n' ' ' <<<"$keys"))"
-  elif [[ -n "${containers// /}" ]]; then
-    ko "container sandboxes attached alongside P4: $containers"
+  elif [[ "$tiers_read" == 0 ]]; then
+    ko "could not tell whether this stack is tiered (moca-settings unreadable, above), so not which check applies: attached: $ids; container sandboxes: ${containers:-none}"
+  elif [[ -z "$tiers" ]]; then
+    if [[ -n "$containers" ]]; then
+      ko "container sandboxes attached alongside P4: $containers"
+    else
+      ok "attached: $ids"
+    fi
+  elif [[ -n "$unlabelled" ]]; then
+    ko "P4 record(s) not advertising moca.dev/tier=microvm:$unlabelled (a P6.3 microvm-worker advertises it; an older one gets no sessions on a tiered stack)"
   else
-    ok "attached: $ids"
+    ok "attached: $ids, each advertising moca.dev/tier=microvm (container sandboxes beside them: ${containers:-none})"
   fi
 else
   claim 2 "every sandbox replica is attached through the relay"
@@ -188,14 +246,20 @@ put="$(curl -s -o "$OUT/put.json" -w '%{http_code}' -X PUT -H @"$OUT/api.hdr" -H
 rm -f "$OUT/cred.json"
 [[ "$put" == 2* ]] || { ko "PUT /v1/credentials answered $put: $(head -c 300 "$OUT/put.json")"; }
 
-# new_session -> sets SID; the session token goes into $OUT/<sid>.hdr
+# new_session [quiet] -> sets SID; the session token goes into $OUT/<sid>.hdr. quiet: a failure is not
+# a FAIL line, only its reason in SESSION_ERR (for a caller that retries).
+# shellcheck disable=SC2120 # quiet is passed through wait_for, which shellcheck cannot follow
 new_session() {
   local s tok
-  s="$(curl -s -X POST -H @"$OUT/api.hdr" -H 'Content-Type: application/json' -d '{}' "$CP/v1/sessions" || true)"
+  SESSION_ERR=''
+  s="$(curl -s --max-time 10 -X POST -H @"$OUT/api.hdr" -H 'Content-Type: application/json' -d "$SESSION_BODY" "$CP/v1/sessions" || true)"
   SID="$(jq -r '.sessionId // empty' <<<"$s" 2>/dev/null || true)"
-  [[ -n "$SID" ]] || { ko "POST /v1/sessions returned no session: ${s:0:300}"; return 1; }
-  tok="$(jq -r '.token // empty' <<<"$s" 2>/dev/null || true)"
-  [[ -n "$tok" ]] || { ko "POST /v1/sessions returned no token for session $SID"; return 1; }
+  [[ -n "$SID" ]] || SESSION_ERR="POST /v1/sessions returned no session: ${s:0:300}"
+  if [[ -z "$SESSION_ERR" ]]; then
+    tok="$(jq -r '.token // empty' <<<"$s" 2>/dev/null || true)"
+    [[ -n "$tok" ]] || SESSION_ERR="POST /v1/sessions returned no token for session $SID"
+  fi
+  if [[ -n "$SESSION_ERR" ]]; then [[ "${1-}" == quiet ]] || ko "$SESSION_ERR"; return 1; fi
   (umask 077; printf 'Authorization: Bearer %s\n' "$tok" >"$OUT/$SID.hdr")
 }
 # turn TAG SID PROMPT -> $OUT/TAG.sse; true when the stream ended with this session's done frame
@@ -336,9 +400,13 @@ JS
     elif [[ ",$ids," == *",$SMOKE_P4_ADD_ID,"* ]]; then
       ko "SMOKE_P4_ADD_ID=$SMOKE_P4_ADD_ID is already a P4 host: pick a scratch id"
     else
+      # SH_SANDBOX_COUNT and SH_SANDBOX_DEFAULT_TIER are not given: both are sticky (moca-setup), so
+      # both runs keep the stack's values. Forcing a count of 0 here would scale a mixed stack's
+      # container sandboxes away (and untier it). `env -u`: an operator's exported value must not
+      # change the stack either.
       # setup.sh writes the sticky moca-setup early, so even a failed add can leave the scratch id
       # behind (sticky, with a token and a bundle): the restore runs whenever the add was attempted.
-      if ! SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS="$ids,$SMOKE_P4_ADD_ID" bash "$setup_sh" --target ocp >"$OUT/p7-add.log" 2>&1; then
+      if ! env -u SH_SANDBOX_COUNT -u SH_SANDBOX_DEFAULT_TIER SH_P4_SANDBOX_IDS="$ids,$SMOKE_P4_ADD_ID" bash "$setup_sh" --target ocp >"$OUT/p7-add.log" 2>&1; then
         ko "setup.sh adding $SMOKE_P4_ADD_ID failed (log kept: $OUT/p7-add.log)"
       else
         t0="$SECONDS"
@@ -355,7 +423,7 @@ JS
         fi
       fi
       # Put the list back: revokes the scratch id and deletes its bundle.
-      SH_SANDBOX_COUNT=0 SH_P4_SANDBOX_IDS="$ids" bash "$setup_sh" --target ocp >"$OUT/p7-restore.log" 2>&1 ||
+      env -u SH_SANDBOX_COUNT -u SH_SANDBOX_DEFAULT_TIER SH_P4_SANDBOX_IDS="$ids" bash "$setup_sh" --target ocp >"$OUT/p7-restore.log" 2>&1 ||
         ko "setup.sh restoring SH_P4_SANDBOX_IDS=$ids failed (log kept: $OUT/p7-restore.log): re-run it by hand"
     fi
   fi
@@ -369,20 +437,28 @@ probe() {
     'timeout 3 bash -c "</dev/tcp/$0/$1" 2>/dev/null && echo OPEN || echo BLOCKED' "$1" "$2" 2>/dev/null || echo ERROR
 }
 iso_ok=1
-for t in redis.moca.svc:6379 sandbox-relay-exec.moca.svc:9444 169.254.169.254:80; do
+for t in redis.$NS.svc:6379 sandbox-relay-exec.$NS.svc:9444 169.254.169.254:80; do
   r="$(probe "${t%:*}" "${t#*:}")"
   [[ "$r" == BLOCKED ]] || { iso_ok=0; ko "$t is $r from a sandbox (want BLOCKED)"; }
 done
 r="$(probe kubernetes.default.svc 443)"
 if [[ "$TARGET" == ocp ]]; then
   [[ "$r" == BLOCKED ]] || { iso_ok=0; ko "kubernetes.default.svc:443 is $r (want BLOCKED)"; }
+elif [[ "$TARGET" == ocp-single ]]; then
+  # The three-namespace ocp target enforces this; on a shared cluster a cluster-level network
+  # allowance can admit the apiserver endpoint past the namespace's policies (on ROKS, the
+  # node-local proxy 172.20.0.1:2040, inside the excepted 172.16.0.0/12). The sandbox mounts no
+  # ServiceAccount token, so the API refuses it either way. README §12.3.
+  note "kubernetes.default.svc:443 is $r (a cluster-level network allowance can admit it past the namespace's policies; the sandbox holds no ServiceAccount token — README §12.3)"
 else
   note "kubernetes.default.svc:443 is $r (single-node kind: kindnet does not filter node-local traffic; enforced on OCP — README Troubleshooting)"
 fi
-r="$(probe sandbox-relay-attach.moca.svc 9443)"
+r="$(probe sandbox-relay-attach.$NS.svc 9443)"
 [[ "$r" == OPEN ]] || { iso_ok=0; ko "sandbox-relay-attach:9443 is $r (want OPEN)"; }
 if [[ "$iso_ok" == 0 ]]; then :; elif [[ "$TARGET" == ocp ]]; then
   ok 'redis, relay exec, kube API and metadata BLOCKED; relay attach OPEN'
+elif [[ "$TARGET" == ocp-single ]]; then
+  ok 'redis, relay exec and metadata BLOCKED; relay attach OPEN (kube API: see note)'
 else
   ok 'redis, relay exec, metadata BLOCKED; relay attach OPEN'
 fi
@@ -431,5 +507,53 @@ if ! restarts="$(kc get pods -n "$NS" -o json | jq '[.items[].status | (.contain
   ! restarts_sbx="$(kc get pods -n "$SBX" -o json | jq '[.items[].status.containerStatuses[]?.restartCount] | add // 0')"; then
   ko "could not read pod restart counts"
 elif [[ "$restarts" == 0 && "$restarts_sbx" == 0 ]]; then ok; else ko "restartCount moca=$restarts moca-sandbox=$restarts_sbx (kubectl describe pod for OOMKilled)"; fi
+
+claim 12 "every turn of a session returns to the sandbox of its first turn (affinity, P6.3)"
+# First turns run CONCURRENTLY so their leases overlap and the least-loaded choice spreads them over
+# both sandboxes. A bare echo often finishes before the next turn leases, and then least-loaded puts
+# every session on one sandbox, where the second turns land with or without affinity: so each first
+# turn holds its lease for 2 s (`sleep 2`). Second turns run one by one, when every sandbox is idle.
+# Without affinity the second turns would all go to the first sandbox, so a session first served by
+# the other one would move.
+# Plain indexed arrays (bash 3.2), and wait on OUR pids only: port-forwards run in the background too.
+aff_sids=() aff_pids=() aff_first=()
+aff_ok=1 aff_down=0
+# Claim 10 just restarted Redis, and nothing above waits for the supervisor and the control plane to
+# reconnect: the first session is retried for up to 60 s, so a stack still reconnecting is not a FAIL
+# of affinity. That session is the first of the four.
+if wait_for 60 new_session quiet; then
+  aff_sids+=("$SID")
+  for i in 1 2 3; do new_session && aff_sids+=("$SID"); done
+  [[ "${#aff_sids[@]}" == 4 ]] || aff_ok=0
+else
+  aff_ok=0 aff_down=1
+fi
+for i in ${aff_sids[@]+"${!aff_sids[@]}"}; do
+  # shellcheck disable=SC2016 # $HOSTNAME is the sandbox's: it must expand there, not here
+  turn "where1-$i" "${aff_sids[$i]}" "$(ask K8S-SMOKE-WHERE-1 'sleep 2; echo "where=$HOSTNAME"')" &
+  aff_pids+=("$!")
+done
+for p in ${aff_pids[@]+"${aff_pids[@]}"}; do wait "$p" || aff_ok=0; done
+# tool_text decodes a real model's JSON envelope and passes the mock's plain preview through (as P3
+# relies on). `|| true`: a turn whose stream is not JSON must read as no sandbox, not end the run.
+where_of() { tool_out "$OUT/$1.sse" | tool_text | sed -n 's/.*where=\([A-Za-z0-9_.-]*\).*/\1/p' | first_line || true; }
+for i in ${aff_sids[@]+"${!aff_sids[@]}"}; do
+  aff_first[i]="$(where_of "where1-$i")"
+  [[ -n "${aff_first[$i]}" ]] || aff_ok=0
+done
+for i in ${aff_sids[@]+"${!aff_sids[@]}"}; do
+  # shellcheck disable=SC2016 # as above
+  turn "where2-$i" "${aff_sids[$i]}" "$(ask K8S-SMOKE-WHERE-2 'echo "where=$HOSTNAME"')" || aff_ok=0
+  again="$(where_of "where2-$i")"
+  [[ -n "$again" && "$again" == "${aff_first[$i]}" ]] ||
+    { aff_ok=0; echo "  session ${aff_sids[$i]}: first '${aff_first[$i]}', then '$again'"; }
+done
+if ((aff_down)); then
+  ko "the stack took no new session within 60s of the Redis restart (claim 10); last: $SESSION_ERR"
+elif ((aff_ok)); then ok "4 sessions, each on one sandbox for both turns"; else ko "a session moved between sandboxes, or a turn failed"; fi
+# The note qualifies a pass only: after a FAIL there is nothing to tell apart from luck.
+spread="$(printf '%s\n' ${aff_first[@]+"${aff_first[@]}"} | sort -u | grep -c . || true)"
+((!aff_ok)) || [[ "$spread" -ge 2 ]] ||
+  note "the first turns all landed on one sandbox, so this run could not tell affinity from luck"
 
 summary

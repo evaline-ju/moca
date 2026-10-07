@@ -1,7 +1,8 @@
 import { timingSafeEqual } from 'node:crypto';
 import { inferenceAuthHeader, type InferenceAuthHeader } from './credential-store.js';
 import { CpError } from './errors.js';
-import type { CpDeps } from './handlers.js';
+import type { CpConfig, CpDeps } from './handlers.js';
+import type { SessionRecord } from './ownership.js';
 import { verifyToken } from './token.js';
 
 /**
@@ -34,6 +35,11 @@ export interface ExchangeResponse {
   authHeader?: Exclude<InferenceAuthHeader, 'authorization'>;
   /** The session's config bundle digest (ADR-0038). Absent when the session has none. */
   configRef?: string;
+  /**
+   * The session's sandbox tier (P6.3 spec §3.3), which the data plane filters sandboxes on
+   * (sessionTier). Absent only when the deployment declares no tiers, so that response is unchanged.
+   */
+  sandboxTier?: string;
 }
 
 /**
@@ -44,6 +50,31 @@ export interface ExchangeResponse {
  */
 export function placeholderFor(subject: string): string {
   return `sh-placeholder-${subject}`;
+}
+
+/**
+ * The tier to hand the data plane: the stored one, or -- for a session that names none (stored ''
+ * because it was created while no tiers were declared, or a record written before P6.3 with no
+ * field) -- TODAY's default, the tier such a session runs in. Naming the default here, rather than
+ * leaving the data plane to apply its own SH_SANDBOX_DEFAULT_TIER, makes the exchange the one
+ * source of truth for these sessions, so the placement cannot disagree with viewTier.
+ *
+ * '' whenever the deployment declares no tiers, which the exchange then leaves out, so the untiered
+ * response stays byte-identical. That holds even for a record that stored a tier while tiers were
+ * declared: the data plane runs untiered then and filters nothing, so naming the stored tier would
+ * claim a placement that no longer happens (spec §3.3).
+ */
+export function sessionTier(rec: SessionRecord, tiers: CpConfig['sandboxTiers']): string {
+  return tiers ? rec.sandboxTier || tiers.default : '';
+}
+
+/**
+ * The tier a session view shows (sessionView, projectResources): the tier the session runs in,
+ * which is exactly what the exchange names (sessionTier). Null whenever the deployment declares no
+ * tiers, a stored tier included: the data plane runs untiered then, so no tier is in force.
+ */
+export function viewTier(rec: SessionRecord, tiers: CpConfig['sandboxTiers']): string | null {
+  return sessionTier(rec, tiers) || null;
 }
 
 /**
@@ -254,6 +285,7 @@ export async function exchangeCredential(
     decision: usedOperatorFallback ? 'operator_fallback_used' : 'credential_issued',
   });
 
+  const tier = sessionTier(rec, deps.config.sandboxTiers);
   return {
     mode,
     anthropicAuthToken: mode === 'placeholder' ? placeholderFor(rec.owner) : secretValue,
@@ -264,5 +296,6 @@ export async function exchangeCredential(
     // and the injector decides the upstream header.
     ...(mode === 'direct' && authHeader === 'x-api-key' ? { authHeader } : {}),
     ...(rec.configRef ? { configRef: rec.configRef } : {}),
+    ...(tier ? { sandboxTier: tier } : {}),
   };
 }

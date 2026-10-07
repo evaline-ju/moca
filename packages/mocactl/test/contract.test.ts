@@ -18,7 +18,7 @@ const openapi = parse(readFileSync(new URL('docs/api/openapi.yaml', root), 'utf8
 const USED: Array<{ method: string; path: string; reads?: string[]; sends?: string[] }> = [
   { method: 'get', path: '/healthz' },
   { method: 'get', path: '/readyz' },
-  { method: 'get', path: '/v1/discovery', reads: ['harnessUrl'] },
+  { method: 'get', path: '/v1/discovery', reads: ['harnessUrl', 'sandboxTiers'] },
   {
     method: 'post',
     path: '/v1/auth/device',
@@ -36,7 +36,7 @@ const USED: Array<{ method: string; path: string; reads?: string[]; sends?: stri
     method: 'post',
     path: '/v1/sessions',
     reads: ['sessionId', 'token', 'expiresAt'],
-    sends: ['credentials', 'configRef'],
+    sends: ['credentials', 'sandbox', 'configRef'],
   },
   { method: 'get', path: '/v1/sessions/{id}' },
   { method: 'delete', path: '/v1/sessions/{id}' },
@@ -61,6 +61,7 @@ const CODES_USED = [
   'session_mismatch',
   'endpoint_unresolved',
   'authorization_pending',
+  'device_code_expired',
   'identity_provider_misconfigured',
   'redis_unavailable',
   'credential_unavailable',

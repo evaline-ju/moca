@@ -32,9 +32,11 @@ GitHub account, and an SSH account restricted to the tunnel (0c). The operator c
 user 1, and one person with two GitHub accounts can play both (1a, the trap).
 
 **Order matters.** The container tier comes first (Acts 1 to 3), the microVM tier last (Act 4).
-A host serves one tier at a time, and going back to containers means re-running `setup-vm.sh`,
-which recreates Redis and forgets every session (#410). Switching to P4 needs no re-run, so it is
-the one switch made during the demo.
+A host may run both tiers at once: each session then stays in the tier it was created in and
+returns to its sandbox (`deploy/microvm/P4-ON-P6.md`, "Container sandboxes and P4 on one host").
+This demo still switches the host to P4 only for Act 4. Going back to containers means re-running
+`setup-vm.sh`, which recreates Redis and forgets every session (#410). Switching to P4 needs no
+re-run, so it is the one switch made during the demo.
 
 **Tenancy: `MOCA_TENANCY` unset (`single`), as `deploy/vm` ships it.** On this release `single`
 has no first-subject pin, so user 2 is served like user 1. Once MI1 S2's pin lands, `single`
@@ -112,8 +114,9 @@ Act 4. Follow `deploy/microvm/P4-ON-P6.md`:
 
 1. **Build the golden snapshot** ("Build the golden snapshot"), from the image 0a pulled. The
    container sandboxes can keep running for this.
-2. **Remove the container sandboxes and install the worker.** `setup-microvm.sh` refuses while
-   any `sh-sandbox-*` container exists:
+2. **Remove the container sandboxes and install the worker.** The demo removes them so that Act 4
+   shows a P4-only host. A host may keep both tiers instead (`P4-ON-P6.md`, "Container sandboxes
+   and P4 on one host"), and `setup-microvm.sh` then makes it tiered:
 
    ```bash
    sudo podman rm -f $(sudo podman ps -a --format '{{.Names}}' --filter 'name=^sh-sandbox-')
@@ -174,7 +177,10 @@ The run passed 13/13 on a raw Anthropic key. It leaves its minted subject's empt
 
 > Trap: from here until Cleanup, **do not re-run `setup-vm.sh`.** Every re-run loses every user's
 > sessions (#410), and a re-run while the microVM worker is enabled starts the containers next to
-> it, so both tiers attach and sessions hop between them.
+> it, so both tiers attach. Until a `setup-microvm.sh` re-run makes the host tiered, a new session
+> may land in either tier (each still returns to its sandbox); after it, each session stays in the
+> tier it was created in (`deploy/microvm/P4-ON-P6.md`, "Container sandboxes and P4 on one host").
+> Either way the host is no longer the P4-only one Act 4 shows.
 
 ### 0c. The participants' SSH accounts
 
@@ -694,14 +700,15 @@ Say these in the room. They are what stops someone over-promising.
   `moca-egress`.
 - **P4 has no internet** (#277) **and no grant binding** (MI1 S4). Its workspaces are per session,
   but any holder of the relay's exec token can target any of them.
-- **A container session can lose its files between turns.** A session re-selects its sandbox on
-  every turn, least loaded first, with no affinity to the last one. Each `sh-sandbox-N` has its own
-  `/workspace` and no shared volume. So once two turns overlap, a session's next turn can land on
-  the other container, without its files. On an idle host, ties go to the same container, which is
-  why 2d found both directories in `sh-sandbox-1`. No container act here depends on files across
-  turns. The microVM tier's per-session workspace (4d) is what does keep them.
-- **One tier per host.** Presence records carry no tier label, so with both tiers attached a
-  session can also hop between tiers. Choosing the tier per session is not built.
+- **A session returns to its sandbox.** Each turn goes back to the sandbox that served the previous
+  one. If that sandbox is saturated, or briefly absent (a relay restart) for up to
+  `SH_SANDBOX_AFFINITY_GRACE_SECONDS` (60 s), the turn answers 503 with `Retry-After` and the client
+  retries: the session waits and never moves. Only a sandbox gone past the grace moves the session,
+  to the least-loaded sandbox of its tier, on an empty workspace, and the turn says so
+  (`workspace reset: …`); it never crosses tiers.
+- **Both tiers on one host are not shown.** A host may run both: each session stays in the tier it
+  was created in (`sandboxTier`) and returns to its sandbox (`deploy/microvm/P4-ON-P6.md`,
+  "Container sandboxes and P4 on one host"). This demo switches to P4 only for Act 4 instead.
 - **Plain HTTP.** The SSH tunnel is the confidentiality. There is no TLS.
 - **Ownership holds at the API only.** Redis (`127.0.0.1:6379`) and the supervisor's admin listener
   (`:8081`) have no authentication. Anyone with a shell on the VM, or unrestricted forwarding, is

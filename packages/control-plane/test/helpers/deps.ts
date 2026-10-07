@@ -48,6 +48,7 @@ export function makeDeps(
       allowOperatorFallback: false,
       injectorConfigured: false,
       sandboxNamespace: 'default',
+      sandboxTiers: null,
       ...configOver,
     },
     now: () => NOW_MS,

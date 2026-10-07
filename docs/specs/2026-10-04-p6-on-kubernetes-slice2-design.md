@@ -44,7 +44,7 @@ Builds on these; it reuses them and redesigns nothing:
 
 **Out of scope:**
 
-- **More than one tier per stack, or more than one P4 host per stack.** That is slice 3, rossoctl/moca#425. Until then, `selectPoolSandbox` has no tier label and no session affinity (rossoctl/moca#424, "Limits").
+- **More than one tier per stack, or more than one P4 host per stack.** That is slice 3, rossoctl/moca#425. Until then, `selectPoolSandbox` has no tier label and no session affinity (rossoctl/moca#424, "Limits"). Lifted by P6.3 (#425, `2026-10-04-p6-on-kubernetes-slice3-design.md`).
 - **External P4 on Kind or plain Kubernetes.** It needs a router or an LB; follow-up.
 - **cert-manager.**
 - **P4 guest networking** (#277); the P4 acts have no research turns.
@@ -117,6 +117,8 @@ These objects are rendered only when there is at least one P4 host. §4.6 explai
 
 ### 4.2 One tier per stack (until slice 3)
 
+Superseded by P6.3: a stack with both tiers is tiered, not refused.
+
 A non-empty `SH_P4_SANDBOX_IDS` together with `SH_SANDBOX_COUNT > 0` is **refused**. The message names both values and the fix (`SH_SANDBOX_COUNT=0`). P4 IDs on `--target kind` or `kind-ci` are refused too: there is no router, so the external path is OpenShift-only in this slice.
 
 ### 4.3 Tokens
@@ -168,7 +170,7 @@ The generated overlay adds the §2.4 objects only when the ID list is non-empty.
   The cluster is the token authority, so the bundle's token **replaces** a stale local one. That is the one place where the host-side "generated once" rule gives way.
 
 - **Points the worker at the network instead of the local relay.** The worker drop-in `50-moca-p6.conf` is replaced by `50-moca-remote.conf`, which loads the worker env file with `After=` and `Wants=network-online.target` and does not refer to `sh-relay.service`.
-- **Touches nothing local:** no relay drop-in, no `microvm-relay.env` (a stale one is left in place, so switching back works), no `podman`, no Redis, and no requirement for an installed P6. The P4-only container check is skipped, because the host's own P6 is not used.
+- **Touches nothing local:** no relay drop-in, no `microvm-relay.env` (a stale one is left in place, so switching back works), no `podman`, no Redis, and no requirement for an installed P6. The P4-only container check is skipped, because the host's own P6 is not used. Superseded by P6.3 in one respect: on a host an earlier mixed local run tiered, `--remote` removes the tier files and try-restarts the installed `sh-supervisor` and `sh-control-plane` (P6.3 spec §7).
 - **Checks the attach.** It polls the journal of the unit's **current** process (`systemctl show -p InvocationID`, then `journalctl _SYSTEMD_INVOCATION_ID=<id>`) for `attached, serving execs`, for up to `MICROVM_ATTACH_TIMEOUT` seconds. A timestamp would also match the previous process's line, and an unchanged re-run leaves the worker running, so its line predates any timestamp. Once that line appears, it waits `MICROVM_ATTACH_SETTLE` seconds (default 5, at least 1, to outlast the worker's first reconnect backoff of at most 750 ms) and reads the journal again; a wait that starts before the timeout may finish after it. It passes only if the InvocationID is unchanged, no new `attached` or `stream ended` line appeared during the window, and the last such line is `attached`. The window is needed because the worker logs `attached` when its stream opens, before the relay checks the token: a refused token shows as `stream ended … reconnecting` within milliseconds, then a retry. On a timeout it dies, naming that journal, which carries the TLS or auth error.
 - **Switching back.** Running the script again without `--remote` restores local-relay mode:
   - `50-moca-p6.conf` comes back;
@@ -180,7 +182,7 @@ The generated overlay adds the §2.4 objects only when the ID list is non-empty.
 
 ## 6. `deploy/k8s/smoke.sh --tier p4`
 
-`--tier container` stays the default and runs today's 11 claims. `--tier p4`, which is OpenShift only, runs these claims:
+`--tier container` stays the default and runs the 11 claims of slice 2's time (P6.3 adds claim 12, session affinity). `--tier p4`, which is OpenShift only, runs these claims:
 
 1. The supervisor is ready.
 2. Every ID in `SH_P4_SANDBOX_IDS`, read from `moca-setup`, is in `sh:sandbox:records`, and no container-sandbox record is there.
@@ -217,7 +219,7 @@ The mock model gains scripts for claims 3–4, `K8S-SMOKE-P4-WRITE` and `K8S-SMO
   - P4 IDs are sticky, and an explicit empty value clears them;
   - tokens are generated once and kept;
   - a removed ID removes its key and its bundle;
-  - both tiers together are refused, and P4 IDs on kind are refused;
+  - both tiers together are refused (superseded by P6.3: a stack with both tiers is tiered, not refused), and P4 IDs on kind are refused;
   - the ID rule and duplicates;
   - bundle modes are 0700 and 0600;
   - no token anywhere in the argv log, raw or base64;

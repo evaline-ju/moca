@@ -16,9 +16,21 @@ export interface RelayTimers {
   clearTimeout: (handle: unknown) => void;
 }
 
+/**
+ * The detach mark (P6.3 spec §3.2): when a sandbox left, so the harness can measure an absent affine
+ * sandbox's grace period from the real departure. Optional: a relay without it behaves exactly as
+ * before, and the harness then starts the clock itself at the first turn that notices.
+ */
+export interface DetachMarks {
+  mark(sandboxId: string): Promise<void>;
+  clear(sandboxId: string): Promise<void>;
+}
+
 export interface RelayDeps {
   records: RecordStore;
   validateToken: (token: string | undefined, sandboxId: string) => boolean;
+  /** Detach marks; main.ts wires them to the record store's client. */
+  detach?: DetachMarks;
   /** Defaults to the global timers. */
   timers?: RelayTimers;
 }
@@ -123,6 +135,8 @@ export function createRelay(deps: RelayDeps): Relay {
 
   function onAttach(stream: AttachStream): void {
     let sandboxId: string | undefined;
+    // The session THIS stream's Hello parked, so teardown acts on it and on nothing else.
+    let own: Parked | undefined;
     stream.on('data', (frame: WorkerFrame) => {
       if (frame.hello && !sandboxId) {
         const id = frame.hello.sandboxId;
@@ -143,6 +157,7 @@ export function createRelay(deps: RelayDeps): Relay {
         }
         sandboxId = id;
         const session: Parked = { stream, sinks: new Map() };
+        own = session;
         sessions.set(id, session);
         const rec: SandboxRecord = {
           sandboxId: id,
@@ -154,6 +169,9 @@ export function createRelay(deps: RelayDeps): Relay {
           capacityMax: frame.hello.capacityMax,
           transport: 'grpc',
         };
+        // Cleared BEFORE the presence put: both go through the record store's one client, whose queue
+        // is FIFO, so the DEL reaches Redis first and no reader sees a present sandbox with a stale mark.
+        void deps.detach?.clear(id).catch((e) => console.error('detach mark clear failed', e));
         putPresence(id, session, rec);
         return;
       }
@@ -163,22 +181,28 @@ export function createRelay(deps: RelayDeps): Relay {
       const reqId = frame.chunk?.reqId ?? frame.end?.reqId ?? frame.error?.reqId;
       if (reqId !== undefined) parked.sinks.get(reqId)?.(toExecEvent(frame));
     });
+    /**
+     * Registered for both 'end' and 'error', and a stream can emit both. Guarded by session
+     * identity (#434): only while the map still holds THIS stream's session does teardown act. The
+     * second event finds the map empty -- or, if the worker reattached in between, holding the NEW
+     * session under the same id, which a by-id teardown used to evict: cancelling its presence
+     * retry, failing its execs and removing its record.
+     */
     const teardown = () => {
-      if (sandboxId) {
-        // Fail any in-flight execs fast instead of leaving their routeExec
-        // generators parked forever on a frame that will never arrive.
-        const parked = sessions.get(sandboxId);
-        if (parked) {
-          parked.cancelPresence?.();
-          for (const [reqId, sink] of parked.sinks) {
-            sink({ error: { reqId, message: 'worker disconnected' } } as ExecEvent);
-          }
-        }
-        sessions.delete(sandboxId);
-        void deps.records
-          .remove(sandboxId)
-          .catch((e) => console.error('presence remove failed', e));
+      if (!sandboxId || !own || sessions.get(sandboxId) !== own) return;
+      const parked = own;
+      own = undefined;
+      parked.cancelPresence?.();
+      // Fail any in-flight execs fast instead of leaving their routeExec
+      // generators parked forever on a frame that will never arrive.
+      for (const [reqId, sink] of parked.sinks) {
+        sink({ error: { reqId, message: 'worker disconnected' } } as ExecEvent);
       }
+      sessions.delete(sandboxId);
+      void deps.records.remove(sandboxId).catch((e) => console.error('presence remove failed', e));
+      // After the remove, through the same client: a reader that sees the record gone and no mark
+      // yet writes its own (SET-if-absent), which this overwrite then corrects to the true time.
+      void deps.detach?.mark(sandboxId).catch((e) => console.error('detach mark write failed', e));
     };
     stream.on('end', teardown);
     stream.on('error', teardown);

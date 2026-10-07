@@ -13,13 +13,14 @@ import {
   type CredentialStore,
   type InferenceAuthHeader,
 } from './credential-store.js';
-import { exchangeCredential, OPERATOR_FALLBACK_NAME } from './exchange.js';
+import { exchangeCredential, OPERATOR_FALLBACK_NAME, viewTier } from './exchange.js';
 import type { RunKubectl } from './kubectl.js';
 import { DEFAULT_PAGE_SIZE, type OwnershipIndex, type SessionRecord } from './ownership.js';
 import type { IdentityProvider } from './identity.js';
 import type { KeyObject } from 'node:crypto';
 import type { MintInput, TokenClaims } from './token.js';
 import { projectResources, resolveSandbox } from './resources.js';
+import type { SandboxTiers } from './sandbox-tiers.js';
 
 export interface CpConfig {
   apiTokenTtlSeconds: number;
@@ -44,6 +45,11 @@ export interface CpConfig {
    * only this control plane's URL. Unset means the deployment advertises none.
    */
   publicHarnessUrl?: string;
+  /**
+   * The declared sandbox tiers (P6.3), or null when the deployment declares none. Read once at boot:
+   * configFromEnv refuses a list it cannot serve, so a session is never validated against a typo.
+   */
+  sandboxTiers: SandboxTiers | null;
 }
 
 export interface CpDeps {
@@ -71,6 +77,12 @@ export interface CpDeps {
    * Absent means "do not know", and readyz falls back to asking the index.
    */
   redisReady?: () => boolean;
+  /**
+   * How long readyz waits on the index before calling Redis unavailable; 500 ms by default. Below
+   * the kubelet's 1 s default probe timeout, so a connected-but-wedged Redis answers 503 rather
+   * than timing the probe out (#434). A test seam, not a setting.
+   */
+  readyzTimeoutMs?: number;
   /** Release the Redis client. A test that builds deps through depsFromEnv must call it. */
   close?: () => Promise<void>;
 }
@@ -176,6 +188,9 @@ async function auditBestEffort(
 /** Public view of a session record. `turns` comes from the display-only runtime hash. */
 async function sessionView(rec: SessionRecord, deps: CpDeps) {
   const runtime = await deps.index.getRuntime(rec.sessionId);
+  // The tier the session actually runs in: what it was created with, or -- for '' or a record that
+  // predates P6.3 -- today's default, which the exchange names for it. Null only when untiered.
+  const tier = viewTier(rec, deps.config.sandboxTiers);
   return {
     sessionId: rec.sessionId,
     owner: rec.owner,
@@ -185,6 +200,7 @@ async function sessionView(rec: SessionRecord, deps: CpDeps) {
     configRef: rec.configRef,
     lastTurnAt: runtime.lastTurnAt ? Number(runtime.lastTurnAt) : null,
     turns: runtime.turns ? Number(runtime.turns) : 0,
+    sandboxTier: tier,
   };
 }
 
@@ -195,7 +211,10 @@ export const HANDLERS: Record<string, Handler> = {
   // "this control plane predates discovery" and name the right fix for each.
   getDiscovery: async (_ctx, deps) => ({
     status: 200,
-    body: { harnessUrl: deps.config.publicHarnessUrl ?? null },
+    body: {
+      harnessUrl: deps.config.publicHarnessUrl ?? null,
+      sandboxTiers: deps.config.sandboxTiers,
+    },
   }),
 
   startDeviceAuth: async (_ctx, deps) => ({
@@ -270,6 +289,31 @@ export const HANDLERS: Record<string, Handler> = {
         throw new CpError('configRef_invalid', 'configRef must be sha256:<64 lowercase hex>');
       }
     }
+    // The sandbox tier (P6.3 spec §3.3), resolved and RECORDED here like the credential: a later change
+    // to the deployment default must not move an existing session between tiers.
+    const sandbox = body.sandbox;
+    if (
+      sandbox !== undefined &&
+      (typeof sandbox !== 'object' || sandbox === null || Array.isArray(sandbox))
+    ) {
+      throw new CpError('invalid_request', 'sandbox must be an object');
+    }
+    const requestedTier = asRecord(sandbox).tier;
+    if (requestedTier !== undefined && typeof requestedTier !== 'string') {
+      throw new CpError('invalid_request', 'sandbox.tier must be a string');
+    }
+    const tiers = deps.config.sandboxTiers;
+    if (requestedTier !== undefined && !tiers) {
+      throw new CpError('invalid_request', 'this deployment declares no sandbox tiers');
+    }
+    if (requestedTier !== undefined && tiers && !tiers.names.includes(requestedTier)) {
+      throw new CpError(
+        'invalid_request',
+        `unknown sandbox tier '${requestedTier}': this deployment declares ${tiers.names.join(', ')}`,
+      );
+    }
+    const sandboxTier = requestedTier ?? tiers?.default ?? '';
+
     const sessionId = deps.newId();
     const rec: SessionRecord = {
       sessionId,
@@ -280,6 +324,7 @@ export const HANDLERS: Record<string, Handler> = {
       poolSelector: null, // MU2's tenant-labelled partition fills this (spec §8.2)
       credentialName,
       configRef,
+      sandboxTier,
       tombstone: false,
     };
     await deps.index.create(rec);
@@ -480,7 +525,7 @@ export const HANDLERS: Record<string, Handler> = {
       deps.runKubectl,
       rec.tenant,
     );
-    return { status: 200, body: projectResources(rec, runtime, sandbox) };
+    return { status: 200, body: projectResources(rec, runtime, sandbox, deps.config.sandboxTiers) };
   },
 
   exchangeCredential: async (ctx, deps) => {
@@ -506,10 +551,21 @@ export const HANDLERS: Record<string, Handler> = {
     if (deps.redisReady?.() === false) {
       throw new CpError('redis_unavailable', 'redis is not answering');
     }
+    // Ready is not the same as answering: a client node-redis reports ready can sit on a GET that
+    // never returns (a wedged server, a half-open socket), so the probe is bounded too (#434).
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error('readyz probe timed out')),
+        deps.readyzTimeoutMs ?? 500,
+      );
+    });
     try {
-      await deps.index.get('__readyz__');
+      await Promise.race([deps.index.get('__readyz__'), timeout]);
     } catch {
       throw new CpError('redis_unavailable', 'redis is not answering');
+    } finally {
+      clearTimeout(timer);
     }
     return { status: 200, body: 'ok' };
   },

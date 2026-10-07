@@ -37,6 +37,8 @@ services:
       # (bind and dial ports read from different files) cannot recur on either wire.
       SH_RELAY_PORT: ${SH_RELAY_PORT:-9443}
       REDIS_URL: redis://redis:6379
+      # P6.3 sandbox affinity: detach mark TTL. See deploy/vm/env/relay.env.example.
+      SH_SANDBOX_AFFINITY_TTL_SECONDS:
       # Fail-closed at the relay (makeDefaultValidateToken): no token, no attach. Fail here first.
       SH_RELAY_TOKEN: ${SH_RELAY_TOKEN:?SH_RELAY_TOKEN is required -- set it in .env (install.sh generates one)}
       # The workers' credential for SandboxExec (MI1 §5 R5). Never set on the sandbox service.
@@ -70,6 +72,11 @@ services:
       SH_WORKER_RESTART_BACKOFF_MS: '250'
       SH_SANDBOX_DISCOVERY: records
       SH_REMOTE_SANDBOX: '1'
+      # P6.3 sandbox tiers: unset = untiered (this trial runs one tier). See deploy/vm/env/supervisor.env.example.
+      SH_SANDBOX_TIERS:
+      SH_SANDBOX_DEFAULT_TIER:
+      SH_SANDBOX_AFFINITY_GRACE_SECONDS:
+      SH_SANDBOX_AFFINITY_TTL_SECONDS:
       SH_RELAY_ADDR: sandbox-relay:${MOCA_RELAY_EXEC_PORT:-9444}
       MOCA_RELAY_EXEC_TOKEN: ${MOCA_RELAY_EXEC_TOKEN:?MOCA_RELAY_EXEC_TOKEN is required -- set it in .env (install.sh generates one)}
       REDIS_URL: redis://redis:6379
@@ -136,6 +143,9 @@ services:
       SH_EXCHANGE_TOKEN:
       SH_GITHUB_CLIENT_ID:
       SH_ADMIN_SUBJECTS:
+      # P6.3 sandbox tiers. See deploy/vm/env/control-plane.env.example.
+      SH_SANDBOX_TIERS:
+      SH_SANDBOX_DEFAULT_TIER:
       # The harness as the USER reaches it, advertised by GET /v1/discovery, so mocactl needs only
       # this service's URL. Tracks SH_PORT, the supervisor's published port.
       SH_PUBLIC_HARNESS_URL: http://127.0.0.1:${SH_PORT:-8080}

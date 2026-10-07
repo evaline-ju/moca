@@ -84,6 +84,35 @@ describe('SessionsOverlay', () => {
     expect(f).toContain('1 turn');
   });
 
+  it('shows the sandbox tier a session runs in, and none for an untiered one (P6.3)', async () => {
+    const cp = fakeControlPlane({
+      listSessions: async () => ({
+        sessions: [
+          summary('aaaaaaaa-1', { sandboxTier: 'microvm' }),
+          summary('bbbbbbbb-2', { turns: 1, sandboxTier: null }),
+        ],
+        nextCursor: null,
+      }),
+    });
+    const { lastFrame } = render(
+      withTheme(
+        <SessionsOverlay
+          cp={cp}
+          now={() => NOW}
+          remove={vi.fn()}
+          onResume={vi.fn()}
+          onNew={vi.fn()}
+          onDeleted={vi.fn()}
+          onCancel={vi.fn()}
+        />,
+      ),
+    );
+    await waitFor(() => (lastFrame() ?? '').includes('bbbbbbbb'), 1000, lastFrame);
+    const f = lastFrame()!;
+    expect(f).toContain('3h ago · 4 turns · microvm');
+    expect(f).toMatch(/3h ago · 1 turn\s*$/m);
+  });
+
   it('resumes the highlighted session on Enter', async () => {
     const { stdin, onResume, lastFrame } = setup();
     await waitFor(

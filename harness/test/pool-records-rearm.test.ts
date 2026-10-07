@@ -176,3 +176,60 @@ describe('RedisRecordStore re-arms after an established connection gives up', ()
     await expect(store.close()).resolves.toBeUndefined();
   });
 });
+
+/**
+ * A failed attempt must clear only ITS OWN memo (#428). node-redis sets `isOpen` false synchronously
+ * when an attempt gives up, but the rejection takes several microtasks to reach connectOnce's
+ * `.catch`. A call landing in that window sees `!isOpen`, re-arms, and memoises a second attempt;
+ * the first `.catch` then used to wipe that newer memo, so a third call started a THIRD connect()
+ * on a socket the second had already opened -- node-redis's `Socket already opened`.
+ *
+ * The client is a stand-in whose connect() the test settles by hand, so the interleaving is exact
+ * rather than a timing race: one connect in flight, fail it, and call again before any microtask.
+ */
+describe('RedisRecordStore re-arm clears only its own memo (#428)', () => {
+  function fakeClient() {
+    const attempts: Array<{ resolve: () => void; reject: (e: Error) => void }> = [];
+    const client = {
+      isOpen: false,
+      connect: vi.fn(() => {
+        // node-redis: connect() on an open socket rejects; otherwise it opens synchronously.
+        if (client.isOpen) return Promise.reject(new Error('Socket already opened'));
+        client.isOpen = true;
+        return new Promise<void>((resolve, reject) => attempts.push({ resolve, reject }));
+      }),
+      hSet: vi.fn(async () => 1),
+    };
+    /** The attempt gives up the way node-redis's does: `isOpen` false first, the rejection after. */
+    const fail = (i: number) => {
+      client.isOpen = false;
+      attempts[i]!.reject(new Error('redis unreachable'));
+    };
+    return { client, attempts, fail };
+  }
+
+  it('a call in a failed attempt`s rejection window keeps its new memo for the next caller', async () => {
+    const store = new RedisRecordStore('redis://127.0.0.1:1', 1);
+    const { client, attempts, fail } = fakeClient();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (store as any).client = client;
+
+    const first = store.put(rec);
+    expect(client.connect).toHaveBeenCalledTimes(1);
+
+    // The attempt fails, and a second caller lands before its rejection reaches the .catch.
+    fail(0);
+    const second = store.put(rec);
+    expect(client.connect).toHaveBeenCalledTimes(2);
+    await expect(first).rejects.toThrow('redis unreachable');
+    await new Promise((r) => setImmediate(r)); // every microtask of the first attempt has run
+
+    // A third caller must share the second attempt, not start a connect on its open socket.
+    const third = store.put(rec);
+    attempts[1]!.resolve();
+    await expect(second).resolves.toBeUndefined();
+    await expect(third).resolves.toBeUndefined();
+    expect(client.connect).toHaveBeenCalledTimes(2);
+    expect(client.hSet).toHaveBeenCalledTimes(2);
+  });
+});

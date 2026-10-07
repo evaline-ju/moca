@@ -41,6 +41,9 @@ spec:
             - name: SANDBOX_ID
               valueFrom: { fieldRef: { fieldPath: metadata.name } }
             - { name: RELAY_ADDR, value: 'sandbox-relay-attach.moca.svc:9443' }
+            # The presence label the supervisor filters on (moca.dev/tier). Also the binary's default;
+            # explicit so a mixed stack's manifests say which tier each workload is.
+            - { name: SANDBOX_TIER, value: container }
             - name: SANDBOX_TOKEN
               valueFrom: { secretKeyRef: { name: moca-relay-attach, key: SH_RELAY_TOKEN } }
           securityContext:

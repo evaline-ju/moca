@@ -10,24 +10,33 @@
 # snapshot at $MICROVM_SNAPSHOT_DIR (build-rootfs.sh, then build-snapshot.sh -- see P4-ON-P6.md);
 # Go, unless MICROVM_BIN names a prebuilt binary.
 #
-# P4-ONLY HOST (#369 gap 4, decision T1): selectPoolSandbox leases the least-loaded of ALL presence
-# records and re-selects every turn, so with container sandboxes attached a session's turns can hop
-# between tiers and lose the microVM workspace. This script therefore refuses while any sh-sandbox-*
-# container is running.
+# A HOST WITH CONTAINER SANDBOXES TOO (P6.3, docs/specs/2026-10-04-p6-on-kubernetes-slice3-design.md
+# §7) is made tiered rather than refused: when any sh-sandbox-* container exists, running or stopped,
+# this script writes microvm-tiers.env and drop-ins that load it into sh-supervisor and
+# sh-control-plane, so each session stays in the tier it was created in. A P4-only host stays untiered.
+# Before it writes anything, every RUNNING container sandbox must advertise moca.dev/tier=container
+# in its presence record (a pre-P6.3 image advertises none, and a tiered host would exclude it); a
+# stopped one cannot be checked and is warned about.
 #
 # Usage: sudo ./deploy/microvm/setup-microvm.sh [--remote BUNDLE_DIR]      (re-running changes nothing)
 #
 # --remote BUNDLE_DIR (P6 on Kubernetes, docs/specs/2026-10-04-p6-on-kubernetes-slice2-design.md §5):
 # attach this host's worker to a relay in a cluster, over TLS, instead of to a local P6. The bundle is
 # the directory deploy/k8s/setup.sh wrote for this host's ID; its token replaces a local one (the
-# cluster is the token authority), and MICROVM_SANDBOX_ID comes from it. Nothing local is touched:
-# no relay drop-in, no podman, no installed P6 needed. Running again without --remote switches back.
+# cluster is the token authority), and MICROVM_SANDBOX_ID comes from it. No relay drop-in, no podman,
+# no installed P6 needed. The one local change: tier files an earlier mixed run wrote are removed, and
+# the installed units try-restarted, since this host's own P6 is container-only once its only microVM
+# worker attaches elsewhere. Running again without --remote switches back.
 #
 # Env overrides: SH_UNIT_DIR, SH_ENV_DIR, SH_BIN_DIR, MICROVM_SANDBOX_ID, MICROVM_WORKSPACE_IDLE,
 # MICROVM_SNAPSHOT_DIR, MICROVM_BIN, MICROVM_ATTACH_TIMEOUT, MICROVM_ATTACH_SETTLE (--remote: seconds
 # an attach must hold before it counts, at least 1) -- defaults below -- and
 # MICROVM_MAX_COMMITTED_MB (unset by default): a VM-memory budget in MiB for a host smaller than the
-# shipped unit's 24 GiB, written as a drop-in that also lowers the unit's AssertMemory to match.
+# shipped unit's 24 GiB, written as a drop-in that also lowers the unit's AssertMemory to match -- and
+# SH_SANDBOX_DEFAULT_TIER (container or microvm): the tier of a session created without one, on a host
+# with both tiers. Sticky, like deploy/k8s/setup.sh's: unset keeps the value in microvm-tiers.env (else
+# container), and set but empty clears it back to container. Given on a host that ends up untiered
+# (P4-only, or --remote), it is not recorded, and a log line says so.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,9 +58,12 @@ RELAY_CA_DST="$SH_ENV_DIR/microvm-relay-ca.crt"
 REMOTE_BUNDLE='' # --remote's directory; empty in local mode
 B_ADDR='' B_ID='' B_TOKEN='' B_CA=''
 MEMORY_DROPIN="60-moca-memory.conf"
+TIERS_DROPIN="50-microvm-tiers.conf" # in sh-supervisor.service.d and sh-control-plane.service.d
 # The shipped unit's SH_MEMORY_RESERVE_MB: a budget at or below it admits nothing (Config.Normalize).
 SHIPPED_RESERVE_MB=4096
 CHANGED=() # destination paths this run actually rewrote
+MIXED=0    # 1 when container sandboxes share this host with the microVM worker (preflight)
+DEFAULT_TIER=container # the resolved SH_SANDBOX_DEFAULT_TIER (preflight)
 
 log() { printf '==> %s\n' "$*"; }
 die() { echo "setup-microvm.sh: $*" >&2; exit 1; }
@@ -143,22 +155,77 @@ preflight() {
   # rejected token's attached -> stream ended -> attached cycle could fall outside the window.
   [[ "$MICROVM_ATTACH_SETTLE" =~ ^[1-9][0-9]*$ ]] ||
     die "MICROVM_ATTACH_SETTLE='$MICROVM_ATTACH_SETTLE' must be a whole number of seconds, at least 1, to outlast the worker's first reconnect backoff (at most 750ms)"
+  # The default tier is sticky: a re-run without SH_SANDBOX_DEFAULT_TIER must not silently flip a
+  # chosen microvm back to container (and try-restart both units to do it). Set but empty clears it.
+  # The RESOLVED value is checked, so a bad stored one is refused too -- on both paths, before the
+  # --remote return below, so a bad value writes nothing anywhere. (--remote records no default and
+  # removes microvm-tiers.env, but a typo should not pass silently.) A stored one names its clear.
+  local tiers_env="$SH_ENV_DIR/microvm-tiers.env" from clear=''
+  if [[ -n "${SH_SANDBOX_DEFAULT_TIER+x}" ]]; then
+    DEFAULT_TIER="${SH_SANDBOX_DEFAULT_TIER:-container}" from=''
+  else
+    DEFAULT_TIER="$(env_value SH_SANDBOX_DEFAULT_TIER "$tiers_env")" from=" in $tiers_env"
+    DEFAULT_TIER="${DEFAULT_TIER:-container}"
+    clear=', or set SH_SANDBOX_DEFAULT_TIER= (empty) to clear it'
+  fi
+  case "$DEFAULT_TIER" in
+    container | microvm) ;;
+    *) die "SH_SANDBOX_DEFAULT_TIER='$DEFAULT_TIER'$from must be container or microvm$clear" ;;
+  esac
   if [[ -z "$REMOTE_BUNDLE" ]]; then
     [[ -f "$SH_ENV_DIR/relay.env" && -f "$SH_UNIT_DIR/sh-relay.service" ]] ||
       die "no installed P6 found ($SH_ENV_DIR/relay.env, $SH_UNIT_DIR/sh-relay.service); run deploy/vm/setup-vm.sh first"
   fi
   [[ -f "$MICROVM_SNAPSHOT_DIR/manifest.json" ]] ||
     die "no golden snapshot at $MICROVM_SNAPSHOT_DIR; build one with deploy/microvm/build-rootfs.sh then build-snapshot.sh (deploy/microvm/P4-ON-P6.md)"
-  # Remote: the tier rule is the cluster's (setup.sh refuses both tiers on one stack); this host's own
-  # containers, if any, attach to its own relay, which the remote worker does not use.
+  # Remote: MIXED stays 0. This host's own containers, if any, attach to its own relay, which the
+  # remote worker does not use, so the local P6 is container-only and untiered (install_tiers removes
+  # what an earlier mixed run wrote); the cluster's setup.sh tiers the cluster's stack.
   [[ -z "$REMOTE_BUNDLE" ]] || return 0
   local attached
   # -a: a STOPPED sandbox container still counts. setup-vm.sh runs them --restart=always, and
   # podman-restart.service brings every such container back at boot -- both tiers attached again.
   attached="$(podman ps -a --format '{{.Names}}' --filter 'name=^sh-sandbox-' | tr '\n' ' ')"
-  if [[ -n "${attached// /}" ]]; then
-    die "container sandboxes are attached to the relay (${attached% }). This host must be P4-only while the microVM tier serves: sessions re-select a sandbox every turn and would hop between tiers. Stop them (podman rm -f ${attached% }) and re-run deploy/vm/setup-vm.sh with SH_SANDBOX_COUNT=0 so a re-run does not start them again."
+  # P6.3: a host with both tiers is TIERED rather than refused -- each session stays in the tier it
+  # was created in (spec §7; deploy/vm/env/supervisor.env.example, "Sandbox tiers"). install_tiers acts on it.
+  [[ -z "${attached// /}" ]] || MIXED=1
+  ((MIXED == 0)) || check_container_tiers "$attached"
+}
+
+# check_container_tiers "<sh-sandbox-* names>": before a host is tiered, every RUNNING container
+# sandbox must advertise moca.dev/tier=container. setup-vm.sh never pulls (`podman run --replace` of
+# the image it already has), so an older host keeps a pre-P6.3 image, whose worker advertises no
+# tier; the tiered harness excludes it, and every container-tier session -- the default tier -- then
+# fails with "no attached sandbox in sandbox tier 'container'". The label is read from the presence
+# record the relay mirrors from the worker's Hello (sh:sandbox:records, keyed by sandbox id), the
+# way start_worker and verify_attached reach Redis. The id is the container's name: setup-vm.sh's
+# start_sandboxes runs `--name sh-sandbox-$i -e SANDBOX_ID=sh-sandbox-$i`. A STOPPED container has
+# no record to read and is only warned about. Nothing is guessed: an unreachable Redis is refused.
+check_container_tiers() {
+  local running name rec tier img bad='' first_bad='' unattached=''
+  running=" $(podman ps --format '{{.Names}}' --filter 'name=^sh-sandbox-' | tr '\n' ' ') "
+  for name in $1; do
+    [[ "$running" == *" $name "* ]] ||
+      log "WARNING: $name is not running, so its tier cannot be checked; it must be P6.3 or later"
+  done
+  [[ -n "${running// /}" ]] || return 0
+  [[ "$(podman exec sh-redis redis-cli PING 2>/dev/null)" == PONG ]] ||
+    die "cannot reach Redis (podman exec sh-redis redis-cli PING) to check the container sandboxes' tier before tiering this host; start sh-redis (deploy/vm/setup-vm.sh) and re-run. Nothing was written"
+  for name in $running; do
+    rec="$(podman exec sh-redis redis-cli HGET sh:sandbox:records "$name")" ||
+      die "cannot reach Redis to read $name's presence record; start sh-redis (deploy/vm/setup-vm.sh) and re-run. Nothing was written"
+    if [[ -z "$rec" ]]; then unattached+=" $name"; continue; fi
+    tier="$(printf '%s' "$rec" | sed -n 's/.*"moca\.dev\/tier":"\([^"]*\)".*/\1/p')"
+    [[ "$tier" == container ]] || { bad+=" $name (tier '${tier:-none}')"; first_bad="${first_bad:-$name}"; }
+  done
+  if [[ -n "$bad" ]]; then
+    # The image the container runs is the one setup-vm.sh was given (SANDBOX_IMAGE, or its default).
+    img="$(podman inspect --format '{{.ImageName}}' "$first_bad" 2>/dev/null)" || img=''
+    img="${img:-${SANDBOX_IMAGE:-ghcr.io/rossoctl/moca-remote-worker:latest}}"
+    die "container sandboxes not advertising moca.dev/tier=container:$bad. A tiered host excludes them, and every container-tier session would fail; no tier at all means a pre-P6.3 image. setup-vm.sh never pulls, so: podman pull $img, then re-run deploy/vm/setup-vm.sh (its podman run --replace recreates the containers on the new image), then re-run this script. Nothing was written"
   fi
+  [[ -z "$unattached" ]] ||
+    die "${unattached# } is running but not attached to the relay (no record in sh:sandbox:records), so its tier cannot be checked; see podman logs and journalctl -u sh-relay, then re-run. Nothing was written"
 }
 
 # install_if_changed <src> <dst> <mode>: copy only when the content differs, recording dst in CHANGED.
@@ -271,6 +338,41 @@ install_memory_dropin() {
   install_if_changed "$1/memory.conf" "$dst" 0644
 }
 
+# install_tiers: co-located with container sandboxes, tell P6's supervisor and control plane that two
+# tiers exist (P6.3), through ONE env file both units load, so the two cannot disagree; otherwise
+# (P4-only, or --remote) remove what an earlier mixed run wrote. Drop-ins and an env file of OURS,
+# never an edit to supervisor.env / control-plane.env, which setup-vm.sh owns.
+install_tiers() {
+  local env="$SH_ENV_DIR/microvm-tiers.env" def="$DEFAULT_TIER" stage stored
+  local sup="$SH_UNIT_DIR/sh-supervisor.service.d/$TIERS_DROPIN"
+  local cp="$SH_UNIT_DIR/sh-control-plane.service.d/$TIERS_DROPIN"
+  if ((MIXED == 0)); then
+    # The sticky default lives only in the tiers file, so an untiered host neither records a given
+    # one nor keeps a stored one: both are said out loud, so a later return to mixed is no surprise.
+    [[ -z "${SH_SANDBOX_DEFAULT_TIER:-}" ]] ||
+      log "SH_SANDBOX_DEFAULT_TIER=$SH_SANDBOX_DEFAULT_TIER ignored: this host is not tiered (only a host with container sandboxes AND a local P4 worker is), so it is not recorded"
+    if [[ -f "$env" ]]; then
+      stored="$(env_value SH_SANDBOX_DEFAULT_TIER "$env")"
+      [[ -z "$stored" || "$stored" == container ]] ||
+        log "this host is no longer tiered: the stored SH_SANDBOX_DEFAULT_TIER=$stored in $env is dropped with it (sessions default to container again if it is re-tiered)"
+    fi
+    # Running units keep the old drop-in until the daemon-reload in apply(), and see the change at
+    # its try-restart there; the order of these removals does not matter.
+    remove_if_present "$sup"; remove_if_present "$cp"; remove_if_present "$env"
+    return 0
+  fi
+  log "two sandbox tiers on this host (container, microvm; default $def): each session stays in the tier it was created in"
+  stage="$(mktemp -d)"
+  printf 'SH_SANDBOX_TIERS=container,microvm\nSH_SANDBOX_DEFAULT_TIER=%s\n' "$def" >"$stage/tiers.env"
+  # `EnvironmentFile=` WITHOUT systemd's `-` prefix, on purpose: a tiers file deleted by hand makes
+  # both units fail to start, loudly, rather than run untiered on a host that has both tiers.
+  printf '[Service]\nEnvironmentFile=%s\n' "$env" >"$stage/tiers.conf"
+  install_if_changed "$stage/tiers.env" "$env" 0644
+  install_if_changed "$stage/tiers.conf" "$sup" 0644
+  install_if_changed "$stage/tiers.conf" "$cp" 0644
+  rm -rf "$stage"
+}
+
 install_env() {
   local worker="$SH_ENV_DIR/microvm-worker.env" relay="$SH_ENV_DIR/microvm-relay.env" port token
   port="$(relay_port "$SH_ENV_DIR/relay.env")"
@@ -331,13 +433,28 @@ apply() {
   local relay_restart=0
   if changed_any "$SH_UNIT_DIR/microvm-worker.service" "$SH_UNIT_DIR/microvm-vms.slice" \
     "$SH_UNIT_DIR/sh-relay.service.d/$RELAY_DROPIN" "$SH_UNIT_DIR/microvm-worker.service.d/$WORKER_DROPIN" \
-    "$SH_UNIT_DIR/microvm-worker.service.d/$REMOTE_DROPIN" "$SH_UNIT_DIR/microvm-worker.service.d/$MEMORY_DROPIN"; then
+    "$SH_UNIT_DIR/microvm-worker.service.d/$REMOTE_DROPIN" "$SH_UNIT_DIR/microvm-worker.service.d/$MEMORY_DROPIN" \
+    "$SH_UNIT_DIR/sh-supervisor.service.d/$TIERS_DROPIN" "$SH_UNIT_DIR/sh-control-plane.service.d/$TIERS_DROPIN"; then
     systemctl daemon-reload
   fi
   if changed_any "$SH_UNIT_DIR/sh-relay.service.d/$RELAY_DROPIN" "$SH_ENV_DIR/microvm-relay.env"; then
     log "restarting sh-relay.service to load the microVM worker's token (in-flight turns fail and retry)"
     systemctl restart sh-relay.service
     relay_restart=1
+  fi
+  # try-restart, never restart (setup-vm.sh's rule): an unconfigured supervisor or control plane is
+  # left stopped on purpose, and starting it would trip systemd's start limit. A stopped unit loads
+  # the drop-in on its next start anyway.
+  # Only a unit that is installed: a P6 from before the control plane (#366) has no
+  # sh-control-plane.service, and systemd refuses a try-restart of a unit it cannot find (exit 5) --
+  # under set -e that would end the run with the files written, and a re-run, seeing them unchanged,
+  # would never try-restart the supervisor. The drop-in is written all the same: it is harmless, and
+  # the setup-vm.sh run that later installs the unit picks it up.
+  if changed_any "$SH_ENV_DIR/microvm-tiers.env" "$SH_UNIT_DIR/sh-supervisor.service.d/$TIERS_DROPIN" \
+    "$SH_UNIT_DIR/sh-control-plane.service.d/$TIERS_DROPIN"; then
+    log "re-reading the sandbox tiers: try-restart sh-control-plane and sh-supervisor (the supervisor drains in-flight turns)"
+    [[ ! -f "$SH_UNIT_DIR/sh-control-plane.service" ]] || systemctl try-restart sh-control-plane.service
+    [[ ! -f "$SH_UNIT_DIR/sh-supervisor.service" ]] || systemctl try-restart sh-supervisor.service
   fi
   systemctl enable microvm-worker.service
   if ((relay_restart)) || changed_any "$SH_BIN_DIR/microvm-worker" "$SH_UNIT_DIR/microvm-worker.service" \
@@ -438,6 +555,8 @@ main() {
   install_worker_binary
   install_units
   if [[ -n "$REMOTE_BUNDLE" ]]; then install_env_remote; else install_env; fi
+  # --remote: MIXED is 0 (preflight), so this removes what an earlier mixed local run wrote.
+  install_tiers
   apply
   if [[ -n "$REMOTE_BUNDLE" ]]; then verify_attached_remote; else verify_attached; fi
   if ((${#CHANGED[@]})); then log "changed: ${CHANGED[*]}"; else log "nothing to change"; fi

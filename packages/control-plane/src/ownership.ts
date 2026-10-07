@@ -47,6 +47,12 @@ export interface SessionRecord {
   /** The config bundle this session's turns run with -- chosen once, at creation (ADR-0038). */
   configRef: string | null;
   tombstone: boolean;
+  /**
+   * The session's sandbox tier, chosen once at creation (P6.3 spec §3.3). '' when the deployment
+   * declared none then. Undefined ONLY for a record written before P6.3, which has no field. Read
+   * as stored, never coerced; the exchange gives both today's default (sessionTier, exchange.ts).
+   */
+  sandboxTier?: string;
 }
 
 export const AUDIT_STREAM = 'sh:cp:audit';
@@ -78,6 +84,12 @@ const RUNTIME_FIELDS = [
   // authz, and a wrong value changes the status code, never whether the delete happened.
   'turnStartedAt',
   'turnEndedAt',
+  // P6.3 spec §6: where the last leased turn ran, and when the session last lost its workspace
+  // (knative-server runtimeFieldsForTurn). Display-only, read by the resources view's `placement`.
+  'sandboxId',
+  'sandboxTier',
+  'workspaceResetAt',
+  'workspaceResetFrom',
 ] as const;
 
 export class OwnershipIndex {
@@ -115,6 +127,7 @@ export class OwnershipIndex {
         credentialName: rec.credentialName,
         configRef: rec.configRef ?? '',
         tombstone: rec.tombstone ? '1' : '0',
+        sandboxTier: rec.sandboxTier ?? '',
       }),
     );
     await this.guard(() =>
@@ -137,6 +150,7 @@ export class OwnershipIndex {
       credentialName: h.credentialName ?? '',
       configRef: h.configRef ? h.configRef : null,
       tombstone: h.tombstone === '1',
+      sandboxTier: h.sandboxTier,
     };
   }
 

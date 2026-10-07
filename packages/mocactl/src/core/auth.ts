@@ -21,22 +21,53 @@ export interface LoginDeps {
   now: () => number;
 }
 
+/** How many device codes one login may show: the first, and one re-issue after it expires. */
+const MAX_CODES = 2;
+
+/**
+ * Run the device flow. `onCode` gets each code to show, with `attempt` 1 for the first.
+ *
+ * A code that expires unapproved -- the control plane says `device_code_expired`, or its
+ * `expiresIn` passes here first -- is re-issued ONCE (#431). The usual way a login ends is a user
+ * who was away from the browser, and a fresh code on the screen they come back to costs one
+ * request where a failure costs a re-run. Once, not forever: an unattended login still ends, after
+ * two codes' lifetimes, with LoginExpiredError.
+ */
 export async function deviceLogin(
   deps: LoginDeps,
-  onCode: (start: DeviceStart) => void,
+  onCode: (start: DeviceStart, attempt: number) => void,
   signal?: AbortSignal,
 ): Promise<ApiLogin> {
-  const start = await deps.cp.startDeviceAuth();
-  onCode(start);
+  for (let attempt = 1; ; attempt++) {
+    const start = await deps.cp.startDeviceAuth();
+    onCode(start, attempt);
+    const result = await pollOneCode(deps, start, signal);
+    if (result !== 'expired') return result;
+    if (attempt >= MAX_CODES) throw new LoginExpiredError();
+  }
+}
+
+async function pollOneCode(
+  deps: LoginDeps,
+  start: DeviceStart,
+  signal?: AbortSignal,
+): Promise<ApiLogin | 'expired'> {
   const deadline = deps.now() + start.expiresIn * 1000;
   const interval = Math.max(1, start.interval) * 1000;
   for (;;) {
     await deps.sleep(interval, signal);
     if (signal?.aborted) throw new LoginCancelledError();
-    if (deps.now() > deadline) throw new LoginExpiredError();
+    if (deps.now() > deadline) return 'expired';
     const result = await deps.cp.pollDeviceAuth(start.deviceCode);
     if (result !== 'pending') return result;
   }
+}
+
+/** A code's lifetime for a person to read: whole minutes, rounded down; seconds under one. */
+export function codeValidity(expiresInS: number): string {
+  if (expiresInS < 60) return `${Math.max(0, Math.floor(expiresInS))} seconds`;
+  const m = Math.floor(expiresInS / 60);
+  return m === 1 ? '1 minute' : `${m} minutes`;
 }
 
 export function toCachedAuth(login: ApiLogin, controlPlaneUrl: string): CachedAuth {

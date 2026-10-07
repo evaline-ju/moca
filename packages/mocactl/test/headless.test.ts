@@ -88,6 +88,24 @@ describe('cmdRun', () => {
     expect(o.stderr.join('\n')).toContain('--option inferenceCredential=<value>: a, b');
   });
 
+  it('names a rejected --option credential, terminal-safe, listing the declared ones', async () => {
+    const o = io();
+    const cp = fakeControlPlane({
+      listCredentials: async () => [credential('a'), credential('b')],
+    });
+    expect(
+      await cmdRun(runtime({ cp }), o, {
+        prompt: 'hi',
+        options: { inferenceCredential: 'zz\u001b[2J' },
+        json: false,
+      }),
+    ).toBe(2);
+    const err = o.stderr.join('\n');
+    expect(err).toContain("unknown inference credential 'zz'; declared: a, b");
+    expect(err).not.toContain('\u001b');
+    expect(cp.calls).not.toContain('createSession');
+  });
+
   it('uses the credential named with --option', async () => {
     let asked: unknown;
     const rt = runtime({
@@ -132,6 +150,49 @@ describe('cmdRun', () => {
     });
     expect(await cmdRun(runtime({ cp }), o, { prompt: 'hi', options: {}, json: false })).toBe(0);
     expect(requests).toEqual([{}]);
+  });
+
+  it('leaves the sandbox tier to the server default when none was chosen (P6.3)', async () => {
+    const o = io();
+    const requests: unknown[] = [];
+    const cp = fakeControlPlane({
+      discovery: async () => ({
+        harnessUrl: 'http://h',
+        sandboxTiers: { names: ['container', 'microvm'], default: 'container' },
+      }),
+      listCredentials: async () => [credential('anthropic')],
+      createSession: async (req) => {
+        requests.push(req);
+        return { sessionId: 's-new', token: 'st', expiresAt: 4_000_000_000 };
+      },
+    });
+    expect(await cmdRun(runtime({ cp }), o, { prompt: 'hi', options: {}, json: false })).toBe(0);
+    expect(requests).toEqual([{ credentials: { inference: 'anthropic' } }]);
+    expect(requests[0]).not.toHaveProperty('sandbox');
+  });
+
+  it('refuses an undeclared tier locally, listing the declared ones (P6.3)', async () => {
+    const o = io();
+    const cp = fakeControlPlane({
+      discovery: async () => ({
+        harnessUrl: 'http://h',
+        sandboxTiers: { names: ['container', 'microvm'], default: 'container' },
+      }),
+      listCredentials: async () => [credential('anthropic')],
+    });
+    expect(
+      await cmdRun(runtime({ cp }), o, {
+        prompt: 'hi',
+        options: { sandboxTier: 'gpu' },
+        json: false,
+      }),
+    ).toBe(2);
+    // It says the given value was rejected, rather than asking as though none had been given.
+    expect(o.stderr.join('\n')).toContain(
+      "unknown sandbox tier 'gpu'; declared: container, microvm",
+    );
+    expect(o.stderr.join('\n')).not.toContain('choose the');
+    expect(cp.calls).not.toContain('createSession');
   });
 
   it('refuses to run without a valid login', async () => {
@@ -236,8 +297,50 @@ describe('cmdLogin', () => {
     });
     expect(await cmdLogin(rt, o)).toBe(0);
     expect(o.stderr[0]).toContain('ABCD-1234');
+    // #431: say how long the code lasts, from the server's expiresIn (900 s in the fake).
+    expect(o.stderr[0]).toContain('valid for 15 minutes');
     expect(loadAuth(rt.paths, 'http://cp')?.apiToken).toBe('new-api');
     expect(rt.transcripts).toBeDefined();
+  });
+
+  it('prints a new code when the first expires, and logs in with it', async () => {
+    let n = 0;
+    const o = io();
+    const rt = runtime({
+      auth: null,
+      cp: fakeControlPlane({
+        startDeviceAuth: async () => {
+          n += 1;
+          return {
+            deviceCode: `d${n}`,
+            userCode: `CODE-000${n}`,
+            verificationUri: 'https://github.com/login/device',
+            interval: 5,
+            expiresIn: 600,
+          };
+        },
+        pollDeviceAuth: async (dc) =>
+          dc === 'd1'
+            ? 'expired'
+            : { token: 'new-api', subject: 'github:9', roles: [], expiresAt: 4_000_000_000 },
+      }),
+    });
+    expect(await cmdLogin(rt, o)).toBe(0);
+    expect(o.stderr[0]).toContain('CODE-0001');
+    expect(o.stderr[0]).toContain('valid for 10 minutes');
+    expect(o.stderr[1]).toMatch(/expired/);
+    expect(o.stderr[1]).toContain('CODE-0002');
+    expect(loadAuth(rt.paths, 'http://cp')?.apiToken).toBe('new-api');
+  });
+
+  it('says to run `mocactl login` again when the re-issued code expires too, and exits 1', async () => {
+    const o = io();
+    const rt = runtime({
+      auth: null,
+      cp: fakeControlPlane({ pollDeviceAuth: async () => 'expired' }),
+    });
+    expect(await cmdLogin(rt, o)).toBe(1);
+    expect(o.stderr.at(-1)).toContain('run `mocactl login` again');
   });
 
   it('exits 2 without a control-plane URL', async () => {

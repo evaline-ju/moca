@@ -103,6 +103,7 @@ func main() {
 		Trust:         env("SANDBOX_TRUST", "untrusted"),
 		Capabilities:  capabilities(),
 		MaxConcurrent: envInt("WORKER_MAX_CONCURRENT", session.DefaultConcurrency),
+		Labels:        session.TierLabels(os.LookupEnv, "container"),
 	}
 
 	// Plaintext h2c for an in-cluster ClusterIP or an `oc port-forward` tunnel;
@@ -140,8 +141,8 @@ func main() {
 	// One Session across every connection: its dedup cache must survive reconnects,
 	// or a redelivered req_id re-runs the command (spec §5).
 	sess := session.New(cfg, wexec.BashRunner{})
-	log.Printf("worker: relay=%s sandbox_id=%s tls=%v capacity=%d caps=%v",
-		relayAddr, cfg.SandboxID, useTLS, cfg.MaxConcurrent, cfg.Capabilities)
+	log.Printf("worker: relay=%s sandbox_id=%s tls=%v capacity=%d caps=%v labels=%v",
+		relayAddr, cfg.SandboxID, useTLS, cfg.MaxConcurrent, cfg.Capabilities, cfg.Labels)
 
 	backoff := backoffMin
 	for ctx.Err() == nil {

@@ -40,9 +40,11 @@ export function LoginOverlay({
     setStart(undefined);
     deviceLogin(
       deps,
-      (s) => {
+      (s, attempt) => {
         setStart(s);
         setShownAt(deps.now());
+        // deviceLogin re-issues an expired code once (#431); say why the code on screen changed.
+        setNote(attempt > 1 ? 'that code expired — here is a new one' : undefined);
       },
       ac.signal,
     )

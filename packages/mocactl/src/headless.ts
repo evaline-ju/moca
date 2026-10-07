@@ -1,5 +1,12 @@
 import type { CredentialConsumer, SessionSummary } from './api/types.js';
-import { LoginCancelledError, apiTokenValid, deviceLogin, toCachedAuth } from './core/auth.js';
+import {
+  LoginCancelledError,
+  LoginExpiredError,
+  apiTokenValid,
+  codeValidity,
+  deviceLogin,
+  toCachedAuth,
+} from './core/auth.js';
 import {
   credentialProblem,
   credentialRequest,
@@ -16,6 +23,7 @@ import {
   fieldRefusedByServer,
   resolveSessionOptions,
 } from './core/session-options.js';
+import { workspaceResetText } from './render/blocks.js';
 import { sessionManager, setAuth, type Runtime } from './runtime.js';
 
 export interface Io {
@@ -40,9 +48,10 @@ export async function cmdLogin(rt: Runtime, io: Io, signal?: AbortSignal): Promi
   try {
     const login = await deviceLogin(
       { cp: rt.cp, sleep: rt.sleep, now: rt.now },
-      (s) =>
+      (s, attempt) =>
         io.err(
-          `Open ${sanitizeRemote(s.verificationUri)} and enter the code ${sanitizeRemote(s.userCode)}`,
+          `${attempt > 1 ? 'That code expired. ' : ''}Open ${sanitizeRemote(s.verificationUri)} ` +
+            `and enter the code ${sanitizeRemote(s.userCode)} (valid for ${codeValidity(s.expiresIn)})`,
         ),
       signal,
     );
@@ -51,6 +60,11 @@ export async function cmdLogin(rt: Runtime, io: Io, signal?: AbortSignal): Promi
     return 0;
   } catch (err) {
     if (err instanceof LoginCancelledError) return 130;
+    if (err instanceof LoginExpiredError) {
+      // The re-issued code lapsed too: nobody is at the browser, so a third code would only wait.
+      io.err('login failed: the code expired before it was approved — run `mocactl login` again');
+      return 1;
+    }
     io.err(`login failed: ${describeError(err)}`);
     return 1;
   }
@@ -138,14 +152,22 @@ export async function cmdRun(rt: Runtime, io: Io, opts: RunOptions): Promise<num
         SESSION_OPTION_FIELDS,
         opts.options,
         rt.config.lastUsed,
+        { interactive: false },
       );
       if (r.status === 'blocked') {
         io.err(`cannot start a session: ${r.field.emptyHint}`);
         return 2;
       }
       if (r.status === 'needs-input') {
+        const label = r.field.label.toLowerCase();
+        const declared = r.choices.map((c) => sanitizeRemote(c.value)).join(', ');
+        const given = opts.options[r.field.key];
+        // A value given with --option but not among the choices is named as rejected, not asked for
+        // again as though none had been given. It is user input echoed to a terminal, so sanitized.
         io.err(
-          `choose the ${r.field.label.toLowerCase()} with --option ${r.field.key}=<value>: ${r.choices.map((c) => c.value).join(', ')}`,
+          given !== undefined
+            ? `unknown ${label} '${sanitizeRemote(given)}'; declared: ${declared}`
+            : `choose the ${label} with --option ${r.field.key}=<value>: ${declared}`,
         );
         return 2;
       }
@@ -182,6 +204,9 @@ export async function cmdRun(rt: Runtime, io: Io, opts: RunOptions): Promise<num
       if (opts.json) io.out(JSON.stringify(e.frame) + '\n');
       // Plain text goes straight to a terminal; JSON output escapes control characters itself.
       else if (e.frame.type === 'text') io.out(sanitizeRemote(e.frame.delta));
+      // The sandbox id and tier are server-originated, so they are sanitized like the text above.
+      else if (e.frame.type === 'workspace_reset')
+        io.err(sanitizeRemote(workspaceResetText(e.frame)));
     } else if (e.kind === 'retrying') {
       io.err(`the harness has no capacity — retrying in ${e.seconds}s`);
     } else if (e.kind === 'turn-end') {

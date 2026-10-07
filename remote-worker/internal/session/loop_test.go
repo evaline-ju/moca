@@ -333,6 +333,23 @@ func TestHelloIsFirstFrameAndHonest(t *testing.T) {
 	}
 }
 
+func TestHelloCarriesLabels(t *testing.T) {
+	st := newFakeStream()
+	cfg := testConfig()
+	cfg.Labels = map[string]string{session.TierLabelKey: "microvm"}
+	s := session.New(cfg, &scriptedRunner{})
+	serve(t, s, st)
+
+	waitFor(t, "hello", func() bool { return len(st.sent()) >= 1 })
+	h := st.sent()[0].GetHello()
+	if h == nil {
+		t.Fatal("first frame is not Hello")
+	}
+	if got := h.GetLabels()[session.TierLabelKey]; got != "microvm" {
+		t.Errorf("hello labels = %v, want moca.dev/tier=microvm", h.GetLabels())
+	}
+}
+
 func TestHeartbeatsAreSent(t *testing.T) {
 	st := newFakeStream()
 	s := session.New(testConfig(), &scriptedRunner{})

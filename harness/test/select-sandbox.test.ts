@@ -143,6 +143,13 @@ const fakeRecords = (recs: SandboxRecord[]): RecordStore => ({
   remove: async () => {},
   list: async () => recs,
 });
+/** The records path now consults affinity (P6.3); these tests are about other things, so it is inert. */
+const noAffinity = {
+  get: async () => null,
+  claim: async (_s: string, e: { sandboxId: string; tier: string }) => e,
+  replace: async () => {},
+  detachedSince: async (_id: string, now: number) => now,
+};
 const fakeExecClient: ExecClientLike = {
   exec: () => ({ on: () => ({}), cancel: () => {} }) as never,
   abort: (_r, cb) => {
@@ -183,6 +190,7 @@ describe('selectPoolSandbox remote dispatch', () => {
     const sel = await selectPoolSandbox(env(), '/head', 'run-1', opts, {
       listPods: async () => [],
       lease,
+      affinity: noAffinity,
       records: fakeRecords([grpcRec]),
       makeExecClient: () => fakeExecClient,
     });
@@ -201,6 +209,7 @@ describe('selectPoolSandbox remote dispatch', () => {
     const sel = await selectPoolSandbox(env(), '/head', 'leaf-abc123', opts, {
       listPods: async () => [],
       lease,
+      affinity: noAffinity,
       records: fakeRecords([grpcRec]),
       makeExecClient: () => fakeExecClient,
       // capture what the transport was built with
@@ -234,6 +243,7 @@ describe('selectPoolSandbox remote dispatch', () => {
       {
         listPods: async () => [],
         lease,
+        affinity: noAffinity,
         records: fakeRecords([grpcRec]),
         makeExecClient: () => fakeExecClient,
         makeTransport: (id, _client, transportOpts) => {
@@ -265,6 +275,7 @@ describe('selectPoolSandbox: the real defaultExecClient (MI1 R5)', () => {
     const err = await selectPoolSandbox(env(), '/head', 'run-1', opts, {
       listPods: async () => [],
       lease,
+      affinity: noAffinity,
       records: fakeRecords([grpcRec]),
       // makeTransport would prove the throw happens before a transport is built -- it is
       // asserted below never to be called at all.
@@ -292,7 +303,7 @@ describe('selectPoolSandbox: the real defaultExecClient (MI1 R5)', () => {
       '/head',
       'run-1',
       { ...opts, holderId: 'turn-7' },
-      { listPods: async () => [], lease, records: fakeRecords([grpcRec]) },
+      { listPods: async () => [], lease, affinity: noAffinity, records: fakeRecords([grpcRec]) },
     ).catch((e) => e);
     expect((err as Error).message).toMatch(/MOCA_RELAY_EXEC_TOKEN is not set/);
     expect(lease.acquired).toEqual(['sbx-remote-1']);
@@ -309,6 +320,7 @@ describe('selectPoolSandbox: the real defaultExecClient (MI1 R5)', () => {
     const err = await selectPoolSandbox(env(), '/head', 'run-1', opts, {
       listPods: async () => [],
       lease,
+      affinity: noAffinity,
       records: fakeRecords([grpcRec]),
       makeExecClient: () => ({}) as ExecClientLike,
       makeTransport: () => {
@@ -327,6 +339,7 @@ describe('selectPoolSandbox: the real defaultExecClient (MI1 R5)', () => {
     const err = await selectPoolSandbox(env(), '/head', 'run-1', opts, {
       listPods: async () => [],
       lease,
+      affinity: noAffinity,
       records: fakeRecords([grpcRec]),
     }).catch((e) => e);
     expect((err as Error).message).toMatch(/MOCA_RELAY_EXEC_TOKEN is not set/);
@@ -362,6 +375,7 @@ describe('selectPoolSandbox: the real defaultExecClient (MI1 R5)', () => {
       {
         listPods: async () => [],
         lease,
+        affinity: noAffinity,
         records: fakeRecords([grpcRec]),
         // makeTransport is injected only to capture the client that defaultExecClient built --
         // a grpc-js client does not dial out until a call is made, so constructing it here never
@@ -419,7 +433,11 @@ describe('selectPoolSandbox remote dispatch: ad-hoc RedisRecordStore lifecycle',
     resetSharedStores();
     createdRecordStores.length = 0;
     const lease = fakeLease({ 'sandbox-0-0': 0, 'sandbox-0-1': 0 }, opts.cap);
-    const deps = { listPods: async () => ['sandbox-0-0', 'sandbox-0-1'], lease };
+    const deps = {
+      listPods: async () => ['sandbox-0-0', 'sandbox-0-1'],
+      lease,
+      affinity: noAffinity,
+    };
 
     await selectPoolSandbox(env(), '/head', 'run-1', opts, deps);
     await selectPoolSandbox(env(), '/head', 'run-2', opts, deps);
@@ -440,7 +458,7 @@ describe('selectPoolSandbox remote dispatch: ad-hoc RedisRecordStore lifecycle',
     resetSharedStores();
     createdRecordStores.length = 0;
     const lease = fakeLease({ 'sandbox-0-0': 0 }, opts.cap);
-    const deps = { listPods: async () => ['sandbox-0-0'], lease };
+    const deps = { listPods: async () => ['sandbox-0-0'], lease, affinity: noAffinity };
 
     await selectPoolSandbox(env(), '/head', 'run-1', opts, deps);
     expect(createdRecordStores).toHaveLength(1);
@@ -469,7 +487,7 @@ describe('selectPoolSandbox remote dispatch: ad-hoc RedisRecordStore lifecycle',
     resetSharedStores();
     createdRecordStores.length = 0;
     const lease = fakeLease({ 'sandbox-0-0': 0 }, opts.cap);
-    const deps = { listPods: async () => ['sandbox-0-0'], lease };
+    const deps = { listPods: async () => ['sandbox-0-0'], lease, affinity: noAffinity };
     const other = env({ REDIS_URL: 'redis://other:6379' });
 
     await selectPoolSandbox(env(), '/head', 'run-1', opts, deps);
@@ -506,6 +524,7 @@ describe('selectPoolSandbox remote dispatch: ad-hoc RedisRecordStore lifecycle',
     await selectPoolSandbox(env(), '/head', 'run-1', opts, {
       listPods: async () => ['sandbox-0-0'],
       lease,
+      affinity: noAffinity,
       records: injected,
     });
     // Caller owns the injected store's lifecycle: we must never construct our
@@ -576,7 +595,13 @@ describe('selectPoolSandbox discovery source', () => {
       '/head',
       'run-1',
       { cap: 4, ttlMs: 60000, remoteSandbox: true },
-      { listPods, lease, records: fakeRecords([grpcRec]), makeExecClient: () => fakeExecClient },
+      {
+        listPods,
+        lease,
+        affinity: noAffinity,
+        records: fakeRecords([grpcRec]),
+        makeExecClient: () => fakeExecClient,
+      },
     );
     // The whole point of step 0: no kubectl on a VM with no cluster.
     expect(listPods).not.toHaveBeenCalled();
@@ -595,6 +620,7 @@ describe('selectPoolSandbox discovery source', () => {
       {
         listPods: async () => ['sandbox-0-0'],
         lease,
+        affinity: noAffinity,
         records: { put: async () => {}, remove: async () => {}, list },
       },
     );
@@ -615,7 +641,12 @@ describe('selectPoolSandbox discovery source', () => {
         '/head',
         'run-1',
         { cap: 4, ttlMs: 60000, remoteSandbox: true },
-        { listPods: async () => ['sandbox-0-0'], lease, records: fakeRecords([]) },
+        {
+          listPods: async () => ['sandbox-0-0'],
+          lease,
+          affinity: noAffinity,
+          records: fakeRecords([]),
+        },
       ),
     ).rejects.toThrow('no sandbox presence records');
   });
