@@ -35,7 +35,7 @@ render() {
   local name="$1"
   shift
   mkdir -p "$TMP/$name"
-  cp "$COMPOSE_DIR/docker-compose.yml" "$TMP/$name/"
+  cp "${RENDER_SRC:-$COMPOSE_DIR/docker-compose.yml}" "$TMP/$name/docker-compose.yml"
   printf '%s\n' "$@" >"$TMP/$name/.env"
   (cd "$TMP/$name" && env -i PATH="$PATH" HOME="$HOME" "${COMPOSE[@]}" config --format json) \
     >"$TMP/$name/out.json" 2>"$TMP/$name/err" || return 1
@@ -73,32 +73,30 @@ replicas="$(jq -r '.services.supervisor.deploy.replicas // .services.supervisor.
 pass "one supervisor service owns the worker pool; no second worker-bearing service, no replicas"
 
 # --- 2. env mirrors deploy/vm/env/*.env.example var-for-var, only addressing changed ----------
-# The addressing keys are the only ones allowed to differ: on a compose network the peers are
-# service names, not 127.0.0.1.
-declare -A ADDRESSING=(
-  [supervisor.REDIS_URL]='redis://redis:6379'
-  [supervisor.SH_RELAY_ADDR]='sandbox-relay:9444'
-  [sandbox-relay.REDIS_URL]='redis://redis:6379'
-  [sandbox-relay.MOCA_RELAY_EXEC_ADDR]='172.31.250.10:9444'
-  [supervisor.SH_CONTROL_PLANE_URL]='http://control-plane:8080'
-)
-# Keys an example leaves empty or commented are operator inputs, so compose takes them from .env.
-declare -A FROM_DOTENV=(
-  [supervisor.SH_TURNS_PER_WORKER]='3'
-  [sandbox-relay.SH_RELAY_TOKEN]='tok-under-test'
-  [sandbox-relay.MOCA_RELAY_EXEC_TOKEN]='exec-under-test'
-  [supervisor.MOCA_RELAY_EXEC_TOKEN]='exec-under-test'
-)
-# Defaults compose deliberately does not share with the VM. The VM always installs a control plane, so
-# it requires auth; a compose trial may run without one (the control-plane profile is opt-in), so plain
-# /turn stays open unless .env sets SH_REQUIRE_AUTH=true.
-declare -A COMPOSE_DEFAULT=(
-  [supervisor.SH_REQUIRE_AUTH]='false'
-)
+# override <service>.<key>: the value compose must carry where it may differ from the VM example,
+# else nothing (and exit 1). A case, not `declare -A`: the suite must also run under macOS's bash 3.2.
+override() {
+  case "$1" in
+  # Addressing: on a compose network the peers are service names, not 127.0.0.1.
+  supervisor.REDIS_URL | sandbox-relay.REDIS_URL) echo 'redis://redis:6379' ;;
+  supervisor.SH_RELAY_ADDR) echo 'sandbox-relay:9444' ;;
+  sandbox-relay.MOCA_RELAY_EXEC_ADDR) echo '172.31.250.10:9444' ;;
+  supervisor.SH_CONTROL_PLANE_URL) echo 'http://control-plane:8080' ;;
+  # Keys an example leaves empty or commented are operator inputs, so compose takes them from .env.
+  supervisor.SH_TURNS_PER_WORKER) echo '3' ;;
+  sandbox-relay.SH_RELAY_TOKEN) echo 'tok-under-test' ;;
+  sandbox-relay.MOCA_RELAY_EXEC_TOKEN | supervisor.MOCA_RELAY_EXEC_TOKEN) echo 'exec-under-test' ;;
+  # Defaults compose deliberately does not share with the VM. The VM always installs a control plane,
+  # so it requires auth; a compose trial may run without one (the control-plane profile is opt-in), so
+  # plain /turn stays open unless .env sets SH_REQUIRE_AUTH=true.
+  supervisor.SH_REQUIRE_AUTH) echo 'false' ;;
+  *) return 1 ;;
+  esac
+}
 check_mirror() {
   local svc="$1" example="$2" key val want got
   while IFS='=' read -r key val; do
-    want="${ADDRESSING[$svc.$key]:-${FROM_DOTENV[$svc.$key]:-${COMPOSE_DEFAULT[$svc.$key]:-$val}}}"
+    want="$(override "$svc.$key")" || want="$val"
     got="$(svc_env "$svc" "$key")"
     [[ "$got" == "$want" ]] ||
       fail "$svc: $key is '$got', expected '$want' (mirroring ${example#"$REPO_ROOT/"})"
@@ -108,38 +106,63 @@ check_mirror supervisor "$VM_ENV/supervisor.env.example"
 check_mirror sandbox-relay "$VM_ENV/relay.env.example"
 pass "supervisor and sandbox-relay env mirror deploy/vm/env/*.env.example, addressing aside"
 
-# Tier parity (P6.3): one list validates a session at creation (control plane), the other places its turns
-# (supervisor). A mismatch strands sessions. Both must read from one source and carry identical values
-# (spec §7). Test both the "<absent> by default" case and the "set, must match" case.
-#
-# Default (untiered): both absent when .env does not set tiers.
-sup_tiers_absent="$(svc_env supervisor SH_SANDBOX_TIERS)"
-[[ "$sup_tiers_absent" == '<absent>' ]] ||
-  fail "supervisor SH_SANDBOX_TIERS should be absent by default, got '$sup_tiers_absent'"
-cp_tiers_absent="$(cp_env control-plane SH_SANDBOX_TIERS)"
-[[ "$cp_tiers_absent" == '<absent>' ]] ||
-  fail "control plane SH_SANDBOX_TIERS should be absent by default, got '$cp_tiers_absent'"
-pass "supervisor and control plane both absent of tiers by default (untiered mode)"
+# Parity (P6.3). The tier list validates a session at creation (control plane) and places its turns
+# (supervisor): a mismatch strands sessions (spec §7). The affinity TTL is read by the relay (the
+# detach mark it writes) and the supervisor (the mark it honours): the env examples say the two must
+# match. Each pair must be absent in both services by default, and identical when .env sets it.
+# PAIRS: "<service A> <service B> <key> <value set in .env>".
+PAIRS=(
+  'supervisor control-plane SH_SANDBOX_TIERS container,microvm'
+  'supervisor control-plane SH_SANDBOX_DEFAULT_TIER microvm'
+  'supervisor sandbox-relay SH_SANDBOX_AFFINITY_TTL_SECONDS 120'
+)
+# parity_check <compose file> <tag>: 0 iff every pair holds in that file; the first breach on stderr.
+# A function of the file, so the negative cases below can run it on a mutated copy.
+parity_check() {
+  local src="$1" tag="$2" absent on pair a b key value got_a got_b
+  local env_set=("${CP_ENV[@]}")
+  for pair in "${PAIRS[@]}"; do
+    read -r a b key value <<<"$pair"
+    env_set+=("$key=$value")
+  done
+  absent="$(RENDER_SRC="$src" render "$tag-absent" "${CP_ENV[@]}")" ||
+    { echo "compose config failed: $(cat "$TMP/$tag-absent/err")" >&2; return 1; }
+  on="$(RENDER_SRC="$src" render "$tag-set" "${env_set[@]}")" ||
+    { echo "compose config failed with the pairs set: $(cat "$TMP/$tag-set/err")" >&2; return 1; }
+  for pair in "${PAIRS[@]}"; do
+    read -r a b key value <<<"$pair"
+    got_a="$(jq -r --arg s "$a" --arg k "$key" '.services[$s].environment[$k] // "<absent>"' "$absent")"
+    got_b="$(jq -r --arg s "$b" --arg k "$key" '.services[$s].environment[$k] // "<absent>"' "$absent")"
+    [[ "$got_a" == '<absent>' && "$got_b" == '<absent>' ]] ||
+      { echo "$key unset in .env: $a has '$got_a', $b has '$got_b'; both must be absent" >&2; return 1; }
+    got_a="$(jq -r --arg s "$a" --arg k "$key" '.services[$s].environment[$k] // "<absent>"' "$on")"
+    got_b="$(jq -r --arg s "$b" --arg k "$key" '.services[$s].environment[$k] // "<absent>"' "$on")"
+    [[ "$got_a" == "$value" && "$got_b" == "$value" ]] ||
+      { echo "$key=$value in .env: $a has '$got_a', $b has '$got_b'; both must carry it" >&2; return 1; }
+  done
+}
+parity_check "$COMPOSE_DIR/docker-compose.yml" parity 2>"$TMP/parity.err" || fail "$(cat "$TMP/parity.err")"
+pass "tiers (supervisor, control plane) and affinity TTL (supervisor, relay): absent by default, identical when set (spec §7)"
 
-# Render with tiers set: each service must receive the value from .env, and both must be identical.
-OUT_T="$(render tiers "${CP_ENV[@]}" 'SH_SANDBOX_TIERS=container,microvm' 'SH_SANDBOX_DEFAULT_TIER=container')" || fail "compose config failed with tiers"
-sup_tiers_set="$(jq -r '.services.supervisor.environment.SH_SANDBOX_TIERS' "$OUT_T")"
-cp_tiers_set="$(jq -r '.services["control-plane"].environment.SH_SANDBOX_TIERS' "$OUT_T")"
-[[ "$sup_tiers_set" == "container,microvm" ]] ||
-  fail "supervisor SH_SANDBOX_TIERS from .env did not reach it, got '$sup_tiers_set'"
-[[ "$cp_tiers_set" == "container,microvm" ]] ||
-  fail "control plane SH_SANDBOX_TIERS from .env did not reach it, got '$cp_tiers_set'"
-[[ "$sup_tiers_set" == "$cp_tiers_set" ]] ||
-  fail "supervisor SH_SANDBOX_TIERS '$sup_tiers_set' != control plane SH_SANDBOX_TIERS '$cp_tiers_set' (spec §7 strands sessions)"
-sup_default_set="$(jq -r '.services.supervisor.environment.SH_SANDBOX_DEFAULT_TIER' "$OUT_T")"
-cp_default_set="$(jq -r '.services["control-plane"].environment.SH_SANDBOX_DEFAULT_TIER' "$OUT_T")"
-[[ "$sup_default_set" == "container" ]] ||
-  fail "supervisor SH_SANDBOX_DEFAULT_TIER from .env did not reach it, got '$sup_default_set'"
-[[ "$cp_default_set" == "container" ]] ||
-  fail "control plane SH_SANDBOX_DEFAULT_TIER from .env did not reach it, got '$cp_default_set'"
-[[ "$sup_default_set" == "$cp_default_set" ]] ||
-  fail "supervisor SH_SANDBOX_DEFAULT_TIER '$sup_default_set' != control plane SH_SANDBOX_DEFAULT_TIER '$cp_default_set'"
-pass "supervisor and control plane both read the sandbox tiers from .env, and entries are byte-identical (spec §7)"
+# The check must catch a service that loses its line: run it on copies of docker-compose.yml with one
+# service's entry deleted (sed), and require it to FAIL on each.
+# line_of <file> <service> <key>: the line number of <key>: inside <service>'s block.
+line_of() {
+  awk -v svc="$2" -v key="$3" '/^  [A-Za-z0-9_-]+:$/ { in_svc = ($1 == svc ":") }
+    in_svc && $1 == key ":" { print NR; exit }' "$1"
+}
+for drop in 'sandbox-relay SH_SANDBOX_AFFINITY_TTL_SECONDS' 'supervisor SH_SANDBOX_AFFINITY_TTL_SECONDS' \
+  'control-plane SH_SANDBOX_TIERS' 'supervisor SH_SANDBOX_DEFAULT_TIER'; do
+  read -r svc key <<<"$drop"
+  n="$(line_of "$COMPOSE_DIR/docker-compose.yml" "$svc" "$key")"
+  [[ -n "$n" ]] || fail "no $key line in $svc's block of docker-compose.yml to drop (the negative case proves nothing)"
+  mkdir -p "$TMP/mutant"
+  sed "${n}d" "$COMPOSE_DIR/docker-compose.yml" >"$TMP/mutant/docker-compose.yml"
+  if parity_check "$TMP/mutant/docker-compose.yml" "mutant-$svc-$key" 2>/dev/null; then
+    fail "the parity check passed on a docker-compose.yml whose $svc lost its $key line"
+  fi
+done
+pass "the parity check fails when one service loses its line (four mutations)"
 
 # SH_WORKERS is commented out in the VM template (the default is availableParallelism(), which
 # respects the container's CPU limit since #341). Unset must mean unset, not SH_WORKERS=''.
