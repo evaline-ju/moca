@@ -67,6 +67,12 @@ for m in K8S-SMOKE-WRITE K8S-SMOKE-AGAIN K8S-SMOKE-RESEARCH K8S-SMOKE-DRAIN K8S-
   # P6.3 claim 12 reads the sandbox's pod name out of where=; the command is JSON in JSON
   # (partial_json), so grep the unquoted fragment.
   case "$m" in K8S-SMOKE-WHERE-*) check "$m step 0 prints where=" "$(grep -c 'where=' "$TMP/body")" "1" ;; esac
+  # The first turns run concurrently and must overlap, so each holds its lease for 2 s; the second
+  # turns run one at a time and need no hold.
+  case "$m" in
+    K8S-SMOKE-WHERE-1) check "$m step 0 holds its lease (sleep 2)" "$(grep -c 'sleep 2; echo' "$TMP/body")" "1" ;;
+    K8S-SMOKE-WHERE-2) check "$m step 0 is a bare echo" "$(grep -c 'sleep' "$TMP/body")" "0" ;;
+  esac
 done
 code="$(post '{"model":"mock-k8s","stream":true,"messages":[
   {"role":"user","content":"K8S-SMOKE-DRAIN"},

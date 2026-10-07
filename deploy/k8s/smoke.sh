@@ -246,14 +246,19 @@ put="$(curl -s -o "$OUT/put.json" -w '%{http_code}' -X PUT -H @"$OUT/api.hdr" -H
 rm -f "$OUT/cred.json"
 [[ "$put" == 2* ]] || { ko "PUT /v1/credentials answered $put: $(head -c 300 "$OUT/put.json")"; }
 
-# new_session -> sets SID; the session token goes into $OUT/<sid>.hdr
+# new_session [quiet] -> sets SID; the session token goes into $OUT/<sid>.hdr. quiet: a failure is not
+# a FAIL line, only its reason in SESSION_ERR (for a caller that retries).
 new_session() {
   local s tok
+  SESSION_ERR=''
   s="$(curl -s -X POST -H @"$OUT/api.hdr" -H 'Content-Type: application/json' -d "$SESSION_BODY" "$CP/v1/sessions" || true)"
   SID="$(jq -r '.sessionId // empty' <<<"$s" 2>/dev/null || true)"
-  [[ -n "$SID" ]] || { ko "POST /v1/sessions returned no session: ${s:0:300}"; return 1; }
-  tok="$(jq -r '.token // empty' <<<"$s" 2>/dev/null || true)"
-  [[ -n "$tok" ]] || { ko "POST /v1/sessions returned no token for session $SID"; return 1; }
+  [[ -n "$SID" ]] || SESSION_ERR="POST /v1/sessions returned no session: ${s:0:300}"
+  if [[ -z "$SESSION_ERR" ]]; then
+    tok="$(jq -r '.token // empty' <<<"$s" 2>/dev/null || true)"
+    [[ -n "$tok" ]] || SESSION_ERR="POST /v1/sessions returned no token for session $SID"
+  fi
+  if [[ -n "$SESSION_ERR" ]]; then [[ "${1-}" == quiet ]] || ko "$SESSION_ERR"; return 1; fi
   (umask 077; printf 'Authorization: Bearer %s\n' "$tok" >"$OUT/$SID.hdr")
 }
 # turn TAG SID PROMPT -> $OUT/TAG.sse; true when the stream ended with this session's done frame
@@ -394,11 +399,13 @@ JS
     elif [[ ",$ids," == *",$SMOKE_P4_ADD_ID,"* ]]; then
       ko "SMOKE_P4_ADD_ID=$SMOKE_P4_ADD_ID is already a P4 host: pick a scratch id"
     else
-      # SH_SANDBOX_COUNT is not given: it is sticky (moca-setup), so both runs keep the stack's count.
-      # Forcing 0 here would scale a mixed stack's container sandboxes away (and untier it).
+      # SH_SANDBOX_COUNT and SH_SANDBOX_DEFAULT_TIER are not given: both are sticky (moca-setup), so
+      # both runs keep the stack's values. Forcing a count of 0 here would scale a mixed stack's
+      # container sandboxes away (and untier it). `env -u`: an operator's exported value must not
+      # change the stack either.
       # setup.sh writes the sticky moca-setup early, so even a failed add can leave the scratch id
       # behind (sticky, with a token and a bundle): the restore runs whenever the add was attempted.
-      if ! SH_P4_SANDBOX_IDS="$ids,$SMOKE_P4_ADD_ID" bash "$setup_sh" --target ocp >"$OUT/p7-add.log" 2>&1; then
+      if ! env -u SH_SANDBOX_COUNT -u SH_SANDBOX_DEFAULT_TIER SH_P4_SANDBOX_IDS="$ids,$SMOKE_P4_ADD_ID" bash "$setup_sh" --target ocp >"$OUT/p7-add.log" 2>&1; then
         ko "setup.sh adding $SMOKE_P4_ADD_ID failed (log kept: $OUT/p7-add.log)"
       else
         t0="$SECONDS"
@@ -415,7 +422,7 @@ JS
         fi
       fi
       # Put the list back: revokes the scratch id and deletes its bundle.
-      SH_P4_SANDBOX_IDS="$ids" bash "$setup_sh" --target ocp >"$OUT/p7-restore.log" 2>&1 ||
+      env -u SH_SANDBOX_COUNT -u SH_SANDBOX_DEFAULT_TIER SH_P4_SANDBOX_IDS="$ids" bash "$setup_sh" --target ocp >"$OUT/p7-restore.log" 2>&1 ||
         ko "setup.sh restoring SH_P4_SANDBOX_IDS=$ids failed (log kept: $OUT/p7-restore.log): re-run it by hand"
     fi
   fi
@@ -502,16 +509,27 @@ elif [[ "$restarts" == 0 && "$restarts_sbx" == 0 ]]; then ok; else ko "restartCo
 
 claim 12 "every turn of a session returns to the sandbox of its first turn (affinity, P6.3)"
 # First turns run CONCURRENTLY so their leases overlap and the least-loaded choice spreads them over
-# both sandboxes; second turns run one by one, when every sandbox is idle. Without affinity the second
-# turns would all go to the first sandbox, so a session first served by the other one would move.
+# both sandboxes. A bare echo often finishes before the next turn leases, and then least-loaded puts
+# every session on one sandbox, where the second turns land with or without affinity: so each first
+# turn holds its lease for 2 s (`sleep 2`). Second turns run one by one, when every sandbox is idle.
+# Without affinity the second turns would all go to the first sandbox, so a session first served by
+# the other one would move.
 # Plain indexed arrays (bash 3.2), and wait on OUR pids only: port-forwards run in the background too.
 aff_sids=() aff_pids=() aff_first=()
-for i in 0 1 2 3; do new_session && aff_sids+=("$SID"); done
-aff_ok=1
-[[ "${#aff_sids[@]}" == 4 ]] || aff_ok=0
+aff_ok=1 aff_down=0
+# Claim 10 just restarted Redis, and nothing above waits for the supervisor and the control plane to
+# reconnect: the first session is retried for up to 60 s, so a stack still reconnecting is not a FAIL
+# of affinity. That session is the first of the four.
+if wait_for 60 new_session quiet; then
+  aff_sids+=("$SID")
+  for i in 1 2 3; do new_session && aff_sids+=("$SID"); done
+  [[ "${#aff_sids[@]}" == 4 ]] || aff_ok=0
+else
+  aff_ok=0 aff_down=1
+fi
 for i in ${aff_sids[@]+"${!aff_sids[@]}"}; do
   # shellcheck disable=SC2016 # $HOSTNAME is the sandbox's: it must expand there, not here
-  turn "where1-$i" "${aff_sids[$i]}" "$(ask K8S-SMOKE-WHERE-1 'echo "where=$HOSTNAME"')" &
+  turn "where1-$i" "${aff_sids[$i]}" "$(ask K8S-SMOKE-WHERE-1 'sleep 2; echo "where=$HOSTNAME"')" &
   aff_pids+=("$!")
 done
 for p in ${aff_pids[@]+"${aff_pids[@]}"}; do wait "$p" || aff_ok=0; done
@@ -529,7 +547,9 @@ for i in ${aff_sids[@]+"${!aff_sids[@]}"}; do
   [[ -n "$again" && "$again" == "${aff_first[$i]}" ]] ||
     { aff_ok=0; echo "  session ${aff_sids[$i]}: first '${aff_first[$i]}', then '$again'"; }
 done
-if ((aff_ok)); then ok "4 sessions, each on one sandbox for both turns"; else ko "a session moved between sandboxes, or a turn failed"; fi
+if ((aff_down)); then
+  ko "the stack took no new session within 60s of the Redis restart (claim 10); last: $SESSION_ERR"
+elif ((aff_ok)); then ok "4 sessions, each on one sandbox for both turns"; else ko "a session moved between sandboxes, or a turn failed"; fi
 # The note qualifies a pass only: after a FAIL there is nothing to tell apart from luck.
 spread="$(printf '%s\n' ${aff_first[@]+"${aff_first[@]}"} | sort -u | grep -c . || true)"
 ((!aff_ok)) || [[ "$spread" -ge 2 ]] ||

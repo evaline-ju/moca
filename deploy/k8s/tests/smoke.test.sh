@@ -4,6 +4,8 @@
 # become a FAIL line and the summary, not a set -e death before it. kubectl, curl and sleep are
 # mocks on PATH; every other tool is the real one.
 set -euo pipefail
+# An operator's exported values must not reach the runs below (P7 expects them unset), as in setup.test.sh.
+unset SH_SANDBOX_COUNT SH_SANDBOX_DEFAULT_TIER
 
 SMOKE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/smoke.sh"
 TMP="$(mktemp -d)"
@@ -36,8 +38,10 @@ MOCK
 # frame of the request's sessionId. A K8S-SMOKE-WHERE-1 turn prints where=<host>, its host the
 # session's entry in MOCK_WHERE ("s4=moca-sandbox-0 s5=..."); a K8S-SMOKE-WHERE-2 turn reads
 # MOCK_WHERE_2 first, so a case can move one session's second turn. MOCK_ENVELOPE=1 wraps the
-# preview in the JSON envelope a real model's run carries (see p4_sse below). Everything else is a
-# refused connection.
+# preview in the JSON envelope a real model's run carries (see p4_sse below). Every turn's prompt is
+# appended to $MOCK_STATE/prompts.log. MOCK_SESSIONS_DOWN=N: once claim 10 has deleted redis-0 (the
+# kubectl mock's $MOCK_STATE/redis-restarted), the next N session POSTs fail, as a stack still
+# reconnecting to Redis does. Everything else is a refused connection.
 cat >"$TMP/bin/curl" <<'MOCK'
 #!/usr/bin/env bash
 url='' data='' prev=''
@@ -53,6 +57,11 @@ case "$url" in
   [[ "$n" -le "${MOCK_HEALTHZ_OK:-1000}" ]] ;;
 */v1/sessions)
   [[ "${MOCK_SESSIONS-}" == 1 ]] || exit 7
+  if [[ -f "$MOCK_STATE/redis-restarted" ]]; then
+    d=$(($(cat "$MOCK_STATE/sessions-down" 2>/dev/null || echo 0) + 1))
+    echo "$d" >"$MOCK_STATE/sessions-down"
+    [[ "$d" -gt "${MOCK_SESSIONS_DOWN:-0}" ]] || { echo '{"error":"redis: connection lost"}'; exit 0; }
+  fi
   printf '%s\n' "$data" >>"$MOCK_STATE/sessions.log"
   n=$(($(cat "$MOCK_STATE/sessions" 2>/dev/null || echo 0) + 1))
   echo "$n" >"$MOCK_STATE/sessions"
@@ -62,6 +71,7 @@ case "$url" in
   [[ "${MOCK_SESSIONS-}" == 1 ]] || exit 7
   sid="$(jq -r .sessionId <<<"$data")"
   prompt="$(jq -r .prompt <<<"$data")"
+  printf '%s\n' "$prompt" >>"$MOCK_STATE/prompts.log"
   case "$prompt" in
   *K8S-SMOKE-WHERE-2*) table="${MOCK_WHERE_2-} ${MOCK_WHERE-}" ;;
   *K8S-SMOKE-WHERE-1*) table="${MOCK_WHERE-}" ;;
@@ -104,7 +114,8 @@ case " $* " in
 *" get configmap "*) echo http://127.0.0.1:8080 ;;
 *" get pods -l "*) echo '{"items":[{"metadata":{"name":"moca-supervisor-x"}}]}' ;;
 *" delete pod redis-0 "*)
-  [[ -z "${MOCK_REDIS_DELETE_FAIL-}" ]] || { echo 'Error from server (Forbidden): pods "redis-0" is forbidden' >&2; exit 1; } ;;
+  [[ -z "${MOCK_REDIS_DELETE_FAIL-}" ]] || { echo 'Error from server (Forbidden): pods "redis-0" is forbidden' >&2; exit 1; }
+  : >"$MOCK_STATE/redis-restarted" ;;
 *" delete pod "* | *" rollout status "*) exit 0 ;;
 *" get pods "*)
   [[ -z "${MOCK_GET_PODS_FAIL-}" ]] || { echo 'Unable to connect to the server: dial tcp: i/o timeout' >&2; exit 1; }
@@ -255,6 +266,44 @@ claim12() { sed -n '/Claim 12:/,/^PASS=/p' "$TMP/out"; }
     fail "an untiered stack's sessions did not post {}: $(sort -u "$MOCK_STATE/sessions.log" | tr '\n' ' ')")
 pass 'claim 12: first turns on two sandboxes, each second turn on its first: ok, no luck note; untiered sessions post {}'
 
+# The first turns must overlap for least-loaded to spread them: each holds its lease for 2 s. The
+# second turns run one at a time, and need no hold.
+(export MOCK_SESSIONS=1 MOCK_WHERE="$SPREAD"
+  run_smoke
+  [[ "$(grep -c 'K8S-SMOKE-WHERE-1' "$MOCK_STATE/prompts.log")" == 4 &&
+    "$(grep 'K8S-SMOKE-WHERE-1' "$MOCK_STATE/prompts.log" | grep -cF 'sleep 2; echo "where=$HOSTNAME"')" == 4 ]] ||
+    fail "the first turns do not hold their lease (sleep 2): $(grep WHERE-1 "$MOCK_STATE/prompts.log" | head -1)"
+  [[ "$(grep -c 'K8S-SMOKE-WHERE-2' "$MOCK_STATE/prompts.log")" == 4 &&
+    "$(grep 'K8S-SMOKE-WHERE-2' "$MOCK_STATE/prompts.log" | grep -c 'sleep')" == 0 ]] ||
+    fail "the second turns are not a bare echo: $(grep WHERE-2 "$MOCK_STATE/prompts.log" | head -1)")
+pass 'claim 12: each first turn holds its lease (sleep 2; echo ...), each second turn is a bare echo'
+
+# The live run's model is deploy/microvm/mock-anthropic.mjs: its steps must be the commands smoke.sh asks for.
+MOCK_MJS="$(cd "$(dirname "$SMOKE")/../microvm" && pwd)/mock-anthropic.mjs"
+for m in WHERE-1 WHERE-2; do
+  asked="$(sed -n "s/.*ask K8S-SMOKE-$m '\([^']*\)'.*/\1/p" "$SMOKE")"
+  scripted="$(sed -n "s/.*'K8S-SMOKE-$m': { steps: \['\([^']*\)'\].*/\1/p" "$MOCK_MJS")"
+  [[ -n "$asked" && "$asked" == "$scripted" ]] ||
+    fail "K8S-SMOKE-$m: smoke.sh asks for '$asked', mock-anthropic.mjs runs '$scripted'"
+done
+pass "claim 12: mock-anthropic.mjs scripts exactly the commands smoke.sh asks for"
+
+# Claim 10 restarts Redis; claim 12 must not start until the stack takes a session again.
+(export MOCK_SESSIONS=1 MOCK_ENVELOPE=1 MOCK_WHERE="$SPREAD" MOCK_SESSIONS_DOWN=3
+  run_smoke
+  [[ "$(cat "$MOCK_STATE/sessions-down")" -ge 4 ]] || fail "claim 12 did not retry the session POST: $(claim12)"
+  claim12 | grep -qx '  ok 4 sessions, each on one sandbox for both turns' ||
+    fail "claim 12 did not pass once the stack took sessions again: $(claim12)")
+pass 'claim 12: waits for the stack to take a session after the Redis restart, then runs'
+
+(export MOCK_SESSIONS=1 MOCK_WHERE="$SPREAD" MOCK_SESSIONS_DOWN=100000
+  run_smoke
+  claim12 | grep -qF '  FAIL the stack took no new session within 60s of the Redis restart (claim 10)' ||
+    fail "a stack that never took a session again did not fail claim 12, saying so: $(claim12)"
+  ! grep -q 'K8S-SMOKE-WHERE' "$MOCK_STATE/prompts.log" 2>/dev/null || fail 'claim 12 ran turns without sessions'
+  expect_kept 'claim 12 wait timed out')
+pass 'claim 12: a stack that takes no session within 60 s of the Redis restart FAILs, saying so'
+
 (export MOCK_SESSIONS=1 MOCK_WHERE="$SPREAD" MOCK_WHERE_2='s6=moca-sandbox-1'
   run_smoke
   claim12 | grep -qx '  FAIL a session moved between sandboxes, or a turn failed' ||
@@ -333,14 +382,22 @@ mkdir -p "$TMP/k8s"
 cp "$SMOKE" "$TMP/k8s/smoke.sh"
 cat >"$TMP/k8s/setup.sh" <<'MOCK'
 #!/usr/bin/env bash
-echo "count=${SH_SANDBOX_COUNT-unset} ids=${SH_P4_SANDBOX_IDS-unset} $*" >>"$MOCK_STATE/setup.log"
+echo "count=${SH_SANDBOX_COUNT-unset} tier=${SH_SANDBOX_DEFAULT_TIER-unset} ids=${SH_P4_SANDBOX_IDS-unset} $*" >>"$MOCK_STATE/setup.log"
 MOCK
+want_p7=$'count=unset tier=unset ids=moca_microvm_0,moca_scratch_0 --target ocp\ncount=unset tier=unset ids=moca_microvm_0 --target ocp'
 (export SMOKE_MODEL_URL=https://model.example.test SMOKE_MODEL_TOKEN=model-token-not-real MOCK_REDIS_OUT=moca_microvm_0 \
   SMOKE_P4_ADD_ID=moca_scratch_0
   SMOKE="$TMP/k8s/smoke.sh" run_smoke --target ocp --tier p4
   grep -qE '^  ok moca_scratch_0.s token reached' "$TMP/out" || fail "P7 did not pass with the stand-in setup.sh: $(grep -A2 'Claim P7' "$TMP/out")"
-  [[ "$(cat "$MOCK_STATE/setup.log")" == $'count=unset ids=moca_microvm_0,moca_scratch_0 --target ocp\ncount=unset ids=moca_microvm_0 --target ocp' ]] ||
+  [[ "$(cat "$MOCK_STATE/setup.log")" == "$want_p7" ]] ||
     fail "P7's setup.sh runs did not leave SH_SANDBOX_COUNT to the sticky value: $(cat "$MOCK_STATE/setup.log")")
 pass 'P7: the add and the restore leave SH_SANDBOX_COUNT unset (sticky), so a mixed stack keeps its containers'
+# An operator's exported count or default tier must not reach P7's setup.sh runs either.
+(export SMOKE_MODEL_URL=https://model.example.test SMOKE_MODEL_TOKEN=model-token-not-real MOCK_REDIS_OUT=moca_microvm_0 \
+  SMOKE_P4_ADD_ID=moca_scratch_0 SH_SANDBOX_COUNT=0 SH_SANDBOX_DEFAULT_TIER=microvm
+  SMOKE="$TMP/k8s/smoke.sh" run_smoke --target ocp --tier p4
+  [[ "$(cat "$MOCK_STATE/setup.log")" == "$want_p7" ]] ||
+    fail "an exported SH_SANDBOX_COUNT / SH_SANDBOX_DEFAULT_TIER reached P7's setup.sh: $(cat "$MOCK_STATE/setup.log")")
+pass "P7: an operator's exported SH_SANDBOX_COUNT and SH_SANDBOX_DEFAULT_TIER do not reach its setup.sh runs"
 
 echo "smoke.test.sh: all passed"
