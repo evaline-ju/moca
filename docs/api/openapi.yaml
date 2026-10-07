@@ -72,6 +72,7 @@ components:
             - session_mismatch
             - digest_mismatch
             - bundle_quota_exceeded
+            - config_bundle_not_found
             - configRef_invalid
             - credential_required
             - credential_ambiguous
@@ -345,6 +346,14 @@ paths:
                   expiresAt: { type: integer, description: epoch seconds }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: |
+            `config_bundle_not_found`: `configRef` names a digest that is not stored (never
+            uploaded, or expired). Promote the directory first. Adopting a stored bundle refreshes
+            its 30-day TTL.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
     get:
       operationId: listSessions
       summary: My sessions, newest first

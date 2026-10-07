@@ -1,6 +1,7 @@
 import {
   assertValidDigest,
   BundleDigestMismatchError,
+  bundleKey,
   MAX_BUNDLE_BYTES,
   putBundle,
   type BundleRedisLike,
@@ -9,6 +10,7 @@ import {
   admitBundle,
   recordBundle,
   refreshBundle,
+  touchBundle,
   type BundleBudgetRedisLike,
 } from './bundle-budget.js';
 import { CpError } from './errors.js';
@@ -332,6 +334,17 @@ export const HANDLERS: Record<string, Handler> = {
     if (requested !== undefined && typeof requested !== 'string') {
       throw new CpError('invalid_request', 'credentials.inference must be a string');
     }
+    let configRef: string | null = null;
+    if (body.configRef !== undefined) {
+      if (typeof body.configRef !== 'string') {
+        throw new CpError('configRef_invalid', 'configRef must be a string');
+      }
+      try {
+        configRef = assertValidDigest(body.configRef);
+      } catch {
+        throw new CpError('configRef_invalid', 'configRef must be sha256:<64 lowercase hex>');
+      }
+    }
     // Resolved HERE, at creation, and recorded -- so a missing key fails now rather than three turns
     // in, and a credential added later cannot turn a running session ambiguous (spec §6.4, gap #4).
     // This is also the first of the two policy points that make MU1 fail closed before P5's sentinel
@@ -349,17 +362,6 @@ export const HANDLERS: Record<string, Handler> = {
       !descriptors.some((d) => d.consumer === 'inference');
     const credentialName = fallback ? '' : resolveInferenceName(descriptors, requested);
 
-    let configRef: string | null = null;
-    if (body.configRef !== undefined) {
-      if (typeof body.configRef !== 'string') {
-        throw new CpError('configRef_invalid', 'configRef must be a string');
-      }
-      try {
-        configRef = assertValidDigest(body.configRef);
-      } catch {
-        throw new CpError('configRef_invalid', 'configRef must be sha256:<64 lowercase hex>');
-      }
-    }
     // The sandbox tier (P6.3 spec §3.3), resolved and RECORDED here like the credential: a later change
     // to the deployment default must not move an existing session between tiers.
     const sandbox = body.sandbox;
@@ -384,6 +386,26 @@ export const HANDLERS: Record<string, Handler> = {
       );
     }
     const sandboxTier = requestedTier ?? tiers?.default ?? '';
+
+    if (configRef) {
+      let found: boolean;
+      try {
+        found = (await deps.bundles.exists(bundleKey(configRef))) > 0;
+        if (found) await touchBundle(deps.bundles, configRef, deps.now());
+      } catch (err) {
+        console.error(
+          `[control-plane] createSession configRef=${configRef}: ${(err as Error)?.message ?? String(err)}`,
+        );
+        throw new CpError('redis_unavailable', 'redis is not answering');
+      }
+      // Fail at creation: a session on a missing bundle would 410 every turn.
+      if (!found) {
+        throw new CpError(
+          'config_bundle_not_found',
+          'no config bundle with that digest — promote the directory first',
+        );
+      }
+    }
 
     const sessionId = deps.newId();
     const rec: SessionRecord = {

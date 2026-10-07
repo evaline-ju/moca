@@ -1,4 +1,5 @@
 import { timingSafeEqual } from 'node:crypto';
+import { touchBundle } from './bundle-budget.js';
 import { inferenceAuthHeader, type InferenceAuthHeader } from './credential-store.js';
 import { CpError } from './errors.js';
 import type { CpConfig, CpDeps } from './handlers.js';
@@ -284,6 +285,16 @@ export async function exchangeCredential(
     credential: credentialName,
     decision: usedOperatorFallback ? 'operator_fallback_used' : 'credential_issued',
   });
+
+  if (rec.configRef) {
+    // Best effort: a bundle in daily use must not age out, but a failed refresh never fails a turn.
+    await touchBundle(deps.bundles, rec.configRef, deps.now()).catch((err: unknown) =>
+      console.error(
+        `[control-plane] bundle TTL refresh failed for configRef=${rec.configRef}: ` +
+          `${(err as Error)?.message ?? String(err)}`,
+      ),
+    );
+  }
 
   const tier = sessionTier(rec, deps.config.sandboxTiers);
   return {

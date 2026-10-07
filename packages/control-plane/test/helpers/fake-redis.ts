@@ -89,10 +89,12 @@ export function fakeBundleRedis(): BundleRedisLike &
     store: Map<string, string>;
     zsets: Map<string, Map<string, number>>;
     hashes: Map<string, Map<string, string>>;
+    expires: { key: string; seconds: number }[];
   } {
   const store = new Map<string, string>();
   const zsets = new Map<string, Map<string, number>>();
   const hashes = new Map<string, Map<string, string>>();
+  const expires: { key: string; seconds: number }[] = [];
   const z = (k: string) => zsets.get(k) ?? zsets.set(k, new Map()).get(k)!;
   const h = (k: string) => hashes.get(k) ?? hashes.set(k, new Map()).get(k)!;
   const inRange = (score: number, min: number | string, max: number | string) => {
@@ -107,6 +109,7 @@ export function fakeBundleRedis(): BundleRedisLike &
     store,
     zsets,
     hashes,
+    expires,
     async set(key, value) {
       store.set(key, value);
       return 'OK';
@@ -117,7 +120,8 @@ export function fakeBundleRedis(): BundleRedisLike &
     async exists(key) {
       return store.has(key) ? 1 : 0;
     },
-    async expire() {
+    async expire(key, seconds) {
+      expires.push({ key, seconds });
       return 1;
     },
     async zAdd(key, member) {

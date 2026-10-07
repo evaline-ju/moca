@@ -1,4 +1,4 @@
-import { DEFAULT_BUNDLE_TTL_SECONDS } from '@moca/config-bundle';
+import { bundleKey, DEFAULT_BUNDLE_TTL_SECONDS } from '@moca/config-bundle';
 import { CpError } from './errors.js';
 import { subjectHash } from './subject-document.js';
 
@@ -117,4 +117,14 @@ export async function refreshBundle(
   await redis.zAdd(BUNDLES_ALL_KEY, { score, value: digest });
   await redis.zAdd(ownerZsetFor(meta.owner), { score, value: digest });
   await redis.expire(ownerZsetFor(meta.owner), DEFAULT_BUNDLE_TTL_SECONDS);
+}
+
+/** A session is using `digest`: keep the bundle and its budget entry alive for another TTL. */
+export async function touchBundle(
+  redis: BundleBudgetRedisLike,
+  digest: string,
+  nowMs: number,
+): Promise<void> {
+  await redis.expire(bundleKey(digest), DEFAULT_BUNDLE_TTL_SECONDS);
+  await refreshBundle(redis, digest, nowMs);
 }

@@ -263,10 +263,14 @@ the harness learns `configRef` from the exchange (§2.4).
 - **Digest mismatch at upload:** `400 digest_mismatch`. Only reachable from a buggy/tampered client.
 - **Malformed `configRef` at session creation:** `400 configRef_invalid` — the exact code
   `knative-server` already returns.
+- **Valid digest, never uploaded or expired, at session creation:** the control plane checks the
+  bundle exists and answers `404 config_bundle_not_found` ("no config bundle with that digest —
+  promote the directory first"). Adopting a stored bundle, and every exchange of a session that has
+  one (best effort), refreshes its 30-day TTL and budget entry, so a bundle in use does not age out.
 - **Valid digest, not found/expired (30-day TTL) at turn time:** the harness's `BundleNotFoundError`
   maps to **`410 { error: 'config_bundle_not_found' }`** on both the sync and SSE paths (410: it
   existed and is gone). It fails the turn loudly rather than running it without its skills. `mocactl`
-  maps that code to "this session's config bundle has expired — promote the same directory again to restore it; if it changed, start a new session" (re-promoting the unchanged directory reproduces the same digest,
+  maps that code, from either source, to "this session's config bundle is gone (expired or never uploaded) — promote the same directory again; if it changed, start a new session" (re-promoting the unchanged directory reproduces the same digest,
   because digests are deterministic, and so revives the session; a changed directory has a new
   digest, and a session's bundle is fixed at creation, so it needs a new session).
 - **A corrupt stored bundle** (`BundleDigestMismatchError` on read) stays a 500: it is an operator

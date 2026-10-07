@@ -25,6 +25,7 @@ export const CP_ERROR_CODES = [
   'session_mismatch',
   'digest_mismatch',
   'bundle_quota_exceeded',
+  'config_bundle_not_found',
   'configRef_invalid',
   'credential_required',
   'credential_ambiguous',
@@ -59,6 +60,8 @@ const STATUS: Record<CpErrorCode, number> = {
   digest_mismatch: 400,
   // 429: the config-bundle byte budget (per subject or deployment-wide) is full; retry after expiry.
   bundle_quota_exceeded: 429,
+  // 404: a session asked for a digest nobody uploaded (or that expired) -- promote it first.
+  config_bundle_not_found: 404,
   // Spelled as knative-server's existing /v1/turn code on purpose: same concept, second call site.
   configRef_invalid: 400,
   credential_required: 400,

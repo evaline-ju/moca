@@ -1,4 +1,5 @@
 import { generateKeyPairSync } from 'node:crypto';
+import { bundleKey } from '@moca/config-bundle';
 import { InMemoryCredentialStore, parseCredentialBody } from '../../src/credential-store.js';
 import type { CpConfig, CpDeps, RequestCtx } from '../../src/handlers.js';
 import { OwnershipIndex } from '../../src/ownership.js';
@@ -98,6 +99,11 @@ export async function codeOf(fn: () => Promise<unknown> | unknown): Promise<stri
     return (e as { code: string }).code;
   }
   throw new Error('expected a throw');
+}
+
+/** Make a digest exist in the fake bundle store, as a prior POST /v1/config-bundles would. */
+export function seedBundle(deps: CpDeps, digest: string): void {
+  (deps.bundles as ReturnType<typeof fakeBundleRedis>).store.set(bundleKey(digest), 'stored');
 }
 
 /** Store an inference credential. Defaults are the ones every suite here assumes. */

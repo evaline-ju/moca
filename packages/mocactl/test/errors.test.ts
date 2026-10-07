@@ -77,12 +77,16 @@ describe('classify', () => {
   });
 });
 
-it('maps an expired config bundle to its own action and message', () => {
-  const err = new ApiError('harness', 410, 'config_bundle_not_found');
-  expect(classify(err)).toEqual({ kind: 'bundle-expired' });
-  expect(describeError(err)).toBe(
-    "this session's config bundle has expired — promote the same directory again to restore it; if it changed, start a new session",
-  );
+it('maps a missing config bundle, at turn time or at creation, to one action and message', () => {
+  for (const err of [
+    new ApiError('harness', 410, 'config_bundle_not_found'),
+    new ApiError('control-plane', 404, 'config_bundle_not_found', 'no config bundle'),
+  ]) {
+    expect(classify(err)).toEqual({ kind: 'bundle-expired' });
+    expect(describeError(err)).toBe(
+      "this session's config bundle is gone (expired or never uploaded) — promote the same directory again; if it changed, start a new session",
+    );
+  }
 });
 
 it('maps a full config-bundle budget to its own action and one-line message', () => {
