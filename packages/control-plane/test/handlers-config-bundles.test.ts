@@ -275,6 +275,22 @@ describe('POST /v1/config-bundles byte budget', () => {
     expect(fake.store.size).toBe(0);
   });
 
+  it('leaves no phantom charge when recording fails partway', async () => {
+    const d = makeDeps();
+    const fake = d.bundles as unknown as FakeBundles;
+    const zAdd = d.bundles.zAdd.bind(d.bundles);
+    d.bundles.zAdd = async (key, member) => {
+      if (key !== BUNDLES_ALL_KEY) throw new Error('ECONNRESET');
+      return zAdd(key, member);
+    };
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    onTestFinished(() => log.mockRestore());
+    expect(await codeOf(() => put(d, alice, bundle('partial')))).toBe('redis_unavailable');
+    expect(fake.store.size).toBe(0);
+    expect(fake.zsets.get(BUNDLES_ALL_KEY)?.size ?? 0).toBe(0);
+    expect(fake.hashes.get(BUNDLES_META_KEY)?.size ?? 0).toBe(0);
+  });
+
   it('refuses a new digest that would exceed the per-subject budget, naming it', async () => {
     const a = bundle('a');
     const b = bundle('b');

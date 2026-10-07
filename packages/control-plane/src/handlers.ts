@@ -253,9 +253,10 @@ async function storeConfigBundle(
         if (await refreshed()) return false; // stored by a concurrent upload while we queued
         const charged = Math.max(value.length, MIN_BUNDLE_CHARGE_BYTES);
         await admitBundle(deps.bundles, limits, p.sub, charged, nowMs);
-        // Charged before the SET, so a stored bundle is never left uncharged.
-        await recordBundle(deps.bundles, p.sub, digest, charged, nowMs);
+        // Charged before the SET, so a stored bundle is never left uncharged. A record that fails
+        // partway is rolled back too, so it leaves no phantom charge on the budget.
         try {
+          await recordBundle(deps.bundles, p.sub, digest, charged, nowMs);
           await deps.bundles.set(key, value, { EX: DEFAULT_BUNDLE_TTL_SECONDS });
         } catch (err) {
           await unrecordBundle(deps.bundles, p.sub, digest).catch(() => undefined);
