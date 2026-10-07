@@ -170,6 +170,8 @@ printf 'docker %s\n' "$*" >>"$MOCK_LOG"
 case "${1-}" in
 pull) [[ -z "${MOCK_PULL_FAIL-}" ]] ;;
 tag | build) : ;;
+# `image inspect --format {{.Id}} TAG`: MOCK_IMAGE_GEN stands in for a rebuild (a new ID, same tag).
+image) echo "sha256:${MOCK_IMAGE_GEN:-1}-${5##*/}" ;;
 *) echo "mock docker: unhandled: $*" >&2; exit 2 ;;
 esac
 MOCK
@@ -279,6 +281,25 @@ reset_state
 (export MOCK_KIND_CLUSTERS='' SH_GITHUB_CLIENT_ID=Iv1.test; expect_ok --target kind --skip-build)
 grep -q '^kind create cluster --name moca$' "$MOCK_LOG" || fail 'a missing kind cluster was not created'
 pass '--skip-build skips images; a missing cluster is created'
+
+# A rebuilt image keeps its `:local` tag, so only a changed pod template makes the apply roll it.
+applied() { cat "$MOCK_STATE/applied-kustomization.yaml"; }
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.test; expect_ok --target kind --skip-build)
+k1="$(applied)"
+grep -qF 'moca.dev/image-id: "sha256:1-moca:local"' <<<"$k1" || fail 'the harness image ID is not stamped on kind'
+grep -qF 'moca.dev/image-id: "sha256:1-moca-remote-worker:local"' <<<"$k1" || fail 'the sandbox image ID is not stamped on kind'
+[[ "$(grep -cF 'moca.dev/image-id: "sha256:1-moca:local"' <<<"$k1")" == 3 ]] ||
+  fail 'the harness image ID must be on exactly the control plane, the supervisor and the relay'
+(export SH_GITHUB_CLIENT_ID=Iv1.test; expect_ok --target kind --skip-build)
+[[ "$(applied)" == "$k1" ]] || fail 'an unchanged image changed the rendered overlay (it would roll every pod)'
+(export SH_GITHUB_CLIENT_ID=Iv1.test MOCK_IMAGE_GEN=2; expect_ok --target kind --skip-build)
+grep -qF 'moca.dev/image-id: "sha256:2-moca:local"' <<<"$(applied)" || fail 'a rebuilt harness image did not change the rendered overlay'
+grep -qF 'moca.dev/image-id: "sha256:2-moca-remote-worker:local"' <<<"$(applied)" || fail 'a rebuilt sandbox image did not change the rendered overlay'
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.test; expect_ok --target ocp)
+! grep -q 'moca.dev/image-id' <<<"$(applied)" || fail 'ocp pulls by ref and must carry no image ID'
+pass 'kind stamps the loaded image IDs, so a rebuilt image rolls and an unchanged one does not; ocp carries none'
 
 echo "== Task 13: secrets"
 reset_state

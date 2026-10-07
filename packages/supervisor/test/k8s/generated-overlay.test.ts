@@ -295,3 +295,81 @@ describe.skipIf(NO_KUBECTL)(
     });
   },
 );
+
+/** Renders setup.sh's generated overlay for `target` into `dir` with the given GO_* environment. */
+function renderGenerated(dir: string, env: Record<string, string>): K8sObject[] {
+  execFileSync('bash', [WRITER, dir], {
+    env: { ...process.env, ...env },
+    stdio: ['ignore', 'ignore', 'inherit'],
+  });
+  const out = execFileSync('kubectl', ['kustomize', dir], { encoding: 'utf8' });
+  return parseAllDocuments(out)
+    .map((d) => d.toJS() as K8sObject | null)
+    .filter((o): o is K8sObject => o !== null);
+}
+
+const HARNESS_ID = `sha256:${'a'.repeat(64)}`;
+const SANDBOX_ID = `sha256:${'b'.repeat(64)}`;
+
+describe.skipIf(NO_KUBECTL)('the generated kind overlay stamps the loaded image IDs', () => {
+  // A rebuilt image keeps its `:local` tag, so without a pod-template change the apply rolls nothing
+  // and the pods keep running the old image. The image-ID annotation is that change.
+  const KIND_DIR = resolve(K8S_DIR, '.generated/test-kind');
+  let objs: K8sObject[] = [];
+  beforeAll(() => {
+    objs = renderGenerated(KIND_DIR, {
+      GO_TARGET: 'kind',
+      GO_SANDBOX_COUNT: '2',
+      GO_CLIENT_ID: 'Iv1.generated-overlay-test',
+      GO_SETTINGS_HASH: HASH,
+      GO_HARNESS_IMAGE_ID: HARNESS_ID,
+      GO_SANDBOX_IMAGE_ID: SANDBOX_ID,
+    });
+  });
+  afterAll(() => {
+    rmSync(KIND_DIR, { recursive: true, force: true });
+  });
+
+  it('stamps the harness image ID beside the settings hash on the control plane and supervisor', () => {
+    for (const name of ['moca-control-plane', 'moca-supervisor']) {
+      expect(
+        find(objs, 'Deployment', name, 'moca').spec.template.metadata.annotations,
+        name,
+      ).toEqual({ 'moca.dev/settings-hash': HASH, 'moca.dev/image-id': HARNESS_ID });
+    }
+  });
+
+  it('stamps the harness image ID on the relay and the sandbox image ID on the sandboxes', () => {
+    expect(
+      find(objs, 'Deployment', 'sandbox-relay', 'moca').spec.template.metadata.annotations,
+    ).toEqual({ 'moca.dev/image-id': HARNESS_ID });
+    expect(
+      find(objs, 'StatefulSet', 'moca-sandbox', 'moca-sandbox').spec.template.metadata.annotations,
+    ).toEqual({ 'moca.dev/image-id': SANDBOX_ID });
+  });
+});
+
+describe.skipIf(NO_KUBECTL)('the generated OCP overlay stamps no image ID', () => {
+  // OpenShift pulls by tag or digest from a registry; setup.sh loads nothing there, so there is no ID.
+  const OCP_DIR = resolve(K8S_DIR, '.generated/test-ocp-noid');
+  let objs: K8sObject[] = [];
+  beforeAll(() => {
+    objs = renderGenerated(OCP_DIR, {
+      GO_TARGET: 'ocp',
+      GO_SUP_HOST: SUP_HOST,
+      GO_CP_HOST: CP_HOST,
+      GO_SANDBOX_COUNT: '1',
+      GO_CLIENT_ID: 'Iv1.generated-overlay-test',
+      GO_SETTINGS_HASH: HASH,
+      GO_HARNESS_IMAGE_ID: HARNESS_ID,
+      GO_SANDBOX_IMAGE_ID: SANDBOX_ID,
+    });
+  });
+  afterAll(() => {
+    rmSync(OCP_DIR, { recursive: true, force: true });
+  });
+
+  it('leaves the image-id annotation off every workload', () => {
+    expect(JSON.stringify(objs)).not.toContain('moca.dev/image-id');
+  });
+});
