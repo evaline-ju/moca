@@ -165,8 +165,8 @@ export function buildLeafBindScript(digest: string, sessionId: string): string {
 }
 
 /**
- * Concurrent turns of one /v1/turn session share its link but each holds its own `<sid>.<nonce>`
- * ref, so the link goes only once no ref of that session is left under any digest. Inside the lock,
+ * Concurrent turns of one session share its link: a /runs leaf holds `<sid>`, each /v1/turn turn its
+ * own `<sid>.<nonce>`, so the link goes only once no ref of that session is left under any digest. Inside the lock,
  * so it is atomic against a sibling turn's acquire. A prefix match can only over-retain the link
  * (a later bind replaces it with `ln -sfn`), never drop it under a live turn.
  */
@@ -184,9 +184,9 @@ function sessionLinkReleaseLines(sessionId: string): string[] {
 /**
  * Drop the per-leaf link and this leaf's ref, and tear the shared cache down once no leaf holds one.
  *
- * `refId` defaults to `sessionId` (the /runs leaf: one ref, link removed unconditionally). A
- * distinct `refId` is one turn of a shared session, whose link is released by
- * `sessionLinkReleaseLines` instead.
+ * `refId` defaults to `sessionId` (the /runs leaf); a distinct `refId` is one /v1/turn turn. Either
+ * way the link goes only once no ref of the session is left (`sessionLinkReleaseLines`): a /runs leaf
+ * and a /v1/turn turn of one control-plane session share the same link.
  *
  * The cache used to outlive every leaf by design; #216 is what that cost. Reuse is still real for
  * the case it was built for — a concurrent fan-out holds many refs at once, so the bundle is pushed
@@ -202,10 +202,8 @@ export function buildConfigCleanupScript(
   digest: string,
   refId: string = sessionId,
 ): string {
-  const shared = refId !== sessionId;
   return [
     `set -u`,
-    ...(shared ? [] : [`rm -f ${sq(leafConfigDir(sessionId))} 2>/dev/null || true`]),
     `DIR=${sq(configCacheDir(digest))}; REFS=${sq(configRefsDir(digest))}`,
     `LOCK=/workspace/.sh-config.lock`,
     `(`,
@@ -214,7 +212,7 @@ export function buildConfigCleanupScript(
     `  flock 9 || exit 0`,
     `  rm -f "$REFS/${assertSafeSessionId(refId)}" 2>/dev/null || true`,
     `  find "$REFS" -maxdepth 1 -type f -mmin +${REF_STALE_MINUTES} -delete 2>/dev/null || true`,
-    ...(shared ? sessionLinkReleaseLines(sessionId) : []),
+    ...sessionLinkReleaseLines(sessionId),
     `  if [ -z "$(ls -A "$REFS" 2>/dev/null)" ]; then`,
     // ADR-0031's `chmod -R a-w` clears the write bit on the cache's DIRECTORIES too, and a directory
     // needs write permission on itself to unlink its entries. Without restoring it first the rm

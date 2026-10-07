@@ -327,13 +327,32 @@ describe('cleanup scripts, executed', () => {
     expect(existsSync(cache())).toBe(false);
   });
 
-  it('without a refId the cleanup script is the single-ref one, unchanged', () => {
-    expect(buildConfigCleanupScript('leaf-1', DIGEST)).toBe(
-      buildConfigCleanupScript('leaf-1', DIGEST, 'leaf-1'),
+  it('without a refId the link is released by the same guard as a turn, inside the lock', () => {
+    const single = buildConfigCleanupScript('leaf-1', DIGEST);
+    expect(single).toBe(buildConfigCleanupScript('leaf-1', DIGEST, 'leaf-1'));
+    expect(single).not.toMatch(/^rm -f '\/workspace\/leaves/m);
+    expect(single).toMatch(
+      /flock 9[\s\S]*\[ -n "\$KEEP" \] \|\| rm -f '\/workspace\/leaves\/leaf-1\/\.sh-config'[\s\S]*9>"\$LOCK"/,
     );
-    expect(buildConfigCleanupScript('leaf-1', DIGEST).split('\n')[1]).toBe(
-      `rm -f '/workspace/leaves/leaf-1/.sh-config' 2>/dev/null || true`,
-    );
+  });
+
+  it('a /runs leaf and a /v1/turn turn of one session: neither release drops the other’s link', () => {
+    acquireAndBind('sess-1');
+    acquireAndBind('sess-1', 'sess-1.aaaa');
+    sh(buildConfigCleanupScript('sess-1', DIGEST));
+    expect(existsSync(join(refs(), 'sess-1'))).toBe(false);
+    expect(linkExists('sess-1')).toBe(true);
+    expect(existsSync(join(cache(), 'CLAUDE.md'))).toBe(true);
+    sh(buildConfigCleanupScript('sess-1', DIGEST, 'sess-1.aaaa'));
+    expect(linkExists('sess-1')).toBe(false);
+    expect(existsSync(cache())).toBe(false);
+  });
+
+  it('a /v1/turn release keeps the link while the session’s /runs leaf still holds its ref', () => {
+    acquireAndBind('sess-1');
+    acquireAndBind('sess-1', 'sess-1.aaaa');
+    sh(buildConfigCleanupScript('sess-1', DIGEST, 'sess-1.aaaa'));
+    expect(linkExists('sess-1')).toBe(true);
   });
 
   it('rejects an unsafe refId as it does an unsafe sessionId', () => {
