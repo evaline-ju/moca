@@ -248,6 +248,7 @@ rm -f "$OUT/cred.json"
 
 # new_session [quiet] -> sets SID; the session token goes into $OUT/<sid>.hdr. quiet: a failure is not
 # a FAIL line, only its reason in SESSION_ERR (for a caller that retries).
+# shellcheck disable=SC2120 # quiet is passed through wait_for, which shellcheck cannot follow
 new_session() {
   local s tok
   SESSION_ERR=''
