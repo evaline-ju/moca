@@ -69,6 +69,9 @@ and apply it on the interactive turn path:
 - Positive: a session's bundle is fixed at creation and enforced by the control plane, not by client
   good behaviour — the same shape `credentialName` already established.
 - Positive: `/runs` and `/v1/turn` share one overlay implementation instead of two.
+- Changed from ADR-0030: the store keeps only the verified content, re-canonicalised, without the
+  embedded `lockfile.json` (nothing reads it at run time; the audit copy is the one `promote` writes
+  locally), so the stored bytes are a function of the digest and no uploader can pin them.
 - Negative / accepted cost: a bundle digest is a bearer capability — any session token that knows a
   digest can reference it. Revisit if cross-tenant bundle reuse becomes a real incident.
 - Negative / accepted cost: every turn on a promoted session fetches its bundle and refreshes the

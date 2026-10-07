@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildBundle, canonicalTar, contentDigest, untar } from '../src/index.js';
+import { buildBundle, canonicalTar, contentDigest, LOCKFILE_PATH, untar } from '../src/index.js';
 import {
   bundleKey,
   putBundle,
@@ -154,7 +154,40 @@ describe('getBundle', () => {
       versions: { pi: '1', harness: '1' },
     });
     await putBundle(r, real.digest, real.tar);
-    expect((await getBundle(r, real.digest)).equals(real.tar)).toBe(true);
+    const got = untar(await getBundle(r, real.digest));
+    expect(contentDigest(got)).toBe(real.digest);
+  });
+
+  it('stores the canonical tar of the verified entries, without lockfile.json', async () => {
+    const r = fakeRedis();
+    const real = buildBundle({
+      roots: {},
+      entry: 'e',
+      mode: 'unattended',
+      sandboxImage: 'i',
+      versions: { pi: '1', harness: '1' },
+    });
+    expect(untar(real.tar).map((e) => e.path)).toContain(LOCKFILE_PATH);
+    await putBundle(r, real.digest, real.tar);
+    const stored = await getBundle(r, real.digest);
+    const content = untar(real.tar).filter((e) => e.path !== LOCKFILE_PATH);
+    expect(stored.equals(canonicalTar(content))).toBe(true);
+  });
+
+  it('stores bytes that depend on the digest alone, not on the first uploader', async () => {
+    const content = [{ path: 'skills/x/SKILL.md', content: Buffer.from('---\nname: x\n---\nb') }];
+    const forged = canonicalTar([
+      ...content,
+      { path: LOCKFILE_PATH, content: Buffer.from('{"forged":true}') },
+    ]);
+    const withJunk = Buffer.concat([canonicalTar(content), Buffer.from('trailing junk')]);
+    const d = contentDigest(content);
+    const a = fakeRedis();
+    const b = fakeRedis();
+    await putBundle(a, d, forged);
+    await putBundle(b, d, withJunk);
+    expect(await getBundle(a, d)).toEqual(await getBundle(b, d));
+    expect((await getBundle(a, d)).equals(canonicalTar(content))).toBe(true);
   });
 
   it('rejects valid bytes stored under the wrong digest (digest comparison path)', async () => {

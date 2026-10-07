@@ -1,6 +1,6 @@
 import { gunzipSync, gzipSync } from 'node:zlib';
-import { contentDigest } from './build.js';
-import { untar } from './tar.js';
+import { contentDigest, LOCKFILE_PATH } from './build.js';
+import { canonicalTar, untar } from './tar.js';
 
 /**
  * Minimal structural Redis surface — lets unit tests inject an in-memory fake, exactly as
@@ -41,7 +41,7 @@ export class BundleDigestMismatchError extends Error {
 }
 
 /**
- * Store the bundle under its digest, gzipped and base64'd (base64 keeps the injectable
+ * Store the bundle's verified content (canonical tar, no `lockfile.json`) under its digest, gzipped and base64'd (base64 keeps the injectable
  * `BundleRedisLike` a plain string interface). Content-addressed, so an existing key means
  * identical content and the write is skipped. Verify the digest matches the tar first to prevent
  * key poisoning: a mismatched pair blocks any correct write under that digest for 30 days.
@@ -55,12 +55,13 @@ export async function putBundle(
   admit?: (storedBytes: number) => Promise<void>,
 ): Promise<{ uploaded: boolean }> {
   // Verify digest matches tar before anything else
-  let actual: string;
+  let content: ReturnType<typeof untar>;
   try {
-    actual = contentDigest(untar(tar));
+    content = untar(tar).filter((e) => e.path !== LOCKFILE_PATH);
   } catch {
     throw new BundleDigestMismatchError(digest, 'unreadable (untar failed)');
   }
+  const actual = contentDigest(content);
   if (actual !== digest) throw new BundleDigestMismatchError(digest, actual);
 
   const key = bundleKey(digest);
@@ -69,7 +70,9 @@ export async function putBundle(
     await redis.expire(key, ttlSeconds);
     return { uploaded: false };
   }
-  const value = gzipSync(tar).toString('base64');
+  // Only the verified content, re-canonicalised: the stored bytes are a function of the digest, so
+  // the first uploader cannot pin an unchecked lockfile.json or trailing data for everyone.
+  const value = gzipSync(canonicalTar(content)).toString('base64');
   await admit?.(value.length);
   await redis.set(key, value, { EX: ttlSeconds });
   return { uploaded: true };
