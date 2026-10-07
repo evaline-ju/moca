@@ -419,7 +419,14 @@ export function App({ rt, opts, env, os, write }: AppProps) {
       try {
         const r = await promoteDirectory(arg, rt.cp);
         setPendingBundle(r);
-        notify(`promoted ${r.skills.length} skills — ${r.uploaded ? 'uploaded' : 'unchanged'}`);
+        const warned = r.warnings
+          ? `; ${r.warnings} warnings — run \`mocactl promote DIR --dry-run\` to see them`
+          : '';
+        notify(
+          `promoted ${r.skills.length} skills, ${r.prompts.length} commands — ` +
+            `${r.uploaded ? 'uploaded' : 'unchanged'}${warned}`,
+          r.warnings ? 'warning' : undefined,
+        );
         open({ name: 'new-session' });
       } catch (err) {
         if (loginIfExpired(err, undefined))

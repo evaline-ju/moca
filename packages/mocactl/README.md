@@ -59,7 +59,7 @@ keys in `config.json` under `keybinds`, e.g. `{ "session.new": "ctrl+x s" }`.
 mocactl login                               # device-flow login, prints the code
 mocactl doctor [--json]                     # seven checks, one fix per failure; exit 1 on failure
 mocactl run "prompt" [--session ID | --new] [--option inferenceCredential=NAME] [--json]
-mocactl promote DIR [--json]                # upload DIR's .claude/skills and .claude/commands
+mocactl promote DIR [--dry-run] [--json]    # upload DIR's .claude/skills and .claude/commands
 mocactl run "prompt" --config DIGEST        # start the new session with that config bundle
 ```
 
@@ -74,8 +74,14 @@ mocactl credentials delete NAME [--json]    # exit 1 if you own no credential of
 
 `mocactl run` continues the session `--session` names, or starts a new one (`--new`, the default).
 
-`mocactl promote` prints the bundle digest to pass to `run --config`; in the TUI, `/promote DIR`
-attaches it to the next session you create. A session's bundle is fixed when it is created, so
+`mocactl promote` prints what it built and the preflight report (warnings on stderr) BEFORE
+uploading, then the bundle digest to pass to `run --config`. `--dry-run` builds and prints without
+uploading, and needs no login. It exits `2` when refused before upload (a usage error, not logged
+in, or preflight errors), `3` on a structural credential match, and `1` for anything else. In the
+TUI, `/promote DIR` attaches it to the next session you create; its toast counts skills, commands
+and warnings. With exactly one inference credential and no presets, the new-session overlay creates
+the session as soon as it opens, so `/promote DIR` starts the session right away. A session's
+bundle is fixed when it is created, so
 `--config` cannot be combined with `--session`. Rollout order: upgrade the harness before the
 control plane — an older harness ignores `configRef`, so turns would run without the skills and
 report no error.

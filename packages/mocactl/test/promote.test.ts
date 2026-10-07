@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -67,6 +67,50 @@ describe('promoteDirectory', () => {
     expect(uploads).toHaveLength(1);
     expect(uploads[0]!.digest).toBe(r.digest);
     expect(Buffer.from(uploads[0]!.tar, 'base64').length).toBeGreaterThan(0);
+  });
+
+  it('hands the built summary to onBuilt before uploading, with the warning count', async () => {
+    const outside = project({ 'secret.md': 'x' });
+    const p = project({ '.claude/skills/hello/SKILL.md': skill('hello') });
+    symlinkSync(join(outside, 'secret.md'), join(p, '.claude/skills/hello/leak.md'));
+    const order: string[] = [];
+    const cp = fakeControlPlane({
+      putConfigBundle: async (req) => (
+        order.push('upload'),
+        { digest: req.digest, uploaded: true }
+      ),
+    });
+    const r = await promoteDirectory(
+      p,
+      cp,
+      {},
+      {
+        onBuilt: (s) => {
+          order.push('built');
+          expect(s).toMatchObject({ skills: ['hello'], prompts: [], warnings: 1 });
+          expect(s.report).toContain('skill_symlink_escaped');
+        },
+      },
+    );
+    expect(order).toEqual(['built', 'upload']);
+    expect(r).toMatchObject({ uploaded: true, warnings: 1 });
+  });
+
+  it('builds and reports without uploading on dryRun, needing no control plane', async () => {
+    const p = project({ '.claude/commands/go.md': 'go' });
+    const built: unknown[] = [];
+    const r = await promoteDirectory(
+      p,
+      undefined,
+      {},
+      {
+        dryRun: true,
+        onBuilt: (s) => void built.push(s),
+      },
+    );
+    expect(r).toMatchObject({ uploaded: false, dryRun: true, prompts: ['go'], skills: [] });
+    expect(r.digest).toMatch(/^sha256:/);
+    expect(built).toHaveLength(1);
   });
 
   it('refuses an empty bundle without uploading', async () => {

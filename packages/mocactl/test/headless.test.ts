@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -396,6 +396,42 @@ describe('cmdPromote', () => {
     expect(await cmdPromote(runtime(), o, { dir: p, json: false })).toBe(0);
     expect(o.stdout).toMatch(/sha256:[0-9a-f]{64}/);
     expect(o.stdout).toContain('hello');
+  });
+
+  it('prints the report to stderr BEFORE uploading', async () => {
+    const o = io();
+    const outside = project({ 'secret.md': 'x' });
+    const p = project({ '.claude/skills/hello/SKILL.md': skill('hello') });
+    symlinkSync(join(outside, 'secret.md'), join(p, '.claude/skills/hello/leak.md'));
+    let stderrAtUpload = '';
+    const rt = runtime({
+      cp: fakeControlPlane({
+        putConfigBundle: async (req) => (
+          (stderrAtUpload = o.stderr.join('\n')),
+          { digest: req.digest, uploaded: true }
+        ),
+      }),
+    });
+    expect(await cmdPromote(rt, o, { dir: p, json: false })).toBe(0);
+    expect(stderrAtUpload).toContain('skill_symlink_escaped');
+  });
+
+  it('--dry-run builds and prints without uploading or logging in, and exits 0', async () => {
+    const o = io();
+    const p = project({ '.claude/skills/hello/SKILL.md': skill('hello') });
+    const cp = fakeControlPlane();
+    const rt = runtime({ cp, auth: undefined });
+    expect(await cmdPromote(rt, o, { dir: p, json: false, dryRun: true })).toBe(0);
+    expect(cp.calls).not.toContain('putConfigBundle');
+    expect(o.stdout).toMatch(/sha256:[0-9a-f]{64}  \(dry run: not uploaded\)/);
+    expect(o.stdout).toContain('hello');
+  });
+
+  it('--dry-run --json reports dryRun and uploaded: false', async () => {
+    const o = io();
+    const p = project({ '.claude/skills/hello/SKILL.md': skill('hello') });
+    await cmdPromote(runtime(), o, { dir: p, json: true, dryRun: true });
+    expect(JSON.parse(o.stdout)).toMatchObject({ uploaded: false, dryRun: true });
   });
 
   it('exits with the PromoteError code', async () => {

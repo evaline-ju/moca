@@ -15,7 +15,7 @@ import {
 } from './core/credential-checks.js';
 import { formatDiagnostics, runDiagnostics } from './core/diagnostics.js';
 import { describeError } from './core/messages.js';
-import { PromoteError, promoteDirectory } from './core/promote.js';
+import { PromoteError, promoteDirectory, type PromoteSummary } from './core/promote.js';
 import { sanitizeRemote } from './core/sanitize.js';
 import { SessionManager, type ActiveSession } from './core/session-manager.js';
 import {
@@ -105,20 +105,31 @@ function ready(rt: Runtime, io: Io): rt is Runtime & Required<Pick<Runtime, 'cp'
 export async function cmdPromote(
   rt: Runtime,
   io: Io,
-  opts: { dir: string; json: boolean },
+  opts: { dir: string; json: boolean; dryRun?: boolean },
 ): Promise<number> {
-  if (!ready(rt, io)) return 2;
+  if (!opts.dryRun && !ready(rt, io)) return 2;
   try {
-    const r = await promoteDirectory(opts.dir, rt.cp);
+    // Printed BEFORE the upload, so a possible_secret or skipped-symlink warning is seen first.
+    const onBuilt = (r: PromoteSummary) => {
+      if (opts.json) {
+        if (r.report.trim()) io.err(r.report);
+        return;
+      }
+      io.out(`config root  ${r.configRoot}\n`);
+      io.out(`skills       ${r.skills.join(', ') || 'none'}\n`);
+      for (const d of r.dropped) io.out(`dropped      ${d.name}  (${d.reason})\n`);
+      io.out(`commands     ${r.prompts.join(', ') || 'none'}\n`);
+      if (r.report.trim()) io.err(r.report);
+    };
+    const r = await promoteDirectory(opts.dir, rt.cp, {}, { onBuilt, dryRun: opts.dryRun });
     if (opts.json) {
       io.out(JSON.stringify(r) + '\n');
       return 0;
     }
-    io.out(`config root  ${r.configRoot}\n`);
-    io.out(`skills       ${r.skills.join(', ') || 'none'}\n`);
-    for (const d of r.dropped) io.out(`dropped      ${d.name}  (${d.reason})\n`);
-    io.out(`commands     ${r.prompts.join(', ') || 'none'}\n`);
-    if (r.report.trim()) io.out(`${r.report}\n`);
+    if (r.dryRun) {
+      io.out(`bundle       ${r.digest}  (dry run: not uploaded)\n`);
+      return 0;
+    }
     io.out(`bundle       ${r.digest}  (${r.uploaded ? 'uploaded' : 'unchanged'})\n`);
     io.out(`start a session with:  mocactl run "…" --config ${r.digest}\n`);
     return 0;

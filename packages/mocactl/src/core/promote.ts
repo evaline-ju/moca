@@ -20,14 +20,27 @@ export class PromoteError extends Error {
   }
 }
 
-export interface PromoteResult {
+/** What the build produced, available before anything is uploaded. */
+export interface PromoteSummary {
   digest: string;
-  uploaded: boolean;
   configRoot: string;
   skills: string[];
   dropped: Array<{ name: string; reason: string }>;
   prompts: string[];
   report: string;
+  warnings: number;
+}
+
+export interface PromoteResult extends PromoteSummary {
+  uploaded: boolean;
+  dryRun?: true;
+}
+
+export interface PromoteOptions {
+  /** Called once preflight has passed, before the upload, so the report is seen first. */
+  onBuilt?: (summary: PromoteSummary) => void;
+  /** Build and report only; nothing is uploaded and no control plane is needed. */
+  dryRun?: boolean;
 }
 
 const isDir = (p: string) => existsSync(p) && statSync(p).isDirectory();
@@ -43,8 +56,9 @@ export function resolveConfigRoot(dir: string, home: string, cwd: string): strin
 
 export async function promoteDirectory(
   dir: string,
-  cp: ControlPlaneApi,
+  cp: ControlPlaneApi | undefined,
   env: { home?: string; cwd?: string } = {},
+  opts: PromoteOptions = {},
 ): Promise<PromoteResult> {
   const configRoot = resolveConfigRoot(dir, env.home ?? homedir(), env.cwd ?? process.cwd());
   let result;
@@ -79,17 +93,21 @@ export async function promoteDirectory(
       1,
     );
   }
-  const { uploaded } = await cp.putConfigBundle({
+  const summary: PromoteSummary = {
     digest: result.digest,
-    tar: result.tar.toString('base64'),
-  });
-  return {
-    digest: result.digest,
-    uploaded,
     configRoot,
     skills,
     dropped: result.lockfile.dropped.map((d) => ({ name: d.name, reason: d.reason })),
     prompts: result.promptNames,
     report,
+    warnings: result.findings.filter((f) => f.severity === 'warn').length,
   };
+  opts.onBuilt?.(summary);
+  if (opts.dryRun) return { ...summary, uploaded: false, dryRun: true };
+  if (!cp) throw new PromoteError('connect to a control plane first', 2);
+  const { uploaded } = await cp.putConfigBundle({
+    digest: result.digest,
+    tar: result.tar.toString('base64'),
+  });
+  return { ...summary, uploaded };
 }

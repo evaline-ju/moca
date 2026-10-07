@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { USAGE, main } from '../src/cli.js';
 import type { Io } from '../src/headless.js';
@@ -205,6 +208,16 @@ describe('main', () => {
     const build = () => ({ ...fakeBuild(), configWarning: 'ignoring unreadable x' }) as Runtime;
     await main(['frobnicate'], {}, o, { buildRuntime: build });
     expect(o.errs[0]).toBe('ignoring unreadable x');
+  });
+
+  it('promote --dry-run builds and prints without a login or a control plane', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mocactl-cli-promote-'));
+    mkdirSync(join(dir, '.claude/commands'), { recursive: true });
+    writeFileSync(join(dir, '.claude/commands/go.md'), 'go');
+    const o = io();
+    expect(await main(['promote', dir, '--dry-run'], {}, o, { buildRuntime: fakeBuild })).toBe(0);
+    expect(o.outs.join('')).toContain('dry run: not uploaded');
+    expect(USAGE).toContain('mocactl promote DIR [--dry-run] [--json]');
   });
 
   it('promote needs exactly one directory', async () => {

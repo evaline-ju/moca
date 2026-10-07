@@ -213,8 +213,10 @@ callers below:
 - POSTs `{ digest, tar: base64 }` via a new `ControlPlaneApi.putConfigBundle()`.
 
 **`mocactl promote <dir>`** — new top-level CLI command. Prints the summary (skills travelling,
-dropped and why, warnings, digest) and exits with ADR-0030's codes: 2 = preflight errors, 3 = a
-structural credential match, 1 = anything else.
+dropped and why, warnings) BEFORE uploading — `promoteDirectory`'s `onBuilt` hook, the report on
+stderr — then the digest. `--dry-run` builds and prints without uploading or a login. Exit codes:
+2 = refused before upload (a usage error, not logged in, or preflight errors), 3 = a structural
+credential match, 1 = anything else.
 
 **`mocactl run "prompt" --config <digest>`** — the existing headless command gains `--config`, passed
 as `CreateSessionRequest.configRef`. It applies only when `run` creates a session; combined with
@@ -223,7 +225,10 @@ as `CreateSessionRequest.configRef`. It applies only when `run` creates a sessio
 **In-app `/promote <dir>`** — a new builtin `Command`, **not** gated by `inSession`. On success it
 stores the result as **pending, client-side-only state** and opens the `new-session` overlay, which
 shows it as an info line ("config bundle sha256:… — N skills, M dropped"). The pending bundle applies
-to the **next session created and is then cleared**: a bundle silently attaching to every later
+to the **next session created and is then cleared** (with exactly one inference credential and no
+presets the overlay creates that session as soon as it opens, so `/promote <dir>` starts it right
+away; the toast reads "promoted N skills, M commands — uploaded", plus a warning count pointing at
+`mocactl promote <dir> --dry-run`): a bundle silently attaching to every later
 session would be the surprise. `/promote --clear` drops it without creating a session. It is not
 folded into `SESSION_OPTION_FIELDS`, which is "pick one of several server-known choices"; a freshly
 built bundle has no server-side list to pick from.

@@ -21,7 +21,8 @@ export const USAGE = `usage:
   mocactl doctor [--json]                        check the setup; one fix per failure
   mocactl run "prompt" [--session ID | --new] [--option key=value ...] [--json]
   mocactl run "prompt" --config DIGEST            start the new session with a promoted config bundle
-  mocactl promote DIR [--json]                   upload DIR's .claude/skills and .claude/commands
+  mocactl promote DIR [--dry-run] [--json]       upload DIR's .claude/skills and .claude/commands
+                                                 (--dry-run: build and report, upload nothing)
   mocactl sessions [--json]                      list your sessions
   mocactl sessions delete ID [--json]
   mocactl credentials [--json]                   list your credentials (never their secrets)
@@ -87,6 +88,7 @@ export async function main(
         config: { type: 'string' },
         setup: { type: 'boolean' },
         'no-animation': { type: 'boolean' },
+        'dry-run': { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
       },
     });
@@ -164,7 +166,7 @@ export async function main(
     }
     case 'promote': {
       if (rest.length !== 1) return usage(io);
-      return cmdPromote(rt, io, { dir: rest[0]!, json });
+      return cmdPromote(rt, io, { dir: rest[0]!, json, dryRun: values['dry-run'] === true });
     }
     case 'sessions': {
       const [sub, id, ...extra] = rest;

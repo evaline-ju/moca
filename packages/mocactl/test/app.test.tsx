@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { render as inkRender } from 'ink';
@@ -293,6 +293,28 @@ describe('App', () => {
     await send(stdin, '/new');
     await until(() => created.length === 2);
     expect(created[1]!.configRef).toBeUndefined();
+  });
+
+  it('/promote toasts skills, commands and the warning count with the --dry-run hint', async () => {
+    const dir = skillsDir();
+    mkdirSync(join(dir, '.claude/commands'), { recursive: true });
+    writeFileSync(join(dir, '.claude/commands/go.md'), 'go');
+    const outside = mkdtempSync(join(tmpdir(), 'mocactl-app-outside-'));
+    writeFileSync(join(outside, 'secret.md'), 'x');
+    symlinkSync(join(outside, 'secret.md'), join(dir, '.claude/skills/hello/leak.md'));
+    const rt = testRuntime({
+      cp: fakeControlPlane({ listCredentials: async () => [credential('a'), credential('b')] }),
+    });
+    const { stdin, all, until, ready } = mount(rt);
+    await ready();
+    await send(stdin, `/promote ${dir}`);
+    // The toast wraps at the test terminal's width, so compare with whitespace collapsed.
+    const flat = () => all().replace(/\s+/g, ' ');
+    await until(() =>
+      flat().includes(
+        'promoted 1 skills, 1 commands — uploaded; 1 warnings — run `mocactl promote DIR --dry-run` to see them',
+      ),
+    );
   });
 
   it('/promote --clear drops the pending bundle without creating a session', async () => {
