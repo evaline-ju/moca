@@ -252,7 +252,7 @@ rm -f "$OUT/cred.json"
 new_session() {
   local s tok
   SESSION_ERR=''
-  s="$(curl -s -X POST -H @"$OUT/api.hdr" -H 'Content-Type: application/json' -d "$SESSION_BODY" "$CP/v1/sessions" || true)"
+  s="$(curl -s --max-time 10 -X POST -H @"$OUT/api.hdr" -H 'Content-Type: application/json' -d "$SESSION_BODY" "$CP/v1/sessions" || true)"
   SID="$(jq -r '.sessionId // empty' <<<"$s" 2>/dev/null || true)"
   [[ -n "$SID" ]] || SESSION_ERR="POST /v1/sessions returned no session: ${s:0:300}"
   if [[ -z "$SESSION_ERR" ]]; then

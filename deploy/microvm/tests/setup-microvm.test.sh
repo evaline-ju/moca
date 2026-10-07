@@ -399,7 +399,7 @@ unset MOCK_PODMAN_PS MOCK_RECORDS; : >"$MOCK_LOG"
 check "back to P4-only: exit 0" "$(run)" "0"
 check "back to P4-only: the tiers env and both drop-ins are gone" "$(tiers_files)" ""
 # S2: going P4-only drops the stored default with the file; a non-container one is named.
-check "back to P4-only: the dropped stored default is named" \
+check "back to P4-only: the dropped default is not named (the stored default is container)" \
   "$(grep -c "stored SH_SANDBOX_DEFAULT_TIER=microvm in $TE is dropped with it" "$TMP/run.log")" "0"
 check "back to P4-only: daemon-reload (the drop-ins went)" "$(grep -c '^systemctl daemon-reload$' "$MOCK_LOG")" "1"
 check "back to P4-only: supervisor try-restarted" "$(grep -c '^systemctl try-restart sh-supervisor.service$' "$MOCK_LOG")" "1"
@@ -562,6 +562,8 @@ check "stored garbage: every file byte-identical" "$(hash_tree)" "$before"
 check "stored garbage: no systemctl" "$(grep -c '^systemctl' "$MOCK_LOG")" "0"
 check "stored garbage: the refusal names the value and the file" \
   "$(grep -c "SH_SANDBOX_DEFAULT_TIER='gpu' in $TE must be container or microvm" "$TMP/run.log")" "1"
+check "stored garbage: the refusal names how to clear it" \
+  "$(grep -c "or set SH_SANDBOX_DEFAULT_TIER= (empty) to clear it" "$TMP/run.log")" "1"
 : >"$MOCK_LOG"
 check "stored garbage, an explicit value overrides it: exit 0" "$(SH_SANDBOX_DEFAULT_TIER=microvm run)" "0"
 check "stored garbage, an explicit value overrides it: written" "$(val SH_SANDBOX_DEFAULT_TIER "$TE")" "microvm"

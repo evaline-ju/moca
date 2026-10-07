@@ -158,18 +158,19 @@ preflight() {
   # The default tier is sticky: a re-run without SH_SANDBOX_DEFAULT_TIER must not silently flip a
   # chosen microvm back to container (and try-restart both units to do it). Set but empty clears it.
   # The RESOLVED value is checked, so a bad stored one is refused too -- on both paths, before the
-  # --remote return below, so a bad value writes nothing anywhere (--remote ignores it, but a typo
-  # should not pass silently).
-  local tiers_env="$SH_ENV_DIR/microvm-tiers.env" from
+  # --remote return below, so a bad value writes nothing anywhere. (--remote records no default and
+  # removes microvm-tiers.env, but a typo should not pass silently.) A stored one names its clear.
+  local tiers_env="$SH_ENV_DIR/microvm-tiers.env" from clear=''
   if [[ -n "${SH_SANDBOX_DEFAULT_TIER+x}" ]]; then
     DEFAULT_TIER="${SH_SANDBOX_DEFAULT_TIER:-container}" from=''
   else
     DEFAULT_TIER="$(env_value SH_SANDBOX_DEFAULT_TIER "$tiers_env")" from=" in $tiers_env"
     DEFAULT_TIER="${DEFAULT_TIER:-container}"
+    clear=', or set SH_SANDBOX_DEFAULT_TIER= (empty) to clear it'
   fi
   case "$DEFAULT_TIER" in
     container | microvm) ;;
-    *) die "SH_SANDBOX_DEFAULT_TIER='$DEFAULT_TIER'$from must be container or microvm" ;;
+    *) die "SH_SANDBOX_DEFAULT_TIER='$DEFAULT_TIER'$from must be container or microvm$clear" ;;
   esac
   if [[ -z "$REMOTE_BUNDLE" ]]; then
     [[ -f "$SH_ENV_DIR/relay.env" && -f "$SH_UNIT_DIR/sh-relay.service" ]] ||

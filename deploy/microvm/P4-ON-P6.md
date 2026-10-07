@@ -559,11 +559,12 @@ required, not optional. Remove both together.
 When P6 runs in an OpenShift cluster rather than on this host, the same P4 worker attaches to the
 in-cluster relay over TLS: `deploy/k8s/setup.sh` issues a bundle per host, and
 `sudo deploy/microvm/setup-microvm.sh --remote <bundle>` installs it. Everything above about the
-host itself -- KVM, Firecracker, the snapshot, the memory budget -- still applies; nothing about the
-local P6 does. Remote mode also writes `/etc/serverless-harness/microvm-relay-ca.crt` (when the
-bundle carries a CA) and the drop-in `microvm-worker.service.d/50-moca-remote.conf` in place of
-`50-moca-p6.conf`. On a host that was tiered (a mixed local run), `--remote` also removes the tier
-files and try-restarts the installed `sh-supervisor` and `sh-control-plane`: this host's only
-microVM worker now attaches to the cluster's relay, so its own P6 is container-only, and untiered.
+host itself -- KVM, Firecracker, the snapshot, the memory budget -- still applies. Of the local P6,
+only the tier files are touched: on a host an earlier mixed local run tiered, `--remote` removes
+`microvm-tiers.env` and both drop-ins and try-restarts the installed `sh-supervisor` and
+`sh-control-plane`, because this host's only microVM worker now attaches to the cluster's relay, so
+its own P6 is container-only from then on, and untiered (P6.3 spec §7). Remote mode also writes
+`/etc/serverless-harness/microvm-relay-ca.crt` (when the bundle carries a CA) and the drop-in
+`microvm-worker.service.d/50-moca-remote.conf` in place of `50-moca-p6.conf`.
 See
 [`deploy/k8s/README.md` §11](../k8s/README.md#11-p4-on-kubernetes-microvm-hosts-outside-the-cluster).

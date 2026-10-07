@@ -814,7 +814,11 @@ P6 installed.
 `setup-microvm.sh --remote <bundle>` installs the worker with the bundle's address, TLS, ID and
 token (the cluster's token replaces any local one), installs `relay-ca.crt` as
 `/etc/serverless-harness/microvm-relay-ca.crt`, and swaps the worker's drop-in to
-`50-moca-remote.conf`. It touches nothing of a local P6.
+`50-moca-remote.conf`. Of a local P6 it touches only the tier files: on a host an earlier mixed
+local run tiered, it removes `microvm-tiers.env` and both drop-ins
+(`sh-supervisor.service.d/50-microvm-tiers.conf`, `sh-control-plane.service.d/50-microvm-tiers.conf`)
+and try-restarts the installed `sh-supervisor` and `sh-control-plane`, because the host's own P6 is
+container-only from then on (P6.3 spec §7).
 
 It finishes only once the worker's **current** process has logged `attached, serving execs` and the
 attach has then held for `MICROVM_ATTACH_SETTLE` seconds (default 5, at least 1) with no reconnect,
