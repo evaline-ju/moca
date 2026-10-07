@@ -47,7 +47,9 @@ A container counts while it **exists**, running or stopped: `setup-vm.sh` runs t
 `setup-microvm.sh` after adding or removing the container sandboxes, so the host's tiers follow.
 `SH_SANDBOX_DEFAULT_TIER` is sticky: a re-run without it keeps the value in `microvm-tiers.env`, and
 `SH_SANDBOX_DEFAULT_TIER=` (set, empty) clears it back to `container`. A bad value, given or stored, is
-refused before anything is written. Going P4-only removes the file, and the stored default with it.
+refused before anything is written. Going P4-only removes the file, and the stored default with it;
+the run names a dropped default other than `container`. A default given on a host that ends up
+untiered (P4-only, or `--remote`) is not recorded, and the run says so.
 
 **To go P4-only (optional) on an installed P6:**
 
@@ -177,7 +179,7 @@ refused. It also checks that `sh-relay.service` is installed and that the golden
 | `sh-relay.service.d/50-moca-microvm.conf`                                                           | `EnvironmentFile=` the relay file above                                                                                                                                                                                                        |
 | `microvm-worker.service.d/50-moca-p6.conf`                                                          | `EnvironmentFile=` the worker file; `After=`/`Wants=sh-relay.service`                                                                                                                                                                          |
 | `microvm-worker.service.d/60-moca-memory.conf`                                                      | only with `MICROVM_MAX_COMMITTED_MB`: the budget, plus `AssertMemory=` reset and re-asserted at 90% of it. The reset clears **every** assertion, so the drop-in also re-states the shipped unit's others, `AssertPathExists=/dev/kvm` included |
-| `/etc/serverless-harness/microvm-tiers.env` (0644)                                                  | only on a host that also has container sandboxes: `SH_SANDBOX_TIERS=container,microvm`, `SH_SANDBOX_DEFAULT_TIER` (the given value, else the stored one, else `container`). Removed on a P4-only host                                          |
+| `/etc/serverless-harness/microvm-tiers.env` (0644)                                                  | only on a host that also has container sandboxes: `SH_SANDBOX_TIERS=container,microvm`, `SH_SANDBOX_DEFAULT_TIER` (the given value, else the stored one, else `container`). Removed on a P4-only host and by `--remote`                        |
 | `sh-supervisor.service.d/50-microvm-tiers.conf`, `sh-control-plane.service.d/50-microvm-tiers.conf` | with it: `EnvironmentFile=` the tiers file, ONE file for both units so they cannot disagree                                                                                                                                                    |
 
 **The token:**
@@ -560,5 +562,8 @@ in-cluster relay over TLS: `deploy/k8s/setup.sh` issues a bundle per host, and
 host itself -- KVM, Firecracker, the snapshot, the memory budget -- still applies; nothing about the
 local P6 does. Remote mode also writes `/etc/serverless-harness/microvm-relay-ca.crt` (when the
 bundle carries a CA) and the drop-in `microvm-worker.service.d/50-moca-remote.conf` in place of
-`50-moca-p6.conf`. See
+`50-moca-p6.conf`. On a host that was tiered (a mixed local run), `--remote` also removes the tier
+files and try-restarts the installed `sh-supervisor` and `sh-control-plane`: this host's only
+microVM worker now attaches to the cluster's relay, so its own P6 is container-only, and untiered.
+See
 [`deploy/k8s/README.md` §11](../k8s/README.md#11-p4-on-kubernetes-microvm-hosts-outside-the-cluster).

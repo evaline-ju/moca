@@ -398,10 +398,9 @@ check "SH_SANDBOX_DEFAULT_TIER= (set, empty): both units try-restarted" \
 unset MOCK_PODMAN_PS MOCK_RECORDS; : >"$MOCK_LOG"
 check "back to P4-only: exit 0" "$(run)" "0"
 check "back to P4-only: the tiers env and both drop-ins are gone" "$(tiers_files)" ""
-# M4: the drop-ins go first, so no unit is ever left loading an env file that is already gone.
-check "back to P4-only: both drop-ins removed before the env file they load" \
-  "$(grep '^==> changed: ' "$TMP/run.log" | tr ' ' '\n' | grep -E 'microvm-tiers\.(env|conf)$' | sed 's|.*/||' | tr '\n' ' ')" \
-  "50-microvm-tiers.conf 50-microvm-tiers.conf microvm-tiers.env "
+# S2: going P4-only drops the stored default with the file; a non-container one is named.
+check "back to P4-only: the dropped stored default is named" \
+  "$(grep -c "stored SH_SANDBOX_DEFAULT_TIER=microvm in $TE is dropped with it" "$TMP/run.log")" "0"
 check "back to P4-only: daemon-reload (the drop-ins went)" "$(grep -c '^systemctl daemon-reload$' "$MOCK_LOG")" "1"
 check "back to P4-only: supervisor try-restarted" "$(grep -c '^systemctl try-restart sh-supervisor.service$' "$MOCK_LOG")" "1"
 check "back to P4-only: control plane try-restarted" "$(grep -c '^systemctl try-restart sh-control-plane.service$' "$MOCK_LOG")" "1"
@@ -568,7 +567,7 @@ check "stored garbage, an explicit value overrides it: exit 0" "$(SH_SANDBOX_DEF
 check "stored garbage, an explicit value overrides it: written" "$(val SH_SANDBOX_DEFAULT_TIER "$TE")" "microvm"
 unset MOCK_PODMAN_PS MOCK_RECORDS
 
-echo "== --remote leaves the sandbox tiers to the cluster's setup.sh (P6.3, spec §7)"
+echo "== --remote: this host's own P6 is container-only, so it is untiered (P6.3, spec §7)"
 reset_remote_host; mkbundle "$B"
 check "remote with containers: exit 0" "$(MOCK_PODMAN_PS="sh-sandbox-0" runr "$B")" "0"
 check "remote with containers: no tiers env, no drop-ins" "$(tiers_files)" ""
@@ -578,13 +577,49 @@ check "remote, bad SH_SANDBOX_DEFAULT_TIER: exit 1 (preflight checks it on both 
   "$(SH_SANDBOX_DEFAULT_TIER=gpu runr "$B")" "1"
 check "remote, bad SH_SANDBOX_DEFAULT_TIER: no microvm env files" "$(find "$TMP/etc" -name '*microvm*' | wc -l | tr -d ' ')" "0"
 check "remote, bad SH_SANDBOX_DEFAULT_TIER: no systemctl" "$(grep -c '^systemctl' "$MOCK_LOG")" "0"
+# S1: the host's only microVM worker now attaches to the cluster's relay, so the local stack must stop
+# declaring a microvm tier it can no longer serve.
 reset_host; export MOCK_PODMAN_PS="sh-sandbox-0" MOCK_RECORDS="sh-sandbox-0=container"
-check "a mixed local install: exit 0" "$(run)" "0"
-tiers_before="$(cksum "$TE" "$TS" "$TC")"; : >"$MOCK_LOG"
+check "a mixed local install: exit 0" "$(SH_SANDBOX_DEFAULT_TIER=microvm run)" "0"
+: >"$MOCK_LOG"
 check "then --remote: exit 0" "$(runr "$B")" "0"
-check "then --remote: the mixed run's tiers files are left in place, unchanged" "$(cksum "$TE" "$TS" "$TC" 2>&1)" "$tiers_before"
-check "then --remote: neither unit try-restarted" "$(grep -cE 'restart sh-(supervisor|control-plane)' "$MOCK_LOG")" "0"
+check "then --remote: the tiers env and both drop-ins are removed" "$(tiers_files)" ""
+check "then --remote: daemon-reload (the drop-ins went)" "$(grep -c '^systemctl daemon-reload$' "$MOCK_LOG")" "1"
+check "then --remote: supervisor try-restarted" "$(grep -c '^systemctl try-restart sh-supervisor.service$' "$MOCK_LOG")" "1"
+check "then --remote: control plane try-restarted" "$(grep -c '^systemctl try-restart sh-control-plane.service$' "$MOCK_LOG")" "1"
+check "then --remote: never a plain restart of either" "$(grep -cE '^systemctl restart sh-(supervisor|control-plane)\.service$' "$MOCK_LOG")" "0"
+check "then --remote: the dropped stored default is named" \
+  "$(grep -c "stored SH_SANDBOX_DEFAULT_TIER=microvm in $TE is dropped with it" "$TMP/run.log")" "1"
+: >"$MOCK_LOG"
+check "--remote re-run: exit 0" "$(runr "$B")" "0"
+check "--remote re-run: neither unit try-restarted" "$(grep -cE 'restart sh-(supervisor|control-plane)' "$MOCK_LOG")" "0"
+check "--remote re-run: nothing dropped twice" "$(grep -c 'is dropped with it' "$TMP/run.log")" "0"
+# A host whose P6 has since been uninstalled: the stale tier files go, and no try-restart is attempted
+# of a unit that is not there (systemd would refuse it, exit 5).
+reset_host; run >/dev/null; rm -f "$TMP/units/"sh-*.service; : >"$MOCK_LOG"
+check "--remote, tier files but no P6 units: exit 0" "$(runr "$B")" "0"
+check "--remote, tier files but no P6 units: the files are removed" "$(tiers_files)" ""
+check "--remote, tier files but no P6 units: no try-restart" "$(grep -c 'try-restart' "$MOCK_LOG")" "0"
+check "--remote, tier files but no P6 units: a container stored default is not named" \
+  "$(grep -c 'is dropped with it' "$TMP/run.log")" "0"
 unset MOCK_PODMAN_PS MOCK_RECORDS
+
+echo "== S2: a default tier given on a host that is not tiered is named as ignored"
+ignored() { grep -c "SH_SANDBOX_DEFAULT_TIER=$1 ignored: this host is not tiered (only a host with container sandboxes AND a local P4 worker is), so it is not recorded" "$TMP/run.log"; }
+reset_host
+check "P4-only, SH_SANDBOX_DEFAULT_TIER=microvm: exit 0" "$(SH_SANDBOX_DEFAULT_TIER=microvm run)" "0"
+check "P4-only, SH_SANDBOX_DEFAULT_TIER=microvm: warned" "$(ignored microvm)" "1"
+check "P4-only, SH_SANDBOX_DEFAULT_TIER=microvm: not recorded" "$(tiers_files)" ""
+check "P4-only, unset: not warned" "$(run >/dev/null; grep -c 'ignored: this host is not tiered' "$TMP/run.log")" "0"
+reset_remote_host; mkbundle "$B"
+check "--remote, SH_SANDBOX_DEFAULT_TIER=microvm: exit 0" "$(SH_SANDBOX_DEFAULT_TIER=microvm runr "$B")" "0"
+check "--remote, SH_SANDBOX_DEFAULT_TIER=microvm: warned" "$(ignored microvm)" "1"
+reset_host; export MOCK_PODMAN_PS="sh-sandbox-0" MOCK_RECORDS="sh-sandbox-0=container"
+check "mixed, SH_SANDBOX_DEFAULT_TIER=microvm: exit 0" "$(SH_SANDBOX_DEFAULT_TIER=microvm run)" "0"
+check "mixed, SH_SANDBOX_DEFAULT_TIER=microvm: not warned (it is recorded)" "$(grep -c 'ignored: this host is not tiered' "$TMP/run.log")" "0"
+unset MOCK_PODMAN_PS MOCK_RECORDS
+check "mixed -> P4-only: the stored microvm default is named as dropped" \
+  "$(run >/dev/null; grep -c "stored SH_SANDBOX_DEFAULT_TIER=microvm in $TE is dropped with it" "$TMP/run.log")" "1"
 
 if [ "$fails" -eq 0 ]; then echo "PASS"; else echo "FAIL ($fails)"; fi
 exit "$fails"

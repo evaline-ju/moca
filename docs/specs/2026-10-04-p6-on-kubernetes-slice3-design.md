@@ -338,7 +338,8 @@ would exclude it.
   `microvm-tiers.env`, with `SH_SANDBOX_TIERS=container,microvm` and
   `SH_SANDBOX_DEFAULT_TIER` set to its `SH_SANDBOX_DEFAULT_TIER` input, else the stored one, else
   `container`, loaded by drop-ins into both `sh-supervisor` and `sh-control-plane`. A P4-only host
-  stays untiered, and `--remote` leaves the tiers to the cluster's `setup.sh`. The default is
+  stays untiered, and so does a `--remote` host's own P6 (its only P4 worker attaches to the
+  cluster's relay): `--remote` removes the tier files a mixed local run wrote. The default is
   sticky in `microvm-tiers.env` itself, so going P4-only removes that file and the stored
   default with it; `deploy/k8s/setup.sh` keeps its default in `moca-setup`, through a
   single-tier run. `P4-ON-P6.md`'s "A P4-only host"

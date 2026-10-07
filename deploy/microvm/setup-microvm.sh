@@ -23,8 +23,10 @@
 # --remote BUNDLE_DIR (P6 on Kubernetes, docs/specs/2026-10-04-p6-on-kubernetes-slice2-design.md §5):
 # attach this host's worker to a relay in a cluster, over TLS, instead of to a local P6. The bundle is
 # the directory deploy/k8s/setup.sh wrote for this host's ID; its token replaces a local one (the
-# cluster is the token authority), and MICROVM_SANDBOX_ID comes from it. Nothing local is touched:
-# no relay drop-in, no podman, no installed P6 needed. Running again without --remote switches back.
+# cluster is the token authority), and MICROVM_SANDBOX_ID comes from it. No relay drop-in, no podman,
+# no installed P6 needed. The one local change: tier files an earlier mixed run wrote are removed, and
+# the installed units try-restarted, since this host's own P6 is container-only once its only microVM
+# worker attaches elsewhere. Running again without --remote switches back.
 #
 # Env overrides: SH_UNIT_DIR, SH_ENV_DIR, SH_BIN_DIR, MICROVM_SANDBOX_ID, MICROVM_WORKSPACE_IDLE,
 # MICROVM_SNAPSHOT_DIR, MICROVM_BIN, MICROVM_ATTACH_TIMEOUT, MICROVM_ATTACH_SETTLE (--remote: seconds
@@ -33,7 +35,8 @@
 # shipped unit's 24 GiB, written as a drop-in that also lowers the unit's AssertMemory to match -- and
 # SH_SANDBOX_DEFAULT_TIER (container or microvm): the tier of a session created without one, on a host
 # with both tiers. Sticky, like deploy/k8s/setup.sh's: unset keeps the value in microvm-tiers.env (else
-# container), and set but empty clears it back to container.
+# container), and set but empty clears it back to container. Given on a host that ends up untiered
+# (P4-only, or --remote), it is not recorded, and a log line says so.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -174,8 +177,9 @@ preflight() {
   fi
   [[ -f "$MICROVM_SNAPSHOT_DIR/manifest.json" ]] ||
     die "no golden snapshot at $MICROVM_SNAPSHOT_DIR; build one with deploy/microvm/build-rootfs.sh then build-snapshot.sh (deploy/microvm/P4-ON-P6.md)"
-  # Remote: the tiers are the cluster's -- its setup.sh tiers a stack that runs both itself; this
-  # host's own containers, if any, attach to its own relay, which the remote worker does not use.
+  # Remote: MIXED stays 0. This host's own containers, if any, attach to its own relay, which the
+  # remote worker does not use, so the local P6 is container-only and untiered (install_tiers removes
+  # what an earlier mixed run wrote); the cluster's setup.sh tiers the cluster's stack.
   [[ -z "$REMOTE_BUNDLE" ]] || return 0
   local attached
   # -a: a STOPPED sandbox container still counts. setup-vm.sh runs them --restart=always, and
@@ -335,14 +339,24 @@ install_memory_dropin() {
 
 # install_tiers: co-located with container sandboxes, tell P6's supervisor and control plane that two
 # tiers exist (P6.3), through ONE env file both units load, so the two cannot disagree; otherwise
-# remove what an earlier mixed run wrote. Drop-ins and an env file of OURS, never an edit to
-# supervisor.env / control-plane.env, which setup-vm.sh owns.
+# (P4-only, or --remote) remove what an earlier mixed run wrote. Drop-ins and an env file of OURS,
+# never an edit to supervisor.env / control-plane.env, which setup-vm.sh owns.
 install_tiers() {
-  local env="$SH_ENV_DIR/microvm-tiers.env" def="$DEFAULT_TIER" stage
+  local env="$SH_ENV_DIR/microvm-tiers.env" def="$DEFAULT_TIER" stage stored
   local sup="$SH_UNIT_DIR/sh-supervisor.service.d/$TIERS_DROPIN"
   local cp="$SH_UNIT_DIR/sh-control-plane.service.d/$TIERS_DROPIN"
   if ((MIXED == 0)); then
-    # The drop-ins first, then the env file they load: never a unit pointing at a file that is gone.
+    # The sticky default lives only in the tiers file, so an untiered host neither records a given
+    # one nor keeps a stored one: both are said out loud, so a later return to mixed is no surprise.
+    [[ -z "${SH_SANDBOX_DEFAULT_TIER:-}" ]] ||
+      log "SH_SANDBOX_DEFAULT_TIER=$SH_SANDBOX_DEFAULT_TIER ignored: this host is not tiered (only a host with container sandboxes AND a local P4 worker is), so it is not recorded"
+    if [[ -f "$env" ]]; then
+      stored="$(env_value SH_SANDBOX_DEFAULT_TIER "$env")"
+      [[ -z "$stored" || "$stored" == container ]] ||
+        log "this host is no longer tiered: the stored SH_SANDBOX_DEFAULT_TIER=$stored in $env is dropped with it (sessions default to container again if it is re-tiered)"
+    fi
+    # Running units keep the old drop-in until the daemon-reload in apply(), and see the change at
+    # its try-restart there; the order of these removals does not matter.
     remove_if_present "$sup"; remove_if_present "$cp"; remove_if_present "$env"
     return 0
   fi
@@ -540,8 +554,8 @@ main() {
   install_worker_binary
   install_units
   if [[ -n "$REMOTE_BUNDLE" ]]; then install_env_remote; else install_env; fi
-  # --remote: the cluster's setup.sh owns the tiers, so the tier files are neither written nor removed.
-  [[ -n "$REMOTE_BUNDLE" ]] || install_tiers
+  # --remote: MIXED is 0 (preflight), so this removes what an earlier mixed local run wrote.
+  install_tiers
   apply
   if [[ -n "$REMOTE_BUNDLE" ]]; then verify_attached_remote; else verify_attached; fi
   if ((${#CHANGED[@]})); then log "changed: ${CHANGED[*]}"; else log "nothing to change"; fi
