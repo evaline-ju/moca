@@ -85,6 +85,17 @@ describe('POST /v1/config-bundles', () => {
     },
   );
 
+  it('refuses a tar that is not strict base64 as invalid_request, not digest_mismatch', async () => {
+    const good = bundle();
+    for (const tar of [good.tar.slice(0, -1) + '!', 'abc', good.tar + '\n', '====']) {
+      const body = { digest: good.digest, tar };
+      expect(
+        await codeOf(() => HANDLERS.putConfigBundle!(ctx({ principal: alice, body }), makeDeps())),
+        JSON.stringify(tar.slice(-4)),
+      ).toBe('invalid_request');
+    }
+  });
+
   it('refuses a malformed digest and a missing tar', async () => {
     const d = makeDeps();
     const good = bundle();

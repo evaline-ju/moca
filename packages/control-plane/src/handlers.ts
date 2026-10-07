@@ -502,6 +502,10 @@ export const HANDLERS: Record<string, Handler> = {
     if (typeof body.tar !== 'string' || body.tar.length === 0) {
       throw new CpError('invalid_request', 'tar must be a non-empty base64 string');
     }
+    // Buffer.from skips invalid characters, which would surface a garbled upload as digest_mismatch.
+    if (body.tar.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(body.tar)) {
+      throw new CpError('invalid_request', 'tar must be strict base64');
+    }
     const tar = Buffer.from(body.tar, 'base64');
     if (tar.length > MAX_BUNDLE_BYTES) {
       throw new CpError(
