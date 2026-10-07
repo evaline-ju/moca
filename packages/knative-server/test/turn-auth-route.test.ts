@@ -342,3 +342,45 @@ describe('a malformed SH_SESSION_TOKEN_PUBLIC_KEYS', () => {
     expect(vi.mocked(executeTurn)).not.toHaveBeenCalled();
   });
 });
+
+describe('POST /turn with a session config bundle', () => {
+  const digest = 'sha256:' + 'e'.repeat(64);
+  const auth = { Authorization: `Bearer ${token}` };
+  const sse = { ...auth, Accept: 'text/event-stream' };
+  const bundleGone = () => {
+    const err = new Error(`config bundle not found: ${digest}`);
+    err.name = 'BundleNotFoundError';
+    return err;
+  };
+
+  for (const [label, headers] of [
+    ['sync', auth],
+    ['SSE', sse],
+  ] as const) {
+    it(`${label}: passes the exchange's configRef to executeTurn`, async () => {
+      cpReply.body = { ...(cpReply.body as object), configRef: digest };
+      const res = await postRaw('/turn', { sessionId: 'sid-1', prompt: 'hi' }, headers);
+      expect(res.status).toBe(200);
+      expect(vi.mocked(executeTurn).mock.calls[0]![0]!.configRef).toBe(digest);
+    });
+
+    it(`${label}: ignores a configRef in the request body when the exchange returns none`, async () => {
+      const res = await postRaw(
+        '/turn',
+        { sessionId: 'sid-1', prompt: 'hi', configRef: digest },
+        headers,
+      );
+      expect(res.status).toBe(200);
+      expect(vi.mocked(executeTurn).mock.calls[0]![0]!.configRef).toBeUndefined();
+    });
+
+    it(`${label}: 410s config_bundle_not_found when the bundle has expired`, async () => {
+      cpReply.body = { ...(cpReply.body as object), configRef: digest };
+      vi.mocked(executeTurn).mockRejectedValueOnce(bundleGone());
+      const res = await postRaw('/turn', { sessionId: 'sid-1', prompt: 'hi' }, headers);
+      expect(res.status).toBe(410);
+      expect(res.text.startsWith('event:')).toBe(false);
+      expect(JSON.parse(res.text)).toMatchObject({ error: 'config_bundle_not_found' });
+    });
+  }
+});
