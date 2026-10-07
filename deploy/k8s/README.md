@@ -82,7 +82,7 @@ Image choice, for `--target kind`:
 - `--skip-build` assumes both images are already loaded, which makes a re-run take seconds.
 
 Other settings come from the environment: `SH_ADMIN_SUBJECTS`, `SH_ALLOW_OPERATOR_FALLBACK`
-(default `false`), `SH_SANDBOX_COUNT` (default 2; 0 runs no container sandboxes) and
+(default `false`), `SH_SANDBOX_COUNT` (default 2, at most 4 digits; 0 runs no container sandboxes) and
 `SH_WAIT_SECONDS` (default 120, the wait for sandboxes to attach). `--help` prints the synopsis.
 
 When it finishes, it prints how to reach the stack:

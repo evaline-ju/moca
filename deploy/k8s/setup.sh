@@ -6,8 +6,8 @@
 #                       [--relay-tls-cert FILE --relay-tls-key FILE] [--tls-secret NAME]
 #
 # Environment: SH_GITHUB_CLIENT_ID, SH_ADMIN_SUBJECTS, SH_ALLOW_OPERATOR_FALLBACK (default false),
-# SH_SANDBOX_COUNT (default 2; 0 runs no container sandboxes), SH_WAIT_SECONDS (default 120),
-# SH_P4_SANDBOX_IDS (ocp only: comma-separated IDs of P4 microVM hosts outside the cluster, each
+# SH_SANDBOX_COUNT (default 2, at most 4 digits; 0 runs no container sandboxes), SH_WAIT_SECONDS
+# (default 120), SH_P4_SANDBOX_IDS (ocp only: comma-separated IDs of P4 microVM hosts outside the cluster, each
 # attaching to the relay over TLS; with SH_SANDBOX_COUNT>0 too, the stack is tiered
 # (SH_SANDBOX_DEFAULT_TIER, default container; spec P6.3 §7)), SH_SANDBOX_DEFAULT_TIER (container or
 # microvm: the tier a session gets when it names none, on a tiered stack), SH_SINGLE_NAMESPACE
@@ -146,10 +146,11 @@ parse_args() {
       die "SH_SINGLE_NAMESPACE='$SINGLE_NS' collides with the base's namespace names; pick a dedicated one"
   fi
   # Validated here, before anything touches a cluster; an unset or empty count is resolved later,
-  # from the earlier run's value (load_setup_inputs).
+  # from the earlier run's value (load_setup_inputs). At most 4 digits: $((10#...)) overflows
+  # silently on a longer one, and could come out negative ("not 0", so tiered; negative replicas).
   SH_SANDBOX_COUNT="${SH_SANDBOX_COUNT:-}"
-  [[ -z "$SH_SANDBOX_COUNT" || "$SH_SANDBOX_COUNT" =~ ^[0-9]+$ ]] ||
-    die "SH_SANDBOX_COUNT='$SH_SANDBOX_COUNT' must be a whole number (0 runs no container sandboxes)"
+  [[ -z "$SH_SANDBOX_COUNT" || "$SH_SANDBOX_COUNT" =~ ^[0-9]{1,4}$ ]] ||
+    die "SH_SANDBOX_COUNT='$SH_SANDBOX_COUNT' must be a whole number of at most 4 digits (0 runs no container sandboxes)"
   SH_WAIT_SECONDS="${SH_WAIT_SECONDS:-120}"
 }
 
@@ -318,19 +319,20 @@ load_setup_inputs() {
     # Validated here, before moca-setup is written below, so a refused value -- given or stored --
     # stores nothing.
     if [[ -n "$DEFAULT_TIER_GIVEN" ]]; then
-      STORED_DEFAULT_TIER="$SH_SANDBOX_DEFAULT_TIER"
+      STORED_DEFAULT_TIER="$SH_SANDBOX_DEFAULT_TIER" # parse_args has validated it
     else
       STORED_DEFAULT_TIER="$(cm_value "$json" SH_SANDBOX_DEFAULT_TIER)"
+      # A stored value names where it came from, and how to clear it, as the stored count's does.
+      case "$STORED_DEFAULT_TIER" in
+      '' | container | microvm) ;;
+      *) die "ConfigMap moca-setup holds SH_SANDBOX_DEFAULT_TIER='$STORED_DEFAULT_TIER', which must be container or microvm: re-run with SH_SANDBOX_DEFAULT_TIER set to one of them, or set but empty (SH_SANDBOX_DEFAULT_TIER=) to clear it" ;;
+      esac
     fi
-    case "$STORED_DEFAULT_TIER" in
-    '' | container | microvm) ;;
-    *) die "SH_SANDBOX_DEFAULT_TIER='$STORED_DEFAULT_TIER' must be container or microvm" ;;
-    esac
   fi
   [[ -n "$SH_SANDBOX_COUNT" ]] || SH_SANDBOX_COUNT="$(cm_value "$json" SH_SANDBOX_COUNT)"
   [[ -n "$SH_SANDBOX_COUNT" ]] || SH_SANDBOX_COUNT=2
-  [[ "$SH_SANDBOX_COUNT" =~ ^[0-9]+$ ]] ||
-    die "moca-setup holds SH_SANDBOX_COUNT='$SH_SANDBOX_COUNT': re-run with SH_SANDBOX_COUNT set to a whole number"
+  [[ "$SH_SANDBOX_COUNT" =~ ^[0-9]{1,4}$ ]] ||
+    die "moca-setup holds SH_SANDBOX_COUNT='$SH_SANDBOX_COUNT': re-run with SH_SANDBOX_COUNT set to a whole number of at most 4 digits"
   # Normalised once, so every later comparison may be a string one: 00 is 0 (no container
   # sandboxes, so untiered), and 08 is 8, not an octal error.
   SH_SANDBOX_COUNT=$((10#$SH_SANDBOX_COUNT))

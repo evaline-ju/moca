@@ -997,9 +997,14 @@ expect_out "SH_SANDBOX_DEFAULT_TIER='gpu' must be container or microvm"
 [[ "$(setting SH_SANDBOX_DEFAULT_TIER)" == container ]] || fail 'a refused default tier still rewrote moca-settings'
 jq '.data.SH_SANDBOX_DEFAULT_TIER = "gpu"' "$MOCK_STATE/moca__ConfigMap__moca-setup.json" >"$TMP/cm.json"
 mv "$TMP/cm.json" "$MOCK_STATE/moca__ConfigMap__moca-setup.json"
+before_setup="$(setup_cm)"
 (unset SH_SANDBOX_DEFAULT_TIER; export SH_GITHUB_CLIENT_ID=Iv1.a; expect_fail --target ocp)
-expect_out "SH_SANDBOX_DEFAULT_TIER='gpu' must be container or microvm"
-pass 'a default tier other than container or microvm, given or stored, is refused and stores nothing'
+# A stored value names where it came from, and how to clear it, as the stored count's refusal does.
+expect_out "ConfigMap moca-setup holds SH_SANDBOX_DEFAULT_TIER='gpu', which must be container or microvm: re-run with SH_SANDBOX_DEFAULT_TIER set to one of them, or set but empty (SH_SANDBOX_DEFAULT_TIER=) to clear it"
+[[ "$(setup_cm)" == "$before_setup" ]] || fail 'a refused stored default tier still rewrote moca-setup'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_DEFAULT_TIER=; expect_ok --target ocp)
+[[ -z "$(dtier_stored)" ]] || fail "SH_SANDBOX_DEFAULT_TIER= did not clear a bad stored default: '$(dtier_stored)'"
+pass 'a default tier other than container or microvm, given or stored, is refused and stores nothing; a stored one names moca-setup and SH_SANDBOX_DEFAULT_TIER= clears it'
 
 # Kind is never tiered and stores no default tier, but a bad GIVEN value is still a typo to
 # refuse -- before anything touches the cluster, as on the other targets (M3).
@@ -1022,6 +1027,25 @@ untiered || fail "SH_SANDBOX_COUNT=00 with a P4 ID was tiered: '$(setting SH_SAN
 [[ "$(replicas_of moca-sandbox)" == 0 ]] || fail "SH_SANDBOX_COUNT=00 did not scale moca-sandbox to 0: '$(replicas_of moca-sandbox)'"
 expect_out 'SH_SANDBOX_COUNT=0: no container sandboxes to wait for'
 pass 'SH_SANDBOX_COUNT=00 with P4 IDs is a P4-only stack: untiered, stored and applied as 0'
+
+# $((10#...)) overflows silently on a long count (it can come out negative: "not 0", so tiered, and
+# negative replicas). At most 4 digits, given or stored.
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=99999999999999999999; expect_fail --target ocp)
+expect_out "SH_SANDBOX_COUNT='99999999999999999999' must be a whole number of at most 4 digits"
+! grep -q '^kubectl' "$MOCK_LOG" || fail 'a 20-digit SH_SANDBOX_COUNT still reached the cluster'
+[[ -z "$(setup_cm 2>/dev/null)" ]] || fail 'a 20-digit SH_SANDBOX_COUNT stored something'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_COUNT=0001 MOCK_RECORDS=1; expect_ok --target ocp)
+[[ "$(replicas_of moca-sandbox)" == 1 ]] || fail "a 4-digit SH_SANDBOX_COUNT=0001 was not 1: '$(replicas_of moca-sandbox)'"
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp)
+jq '.data.SH_SANDBOX_COUNT = "99999999999999999999"' "$MOCK_STATE/moca__ConfigMap__moca-setup.json" >"$TMP/cm.json"
+mv "$TMP/cm.json" "$MOCK_STATE/moca__ConfigMap__moca-setup.json"
+before_setup="$(setup_cm)"
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_fail --target ocp)
+expect_out "moca-setup holds SH_SANDBOX_COUNT='99999999999999999999': re-run with SH_SANDBOX_COUNT set to a whole number of at most 4 digits"
+[[ "$(setup_cm)" == "$before_setup" ]] || fail 'a refused stored SH_SANDBOX_COUNT still rewrote moca-setup'
+pass 'SH_SANDBOX_COUNT is at most 4 digits, given (refused before the cluster, nothing stored) or stored (refused, moca-setup unchanged)'
 
 # ocp-single runs no P4 hosts (SH_P4_SANDBOX_IDS needs --target ocp), so it is never tiered; the
 # sticky default is still stored there, unused. Its supervisor already has an env patch entry when
