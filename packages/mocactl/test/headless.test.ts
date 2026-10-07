@@ -327,4 +327,19 @@ describe('cmdRun --config', () => {
     ).toBe(0);
     expect(created[0]).toMatchObject({ configRef: digest });
   });
+
+  it('forwards an empty configRef so the server refuses it', async () => {
+    const created: unknown[] = [];
+    const rt = runtime({
+      cp: fakeControlPlane({
+        listCredentials: async () => [credential('anthropic')],
+        createSession: async (req) => (
+          created.push(req),
+          { sessionId: 's-new', token: 'st', expiresAt: 4_000_000_000 }
+        ),
+      }),
+    });
+    await cmdRun(rt, io(), { prompt: 'hi', options: {}, json: false, configRef: '' });
+    expect(created[0]).toMatchObject({ configRef: '' });
+  });
 });

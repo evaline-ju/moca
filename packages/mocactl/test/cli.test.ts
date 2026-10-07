@@ -219,9 +219,21 @@ describe('main', () => {
         buildRuntime: fakeBuild,
       }),
     ).toBe(2);
-    expect(o.errs.join('')).toContain('--config');
+    expect(o.errs.join('')).toContain('fixed when it is created');
+    const o2 = io();
     expect(
-      await main(['sessions', '--config', 'sha256:x'], {}, io(), { buildRuntime: fakeBuild }),
+      await main(['sessions', '--config', 'sha256:x'], {}, o2, { buildRuntime: fakeBuild }),
     ).toBe(2);
+    expect(o2.errs.join('')).toContain('only applies to');
+  });
+
+  it('rejects an empty or blank --config rather than running without the bundle', async () => {
+    for (const blank of ['', '   ']) {
+      const o = io();
+      expect(await main(['run', 'hi', '--config', blank], {}, o, { buildRuntime: fakeBuild })).toBe(
+        2,
+      );
+      expect(o.errs.join('')).toContain('--config');
+    }
   });
 });

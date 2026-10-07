@@ -151,7 +151,7 @@ export async function cmdRun(rt: Runtime, io: Io, opts: RunOptions): Promise<num
       }
       try {
         session = await manager.create(
-          opts.configRef ? { ...r.request, configRef: opts.configRef } : r.request,
+          opts.configRef !== undefined ? { ...r.request, configRef: opts.configRef } : r.request,
         );
       } catch (err) {
         const refused = fieldRefusedByServer(err, SESSION_OPTION_FIELDS);

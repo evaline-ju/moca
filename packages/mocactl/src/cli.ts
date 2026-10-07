@@ -142,6 +142,10 @@ export async function main(
         );
         return 2;
       }
+      if (values.config !== undefined && values.config.trim() === '') {
+        io.err(`--config needs a bundle digest (sha256:…); omit it to run without one\n${USAGE}`);
+        return 2;
+      }
       let options: Record<string, string>;
       try {
         options = parseOptionFlags(values.option ?? []);
