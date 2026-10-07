@@ -169,7 +169,7 @@ importers:
         specifier: ^7.3.0
         version: 7.3.0(marked@18.0.14)
       react:
-        specifier: ^19.2.0
+        specifier: ^19.3.0
         version: 19.3.0
       tsx:
         specifier: ^4.23.15
@@ -179,7 +179,7 @@ importers:
         specifier: ^22.0.0
         version: 22.19.21
       '@types/react':
-        specifier: ^19.2.0
+        specifier: ^19.3.0
         version: 19.3.0
       ink-testing-library:
         specifier: ^4.0.0
