@@ -12,6 +12,7 @@ import { adminSubjectsFromEnv, GithubOAuthProvider } from './identity.js';
 import { K8sSecretStore } from './k8s-secret-store.js';
 import { defaultRunKubectl } from './kubectl.js';
 import { OwnershipIndex, type CpRedisLike } from './ownership.js';
+import { RedisRefreshStore, type RefreshRedisLike } from './refresh-redis.js';
 import { startControlPlane } from './server.js';
 import type { CpConfig, CpDeps } from './handlers.js';
 import { keyIdFor, makeSigner, parseKeyset, publicKeyFromBase64 } from './token.js';
@@ -303,6 +304,11 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
     },
     index: new OwnershipIndex(client as unknown as CpRedisLike),
     bundles: client as unknown as BundleRedisLike & BundleBudgetRedisLike,
+    refresh: new RedisRefreshStore(client as unknown as RefreshRedisLike, {
+      idleTtlS: config.refreshIdleTtlSeconds,
+      maxTtlS: config.refreshMaxTtlSeconds,
+      graceS: config.refreshReuseGraceSeconds,
+    }),
     credentials: credentialStoreFromEnv(env),
     identity: new GithubOAuthProvider({
       clientId: env.SH_GITHUB_CLIENT_ID!,
