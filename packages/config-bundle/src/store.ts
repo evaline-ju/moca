@@ -41,12 +41,6 @@ export class BundleDigestMismatchError extends Error {
 }
 
 /**
- * Store the bundle's verified content (canonical tar, no `lockfile.json`) under its digest, gzipped and base64'd (base64 keeps the injectable
- * `BundleRedisLike` a plain string interface). Content-addressed, so an existing key means
- * identical content and the write is skipped. Verify the digest matches the tar first to prevent
- * key poisoning: a mismatched pair blocks any correct write under that digest for 30 days.
- */
-/**
  * Verify `tar` against `digest` and return the exact string `putBundle` stores for it: the verified
  * content only, re-canonicalised (no `lockfile.json`, no trailing data), so the stored bytes are a
  * function of the digest and the first uploader cannot pin anything unchecked for everyone.
@@ -63,6 +57,13 @@ export function prepareBundle(digest: string, tar: Buffer): string {
   return gzipSync(canonicalTar(content)).toString('base64');
 }
 
+/**
+ * Store the bundle's verified content (canonical tar, no `lockfile.json`) under its digest, gzipped
+ * and base64'd (base64 keeps the injectable `BundleRedisLike` a plain string interface).
+ * Content-addressed, so an existing key means identical content and the write is skipped. Verify the
+ * digest matches the tar first to prevent key poisoning: a mismatched pair blocks any correct write
+ * under that digest for 30 days.
+ */
 export async function putBundle(
   redis: BundleRedisLike,
   digest: string,
