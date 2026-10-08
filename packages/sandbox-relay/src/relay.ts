@@ -41,6 +41,8 @@ interface Parked {
   sinks: Map<number, (ev: ExecEvent) => void>;
   // Cancels a pending presence-put retry; set by Hello, called by teardown.
   cancelPresence?: () => void;
+  // This stream's teardown, so drain can run it; settles once the remove and the mark have.
+  teardown: () => Promise<void>;
 }
 
 /** Presence-put backoff: 250 ms, doubling, capped at 10 s, with no attempt limit (#423, Task 16b). */
@@ -67,6 +69,13 @@ export interface Relay {
    */
   routeExec(sandboxId: string, exec: Exec): AsyncIterable<ExecEvent>;
   routeAbort(sandboxId: string, reqId: number): void;
+  /**
+   * Graceful stop (#453): refuse every later Hello, run each parked session's teardown and await
+   * its record remove and detach mark, then end its stream. A relay stopped without this leaves
+   * stale records that turns lease until the worker reattaches, failing inside the turn with `no
+   * live worker` instead of answering 503 pending. Never rejects: store failures are logged.
+   */
+  drain(): Promise<void>;
 }
 
 function bearer(md?: { get: (k: string) => string[] }): string | undefined {
@@ -77,6 +86,7 @@ function bearer(md?: { get: (k: string) => string[] }): string | undefined {
 export function createRelay(deps: RelayDeps): Relay {
   const sessions = new Map<string, Parked>();
   const timers = deps.timers ?? defaultTimers;
+  let draining = false;
 
   /**
    * Write presence for `session`, retrying until it lands or that session is torn down.
@@ -140,7 +150,9 @@ export function createRelay(deps: RelayDeps): Relay {
     stream.on('data', (frame: WorkerFrame) => {
       if (frame.hello && !sandboxId) {
         const id = frame.hello.sandboxId;
-        if (!deps.validateToken(bearer(stream.metadata), id)) {
+        // Draining: the stop already removed every record, so a session parked now would write one
+        // that nothing removes.
+        if (draining || !deps.validateToken(bearer(stream.metadata), id)) {
           stream.end(); // reject before parking; no presence written
           return;
         }
@@ -156,7 +168,7 @@ export function createRelay(deps: RelayDeps): Relay {
           return;
         }
         sandboxId = id;
-        const session: Parked = { stream, sinks: new Map() };
+        const session: Parked = { stream, sinks: new Map(), teardown };
         own = session;
         sessions.set(id, session);
         const rec: SandboxRecord = {
@@ -188,8 +200,8 @@ export function createRelay(deps: RelayDeps): Relay {
      * session under the same id, which a by-id teardown used to evict: cancelling its presence
      * retry, failing its execs and removing its record.
      */
-    const teardown = () => {
-      if (!sandboxId || !own || sessions.get(sandboxId) !== own) return;
+    function teardown(): Promise<void> {
+      if (!sandboxId || !own || sessions.get(sandboxId) !== own) return Promise.resolve();
       const parked = own;
       own = undefined;
       parked.cancelPresence?.();
@@ -199,13 +211,19 @@ export function createRelay(deps: RelayDeps): Relay {
         sink({ error: { reqId, message: 'worker disconnected' } } as ExecEvent);
       }
       sessions.delete(sandboxId);
-      void deps.records.remove(sandboxId).catch((e) => console.error('presence remove failed', e));
+      const removed = deps.records
+        .remove(sandboxId)
+        .catch((e) => console.error('presence remove failed', e));
       // After the remove, through the same client: a reader that sees the record gone and no mark
       // yet writes its own (SET-if-absent), which this overwrite then corrects to the true time.
-      void deps.detach?.mark(sandboxId).catch((e) => console.error('detach mark write failed', e));
-    };
-    stream.on('end', teardown);
-    stream.on('error', teardown);
+      // Issued now, not after `removed` settles: the client's FIFO queue already orders it.
+      const marked = deps.detach
+        ?.mark(sandboxId)
+        .catch((e) => console.error('detach mark write failed', e));
+      return Promise.all([removed, marked]).then(() => {});
+    }
+    stream.on('end', () => void teardown());
+    stream.on('error', () => void teardown());
   }
 
   async function* routeExec(sandboxId: string, exec: Exec): AsyncGenerator<ExecEvent> {
@@ -248,7 +266,19 @@ export function createRelay(deps: RelayDeps): Relay {
     sessions.get(sandboxId)?.stream.write({ abort: { reqId } } as ServerFrame);
   }
 
-  return { onAttach, parked: () => [...sessions.keys()], routeExec, routeAbort };
+  async function drain(): Promise<void> {
+    draining = true;
+    await Promise.all(
+      [...sessions.values()].map(async (parked) => {
+        await parked.teardown();
+        // Ended only after the record is gone, so the worker cannot reattach (to a successor
+        // relay) while this one's remove is still queued behind its new put.
+        parked.stream.end();
+      }),
+    );
+  }
+
+  return { onAttach, parked: () => [...sessions.keys()], routeExec, routeAbort, drain };
 }
 
 /** Map a worker→relay frame to the harness-facing ExecEvent oneof (Task 6 uses this). */

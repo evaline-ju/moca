@@ -24,7 +24,13 @@ import {
   MAX_EXEC_MESSAGE_BYTES,
 } from '@moca/k8s-sandbox';
 import { RedisRecordStore, affinityTimings } from '@moca/harness';
-import { createRelay, type RelayDeps, type AttachStream, type DetachMarks } from './relay.js';
+import {
+  createRelay,
+  type Relay,
+  type RelayDeps,
+  type AttachStream,
+  type DetachMarks,
+} from './relay.js';
 
 /**
  * Ends a server-streaming exec call with a non-OK status.
@@ -252,12 +258,12 @@ function addExecService(
  * every sandbox can reach SandboxExec, and only a secret exec token keeps it out. With the base
  * manifest's public dev token there is no isolation between sandboxes at all.
  */
-export function buildServer(deps: RelayServerDeps): { server: Server } {
+export function buildServer(deps: RelayServerDeps): { server: Server; relay: Relay } {
   const relay = createRelay(deps);
   const server = newServer();
   addWorkerService(server, relay);
   addExecService(server, relay, deps.validateExecToken);
-  return { server };
+  return { server, relay };
 }
 
 /**
@@ -267,13 +273,17 @@ export function buildServer(deps: RelayServerDeps): { server: Server } {
  * exec token is again the only control. Same relay instance, so an Exec routes to a worker attached
  * on the other listener.
  */
-export function buildServers(deps: RelayServerDeps): { attachServer: Server; execServer: Server } {
+export function buildServers(deps: RelayServerDeps): {
+  attachServer: Server;
+  execServer: Server;
+  relay: Relay;
+} {
   const relay = createRelay(deps);
   const attachServer = newServer();
   const execServer = newServer();
   addWorkerService(attachServer, relay);
   addExecService(execServer, relay, deps.validateExecToken);
-  return { attachServer, execServer };
+  return { attachServer, execServer, relay };
 }
 
 function bind(server: Server, addr: string): Promise<number> {
@@ -350,16 +360,34 @@ export function detachMarks(records: RedisRecordStore, env: NodeJS.ProcessEnv): 
   };
 }
 
+/**
+ * Graceful stop (#453), in this order: every server stops accepting new calls, the relay drains
+ * (each parked session's record removed and detach mark written, awaited, then its stream ended),
+ * and only then do the servers finish. `tryShutdown` waits for open calls, and an Attach stream is
+ * open for the worker's whole life, so without the drain ending them it never returns at all.
+ */
+async function stopGracefully(servers: Server[], relay: Relay, close?: () => Promise<void>) {
+  const stopped = Promise.all(
+    servers.map((s) => new Promise<void>((r) => s.tryShutdown(() => r()))),
+  );
+  await relay.drain();
+  await stopped;
+  await close?.();
+}
+
 export async function startRelay(
   opts: { port?: number; execAddr?: string; deps?: RelayServerDeps; env?: NodeJS.ProcessEnv } = {},
 ): Promise<{ port: number; execPort?: number; shutdown: () => Promise<void> }> {
   const env = opts.env ?? process.env;
+  // The store startRelay built itself, and so closes on shutdown; injected deps belong to the caller.
+  let ownedRecords: RedisRecordStore | undefined;
   // The exec validator first: it throws on a missing token before anything touches Redis.
   const deps =
     opts.deps ??
     (() => {
       const validateExecToken = makeExecTokenValidator(env);
       const records = new RedisRecordStore();
+      ownedRecords = records;
       return {
         records,
         detach: detachMarks(records, env),
@@ -367,33 +395,83 @@ export async function startRelay(
         validateExecToken,
       };
     })();
+  const close = ownedRecords ? () => ownedRecords!.close() : undefined;
   const attachAddr = `0.0.0.0:${opts.port ?? Number(env.SH_RELAY_PORT ?? 8443)}`;
   const execAddr = opts.execAddr ?? env.MOCA_RELAY_EXEC_ADDR;
   if (!execAddr) {
-    const { server } = buildServer(deps);
+    const { server, relay } = buildServer(deps);
     const port = await bind(server, attachAddr);
-    return { port, shutdown: () => new Promise((r) => server.tryShutdown(() => r())) };
+    return { port, shutdown: () => stopGracefully([server], relay, close) };
   }
-  const { attachServer, execServer } = buildServers(deps);
+  const { attachServer, execServer, relay } = buildServers(deps);
   const port = await bind(attachServer, attachAddr);
   const execPort = await bind(execServer, execAddr);
   return {
     port,
     execPort,
-    shutdown: async () => {
-      await new Promise<void>((r) => attachServer.tryShutdown(() => r()));
-      await new Promise<void>((r) => execServer.tryShutdown(() => r()));
-    },
+    shutdown: () => stopGracefully([attachServer, execServer], relay, close),
   };
+}
+
+/**
+ * How long a signalled stop may take before the process exits anyway. Well under both outer
+ * limits -- systemd's TimeoutStopSec and the pod's terminationGracePeriodSeconds, 120 s each -- so
+ * the relay always exits on its own terms rather than by SIGKILL.
+ */
+const SHUTDOWN_DEADLINE_MS = 10_000;
+
+/**
+ * SIGTERM/SIGINT run the graceful stop once, then exit: 0 when it settled, 1 at the deadline. Without
+ * a handler the default action skipped every teardown (#453), and under Kubernetes, where node is PID
+ * 1 and has no default SIGTERM action, the pod also sat out its whole grace period.
+ */
+export function installShutdownSignals(
+  shutdown: () => Promise<void>,
+  opts: {
+    proc?: NodeJS.Process;
+    exit?: (code: number) => void;
+    deadlineMs?: number;
+  } = {},
+): void {
+  const proc = opts.proc ?? process;
+  const exit = opts.exit ?? ((code: number) => process.exit(code));
+  const deadlineMs = opts.deadlineMs ?? SHUTDOWN_DEADLINE_MS;
+  let stopping = false;
+  const onSignal = (signal: string) => {
+    if (stopping) return;
+    stopping = true;
+    console.log(`sandbox-relay: ${signal}, draining`);
+    const timer = setTimeout(() => {
+      console.error(`sandbox-relay: shutdown missed its ${deadlineMs} ms deadline; exiting`);
+      exit(1);
+    }, deadlineMs);
+    shutdown().then(
+      () => {
+        clearTimeout(timer);
+        console.log('sandbox-relay: drained, exiting');
+        exit(0);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        console.error(
+          `sandbox-relay: shutdown failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        exit(1);
+      },
+    );
+  };
+  for (const signal of ['SIGTERM', 'SIGINT'] as const) proc.on(signal, () => onSignal(signal));
 }
 
 // Bootstrap when run directly (tsx entrypoint), not when imported by tests.
 if (import.meta.url === `file://${process.argv[1]}`) {
   startRelay().then(
-    ({ port, execPort }) =>
+    ({ port, execPort, shutdown }) => {
+      installShutdownSignals(shutdown);
       console.log(
         `sandbox-relay attach :${port}${execPort ? `, exec :${execPort}` : ' (exec on the same listener)'}`,
-      ),
+      );
+    },
     // Every boot refusal (a missing or clashing exec token, an unbindable address) lands here. Left
     // unhandled it would print a raw stack; the operator needs the reason, on one line.
     (err: unknown) => {
