@@ -97,7 +97,11 @@ export interface RunOptions {
 function ready(rt: Runtime, io: Io): rt is Runtime & Required<Pick<Runtime, 'cp' | 'harness'>> {
   if (missing(rt, io, ['controlPlaneUrl']) || !rt.cp || !rt.harness) return false;
   if (!apiTokenValid(rt.auth, rt.now())) {
-    io.err('not logged in — run `mocactl login` first');
+    io.err(
+      rt.auth?.refreshToken
+        ? 'the login could not be refreshed — is the control plane reachable? (`mocactl doctor`)'
+        : 'not logged in — run `mocactl login` first',
+    );
     return false;
   }
   return true;

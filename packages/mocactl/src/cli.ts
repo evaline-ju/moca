@@ -14,7 +14,7 @@ import {
   cmdSessions,
   type Io,
 } from './headless.js';
-import { buildRuntime, type Runtime } from './runtime.js';
+import { buildRuntime, ensureRuntimeAuth, type Runtime } from './runtime.js';
 
 export const USAGE = `usage:
   mocactl [--setup] [--no-animation]             interactive terminal UI
@@ -123,6 +123,12 @@ export async function main(
   if (values.config !== undefined && command !== 'run') {
     io.err(`--config only applies to \`mocactl run\`\n${USAGE}`);
     return 2;
+  }
+  // B14: refresh an expired API token once, up front, so every command's login check -- and the
+  // interactive login screen -- sees the refreshed login rather than asking for a new one. `login`,
+  // `logout` and `auth` manage the login themselves.
+  if (rt.endpoints.controlPlaneUrl && !['login', 'logout', 'auth'].includes(command ?? '')) {
+    await ensureRuntimeAuth(rt);
   }
   switch (command) {
     case 'login':
