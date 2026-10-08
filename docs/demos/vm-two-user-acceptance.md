@@ -24,7 +24,8 @@ has no first-subject pin, so a second subject is served like the first. MI1 S2 a
 container sandbox to one owner, because until then users share sandbox containers. So (#407):
 
 - **Before S5,** run this page against `v0.5.1`: `git checkout v0.5.1` on the VM before
-  `setup-vm.sh` (0a). A `main` past S2 refuses user 2's first session, at 1d.
+  `setup-vm.sh` (0a). If the tag is not there yet, check out #465's merge commit, which it marks.
+  A `main` past S2 refuses user 2's first session, at 1d.
 - **From S5,** run it on `main` with `MOCA_TENANCY=multi`. This page is re-pinned then.
 
 Record the commit you ran against (Act 3).

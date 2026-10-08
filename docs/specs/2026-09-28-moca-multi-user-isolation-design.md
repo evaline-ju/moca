@@ -384,7 +384,11 @@ demo is sequenced (#407):
 
 S2 does not add a refusal to `setup-vm.sh`. The script cannot tell a two-user posture from a
 one-user one, since anyone with a GitHub account can log in through the same OAuth app. The control
-plane's `403 single_tenant_deployment` is the refusal, and its message names `MOCA_TENANCY=multi`.
+plane's `403 single_tenant_deployment` is the refusal. Its message does not offer `multi` as the
+fix: between S2 and S5, `multi` on the container tier is the posture this section calls not honest,
+and nothing refuses it at startup until S5's owner-binding checks (§10.1, the relay row). So the
+message says that serving a second user needs `MOCA_TENANCY=multi` **with** one owned sandbox per
+user, which on the container tier is S5, and points to this section.
 
 ### 6.7 Key custody
 
@@ -773,7 +777,8 @@ lands with S2, where each turn carries its own grant for it to assert on.
 - **The first-subject pin (§6.6)**, pinned by exact value so the runbooks can quote it. Under `single`,
   the first subject to create a session is served, and keeps being served across a control-plane
   restart. A second subject's session create answers status `403` with code `single_tenant_deployment`,
-  and the body names `MOCA_TENANCY=multi`. Under `multi`, `sh:cp:tenancy:subject` is never written,
+  and its message makes `MOCA_TENANCY=multi` conditional on per-user sandbox owner binding (S5 on the
+  container tier) and cites §6.6. Under `multi`, `sh:cp:tenancy:subject` is never written,
   and two subjects are both served. When this test lands, the two VM runbooks quote its name next to
   the code (#407).
 
