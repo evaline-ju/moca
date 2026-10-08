@@ -169,6 +169,11 @@ describe('cached auth helpers', () => {
     expect(loginExpiryMinutes(auth, 3_361_000)).toBe(4);
     expect(loginExpiryMinutes(auth, 3_600_000)).toBeUndefined();
   });
+
+  it('does not warn when a refresh token will renew the login', () => {
+    const renewing = { ...auth, refreshToken: 'mrt_x' };
+    expect(loginExpiryMinutes(renewing, 3_361_000)).toBeUndefined();
+  });
 });
 
 describe('toCachedAuth carries the refresh pair (B14)', () => {

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { CpError } from './errors.js';
+import { AUDIT_MAXLEN } from './ownership.js';
 import {
   hashRefreshToken,
   MAX_LABEL_CHARS,
@@ -28,7 +29,12 @@ import { subjectHash } from './subject-document.js';
 export interface RefreshRedisLike {
   get(key: string): Promise<string | null>;
   eval(script: string, opts: { keys: string[]; arguments: string[] }): Promise<unknown>;
-  xAdd(key: string, id: string, fields: Record<string, string>): Promise<unknown>;
+  xAdd(
+    key: string,
+    id: string,
+    fields: Record<string, string>,
+    options?: { TRIM: { strategy: 'MAXLEN'; strategyModifier: '~'; threshold: number } },
+  ): Promise<unknown>;
   zRange(key: string, start: number, stop: number): Promise<string[]>;
   zRem(key: string, member: string): Promise<unknown>;
 }
@@ -36,20 +42,20 @@ export interface RefreshRedisLike {
 export const DEFAULT_REFRESH_PREFIX = 'sh:cp:';
 
 // KEYS: family, token, owner, audit. ARGV: fid, subject, displayName, label, now, absExp, idleExp,
-// hash, ttlMs.
+// hash, ttlMs, auditMaxlen.
 const ISSUE = `
 redis.call('HSET', KEYS[1], 'subject', ARGV[2], 'displayName', ARGV[3], 'label', ARGV[4],
   'createdAt', ARGV[5], 'absExp', ARGV[6], 'idleExp', ARGV[7], 'currentHash', ARGV[8], 'prevHash', '')
 redis.call('PEXPIRE', KEYS[1], ARGV[9])
 redis.call('SET', KEYS[2], ARGV[1], 'PX', ARGV[9])
 redis.call('ZADD', KEYS[3], ARGV[5], ARGV[1])
-redis.call('XADD', KEYS[4], '*', 'ts', ARGV[5], 'subject', ARGV[2], 'decision', 'refresh_issued',
+redis.call('XADD', KEYS[4], 'MAXLEN', '~', ARGV[10], '*', 'ts', ARGV[5], 'subject', ARGV[2], 'decision', 'refresh_issued',
   'family', ARGV[1])
 return 1
 `;
 
 // KEYS: family, newToken, grace, audit. ARGV: presentedHash, newHash, newToken, now, idleMs,
-// graceMs, fid. Returns {'ok', token, absExp, subject, displayName, '0'|'1'} or {reason}.
+// graceMs, fid, auditMaxlen. Returns {'ok', token, absExp, subject, displayName, '0'|'1'} or {reason}.
 // The step numbers are B14 spec §4.3's.
 const ROTATE = `
 local f = redis.call('HMGET', KEYS[1], 'subject', 'displayName', 'absExp', 'idleExp',
@@ -58,16 +64,16 @@ local now = tonumber(ARGV[4])
 local subject = f[1]
 local function audit(decision, reason)
   if reason then
-    redis.call('XADD', KEYS[4], '*', 'ts', ARGV[4], 'subject', subject, 'decision', decision,
+    redis.call('XADD', KEYS[4], 'MAXLEN', '~', ARGV[8], '*', 'ts', ARGV[4], 'subject', subject, 'decision', decision,
       'family', ARGV[7], 'reason', reason)
   else
-    redis.call('XADD', KEYS[4], '*', 'ts', ARGV[4], 'subject', subject, 'decision', decision,
+    redis.call('XADD', KEYS[4], 'MAXLEN', '~', ARGV[8], '*', 'ts', ARGV[4], 'subject', subject, 'decision', decision,
       'family', ARGV[7])
   end
 end
 if not subject then
   -- The token key outlived its family (TTL races): as good as unknown.
-  redis.call('XADD', KEYS[4], '*', 'ts', ARGV[4], 'subject', '-', 'decision', 'refresh_refused',
+  redis.call('XADD', KEYS[4], 'MAXLEN', '~', ARGV[8], '*', 'ts', ARGV[4], 'subject', '-', 'decision', 'refresh_refused',
     'family', '-', 'reason', 'unknown')
   return {'unknown'}
 end
@@ -104,14 +110,14 @@ return {'ok', ARGV[3], f[3], subject, f[2], '0'}
 /** ROTATE's reply: ok + successor, absExp, subject, displayName, grace flag; or a refusal. */
 type RotateReply = ['ok', string, string, string, string, '0' | '1'] | [RefusalReason];
 
-// KEYS: family, grace, audit. ARGV: now, fid, reason. 1 revoked now, 0 already revoked, -1 gone.
+// KEYS: family, grace, audit. ARGV: now, fid, reason, auditMaxlen. 1 revoked now, 0 already revoked, -1 gone.
 const REVOKE = `
 local f = redis.call('HMGET', KEYS[1], 'subject', 'revokedAt')
 if not f[1] then return -1 end
 if f[2] then return 0 end
 redis.call('HSET', KEYS[1], 'revokedAt', ARGV[1], 'revokedReason', ARGV[3])
 redis.call('DEL', KEYS[2])
-redis.call('XADD', KEYS[3], '*', 'ts', ARGV[1], 'subject', f[1], 'decision', 'refresh_revoked',
+redis.call('XADD', KEYS[3], 'MAXLEN', '~', ARGV[4], '*', 'ts', ARGV[1], 'subject', f[1], 'decision', 'refresh_revoked',
   'family', ARGV[2], 'reason', ARGV[3])
 return 1
 `;
@@ -137,6 +143,8 @@ export class RedisRefreshStore implements RefreshStore {
       return await op();
     } catch (err) {
       if (err instanceof CpError) throw err;
+      // The message only -- never arguments, which carry tokens.
+      console.error('[control-plane] refresh store error:', (err as Error)?.message);
       throw new CpError('redis_unavailable', 'redis is not answering');
     }
   }
@@ -164,6 +172,7 @@ export class RedisRefreshStore implements RefreshStore {
           String(idleExp),
           hashRefreshToken(refreshToken),
           String(idleExp - input.nowMs),
+          String(AUDIT_MAXLEN),
         ],
       });
       return { family, refreshToken, absExpS: Math.floor(absExp / 1000) };
@@ -175,13 +184,19 @@ export class RedisRefreshStore implements RefreshStore {
       const hash = hashRefreshToken(token);
       const fid = await this.redis.get(this.tokenKey(hash));
       if (!fid) {
-        await this.redis.xAdd(this.auditKey, '*', {
-          ts: String(nowMs),
-          subject: '-',
-          decision: 'refresh_refused',
-          family: '-',
-          reason: 'unknown',
-        });
+        // This route is unauthenticated, so this write is capped like every audit write.
+        await this.redis.xAdd(
+          this.auditKey,
+          '*',
+          {
+            ts: String(nowMs),
+            subject: '-',
+            decision: 'refresh_refused',
+            family: '-',
+            reason: 'unknown',
+          },
+          { TRIM: { strategy: 'MAXLEN', strategyModifier: '~', threshold: AUDIT_MAXLEN } },
+        );
         return { ok: false, reason: 'unknown' };
       }
       // Minted before the script so it can be stored atomically; discarded unless step 6 runs.
@@ -201,6 +216,7 @@ export class RedisRefreshStore implements RefreshStore {
           String(this.policy.idleTtlS * 1000),
           String(this.policy.graceS * 1000),
           fid,
+          String(AUDIT_MAXLEN),
         ],
       })) as RotateReply;
       if (reply[0] !== 'ok') return { ok: false, reason: reply[0] };
@@ -225,7 +241,7 @@ export class RedisRefreshStore implements RefreshStore {
     return this.redis
       .eval(REVOKE, {
         keys: [this.familyKey(fid), this.graceKey(fid), this.auditKey],
-        arguments: [String(nowMs), fid, reason],
+        arguments: [String(nowMs), fid, reason, String(AUDIT_MAXLEN)],
       })
       .then(Number);
   }

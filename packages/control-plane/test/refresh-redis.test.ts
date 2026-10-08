@@ -149,4 +149,43 @@ describe('RedisRefreshStore, Redis-only behaviour', () => {
       expect((err as CpError).code).toBe('redis_unavailable');
     }
   });
+
+  it('caps every audit write with MAXLEN ~ AUDIT_MAXLEN (Lua scripts and the unknown-token xAdd)', async () => {
+    const scripts: { script: string; args: string[] }[] = [];
+    const trims: unknown[] = [];
+    const spy: RefreshRedisLike = {
+      get: (k) => redis.get(k),
+      eval: (script, o) => {
+        scripts.push({ script, args: o.arguments });
+        return redis.eval(script, o);
+      },
+      xAdd: (k, id, f, o) => {
+        trims.push(o);
+        return redis.xAdd(k, id, f, o);
+      },
+      zRange: (k, a, b) => redis.zRange(k, a, b),
+      zRem: (k, m) => redis.zRem(k, m),
+    };
+    const prefix = `test:refresh:${process.pid}:${randomUUID()}:`;
+    const store = new RedisRefreshStore(spy, POLICY, prefix);
+    try {
+      const a = await store.issue({ subject: 's', displayName: 'd', label: 'l', nowMs: T0 });
+      const r = await store.rotate(a.refreshToken, T0 + 1000);
+      if (!r.ok) throw new Error('rotate failed');
+      await store.revoke(r.refreshToken, T0 + 2000);
+      await store.rotate('mrt_' + 'A'.repeat(43), T0 + 3000); // unknown token -> TS xAdd
+      expect(scripts).toHaveLength(3);
+      for (const { script, args } of scripts) {
+        expect(script).toContain("'MAXLEN', '~'");
+        expect(args).toContain('1000000');
+      }
+      expect(trims).toEqual([
+        { TRIM: { strategy: 'MAXLEN', strategyModifier: '~', threshold: 1_000_000 } },
+      ]);
+      expect(await client.xLen(`${prefix}audit`)).toBeGreaterThanOrEqual(4);
+    } finally {
+      const keys = await client.keys(`${prefix}*`);
+      if (keys.length) await client.del(keys);
+    }
+  });
 });
