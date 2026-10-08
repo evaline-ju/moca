@@ -92,6 +92,34 @@ describe('relay graceful shutdown (#453)', () => {
   }
 });
 
+describe('relay graceful shutdown with an attach stream that never sent a Hello (#462 review)', () => {
+  it('still resolves promptly instead of waiting on the open stream', async () => {
+    const { records, detach } = store();
+    const relay = await startRelay({
+      port: 0,
+      env: {},
+      deps: { records, detach, validateToken: () => true, validateExecToken: () => true },
+    });
+    const addr = `127.0.0.1:${relay.port}`;
+    const client = new WorkerClient(addr, credentials.createInsecure()) as unknown as Client & {
+      attach: () => ClientDuplexStream<WorkerFrame, ServerFrame>;
+    };
+    const silent = client.attach();
+    silent.on('error', () => {});
+    silent.on('data', () => {});
+    closers.push(() => {
+      silent.cancel();
+      client.close();
+    });
+    // Let the call reach the server; a stream that has not arrived yet cannot hold the stop open.
+    await new Promise((r) => setTimeout(r, 150));
+
+    const t0 = Date.now();
+    await relay.shutdown();
+    expect(Date.now() - t0).toBeLessThan(2000);
+  });
+});
+
 describe('installShutdownSignals', () => {
   function proc() {
     return new EventEmitter() as EventEmitter & NodeJS.Process;

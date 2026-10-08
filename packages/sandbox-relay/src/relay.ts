@@ -87,6 +87,13 @@ export function createRelay(deps: RelayDeps): Relay {
   const sessions = new Map<string, Parked>();
   const timers = deps.timers ?? defaultTimers;
   let draining = false;
+  // Every attach stream still open, parked or not. A stream connected but not yet parked (its Hello
+  // has not arrived, or never will) holds a server's tryShutdown open just as a parked one does, so
+  // drain must end those too (#462 review).
+  const open = new Set<AttachStream>();
+  function close(stream: AttachStream): void {
+    if (open.delete(stream)) stream.end();
+  }
 
   /**
    * Write presence for `session`, retrying until it lands or that session is torn down.
@@ -144,6 +151,11 @@ export function createRelay(deps: RelayDeps): Relay {
   }
 
   function onAttach(stream: AttachStream): void {
+    if (draining) {
+      stream.end();
+      return;
+    }
+    open.add(stream);
     let sandboxId: string | undefined;
     // The session THIS stream's Hello parked, so teardown acts on it and on nothing else.
     let own: Parked | undefined;
@@ -153,7 +165,7 @@ export function createRelay(deps: RelayDeps): Relay {
         // Draining: the stop already removed every record, so a session parked now would write one
         // that nothing removes.
         if (draining || !deps.validateToken(bearer(stream.metadata), id)) {
-          stream.end(); // reject before parking; no presence written
+          close(stream); // reject before parking; no presence written
           return;
         }
         if (sessions.has(id)) {
@@ -164,7 +176,7 @@ export function createRelay(deps: RelayDeps): Relay {
           // the live worker and removing its presence out from under it. A
           // genuine reconnect is unaffected — worker-1's own teardown already
           // ran (removing the old session) before a new Hello can arrive.
-          stream.end();
+          close(stream);
           return;
         }
         sandboxId = id;
@@ -222,8 +234,14 @@ export function createRelay(deps: RelayDeps): Relay {
         .catch((e) => console.error('detach mark write failed', e));
       return Promise.all([removed, marked]).then(() => {});
     }
-    stream.on('end', () => void teardown());
-    stream.on('error', () => void teardown());
+    stream.on('end', () => {
+      open.delete(stream);
+      void teardown();
+    });
+    stream.on('error', () => {
+      open.delete(stream);
+      void teardown();
+    });
   }
 
   async function* routeExec(sandboxId: string, exec: Exec): AsyncGenerator<ExecEvent> {
@@ -268,12 +286,16 @@ export function createRelay(deps: RelayDeps): Relay {
 
   async function drain(): Promise<void> {
     draining = true;
+    const parked = [...sessions.values()];
+    const parkedStreams = new Set(parked.map((p) => p.stream));
+    // Unparked streams have no record to remove, so they end at once.
+    for (const stream of [...open]) if (!parkedStreams.has(stream)) close(stream);
     await Promise.all(
-      [...sessions.values()].map(async (parked) => {
-        await parked.teardown();
+      parked.map(async (p) => {
+        await p.teardown();
         // Ended only after the record is gone, so the worker cannot reattach (to a successor
         // relay) while this one's remove is still queued behind its new put.
-        parked.stream.end();
+        close(p.stream);
       }),
     );
   }

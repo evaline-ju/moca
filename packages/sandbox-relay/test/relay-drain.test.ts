@@ -107,6 +107,27 @@ describe('relay drain (#453)', () => {
     expect(relay.parked()).toEqual([]);
   });
 
+  it('ends an attach stream that never sent a Hello, so a server stop is not held open by it', async () => {
+    const { records } = harness();
+    const relay = createRelay({ records, validateToken: () => true });
+    const silent = fakeAttach();
+    relay.onAttach(silent as never);
+    await relay.drain();
+    expect(silent.end).toHaveBeenCalled();
+    expect(records.remove).not.toHaveBeenCalled();
+  });
+
+  it('does not end a stream that already closed', async () => {
+    const { records } = harness();
+    const relay = createRelay({ records, validateToken: () => true });
+    const gone = fakeAttach();
+    relay.onAttach(gone as never);
+    gone.emit('end');
+    gone.end.mockClear();
+    await relay.drain();
+    expect(gone.end).not.toHaveBeenCalled();
+  });
+
   it('a failing remove is logged and the drain still resolves', async () => {
     const records: RecordStore = {
       put: async () => {},
