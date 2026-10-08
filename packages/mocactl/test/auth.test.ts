@@ -171,6 +171,22 @@ describe('cached auth helpers', () => {
   });
 });
 
+describe('toCachedAuth carries the refresh pair (B14)', () => {
+  it('keeps refreshToken and refreshExpiresAt when the control plane sent them', () => {
+    const a = toCachedAuth(
+      { token: 't', subject: 's', expiresAt: 1, refreshToken: 'mrt_x', refreshExpiresAt: 2 },
+      'http://cp',
+    );
+    expect(a).toMatchObject({ refreshToken: 'mrt_x', refreshExpiresAt: 2 });
+  });
+
+  it('omits them for a control plane that predates B14', () => {
+    const a = toCachedAuth({ token: 't', subject: 's', expiresAt: 1 }, 'http://cp');
+    expect(a).not.toHaveProperty('refreshToken');
+    expect(a).not.toHaveProperty('refreshExpiresAt');
+  });
+});
+
 describe('sleep', () => {
   it('resolves early when aborted', async () => {
     const ac = new AbortController();

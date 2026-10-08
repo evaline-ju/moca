@@ -78,6 +78,8 @@ export function toCachedAuth(login: ApiLogin, controlPlaneUrl: string): CachedAu
     roles: login.roles ?? [],
     expiresAt: login.expiresAt,
     controlPlaneUrl,
+    ...(login.refreshToken ? { refreshToken: login.refreshToken } : {}),
+    ...(login.refreshExpiresAt !== undefined ? { refreshExpiresAt: login.refreshExpiresAt } : {}),
   };
 }
 
