@@ -1564,5 +1564,57 @@ for cap in $container_caps; do
     "$(printf '%s' "$probe_line" | grep -qE "(^| )$cap( |;)" && echo yes || echo no)" "yes"
 done
 
+echo "== #415: a snapshot is refused if the guest git has no identity"
+# An agent's first `git commit` in a sandbox whose git has no user.name/user.email fails
+# with exit 128 -- observed live on the VM demo's P4 tier, where every agent burned a tool
+# call configuring one by hand. The sandbox image bakes a system /etc/gitconfig
+# (remote-worker/Dockerfile, guarded by research_tooling_test.go) and the rootfs inherits
+# it (build-rootfs.sh); check_git_identity is the gate that turns "image lost its gitconfig"
+# into a build failure here instead of a demo failure later. These checks pin the gate's
+# contract: it exists, both VMM arms call it before quiescing (a check that runs after
+# quiesce would hang on a paused guest), and its git invocation actually fails on an
+# unconfigured git rather than falling back to git's auto-guessed identity.
+check "check_git_identity helper exists" \
+  "$(grep -cE '^check_git_identity\(\) \{' "$SCRIPT")" "1"
+check "check_git_identity is called by both VMM arms (after probe, before quiesce)" \
+  "$(grep -cF 'check_git_identity "$vsock_uds"' "$SCRIPT")" "2"
+# The call must sit between probe_capabilities and quiesce_guest in each arm's body. A
+# count-based "2" alone would pass with both calls in one arm and none in the other.
+gitid_order_ok=yes
+for fn in boot_quiesce_snapshot_firecracker boot_quiesce_snapshot_cloud_hypervisor; do
+  start=$(grep -n "^${fn}() {" "$SCRIPT" | head -n1 | cut -d: -f1)
+  [ -n "$start" ] || { gitid_order_ok=no; continue; }
+  end=$(awk -v s="$start" 'NR>s && /^}$/{print NR; exit}' "$SCRIPT")
+  probe_ln=$(awk -v s="$start" -v e="$end" \
+    'NR>=s && NR<=e && /probe_capabilities "\$vsock_uds"/{print NR; exit}' "$SCRIPT")
+  id_ln=$(awk -v s="$start" -v e="$end" \
+    'NR>=s && NR<=e && /check_git_identity "\$vsock_uds"/{print NR; exit}' "$SCRIPT")
+  quiesce_ln=$(awk -v s="$start" -v e="$end" \
+    'NR>=s && NR<=e && /quiesce_guest "\$vsock_uds"/{print NR; exit}' "$SCRIPT")
+  [ -n "$probe_ln" ] && [ -n "$id_ln" ] && [ -n "$quiesce_ln" ] \
+    && [ "$probe_ln" -lt "$id_ln" ] && [ "$id_ln" -lt "$quiesce_ln" ] || gitid_order_ok=no
+done
+check "in both arms, check_git_identity runs between probe and quiesce" "$gitid_order_ok" "yes"
+# useConfigOnly is what makes an unconfigured git fail this check instead of silently
+# passing with an auto-guessed identity -- without it the gate checks nothing.
+check "the identity check pins user.useConfigOnly (fails closed on an unconfigured git)" \
+  "$([ "$(grep -c 'user.useConfigOnly=true' "$SCRIPT")" -ge 1 ] && echo yes || echo no)" "yes"
+check "the identity check runs a real empty commit, not just a config lookup" \
+  "$([ "$(grep -c 'commit --allow-empty' "$SCRIPT")" -ge 1 ] && echo yes || echo no)" "yes"
+# The throwaway repo MUST be removed inside the same guest command that created it:
+# check_git_identity runs before quiesce_guest, and the snapshot captures guest RAM --
+# /tmp's tmpfs included -- so a repo left behind ships in every sandbox restored from the
+# artifact. And the cleanup must not swallow the commit's exit code: `rc=$?; ...; exit $rc`
+# carries it across the rm, so a failed identity check still fails the build.
+gitid_body="$(awk '/^check_git_identity\(\) \{/{f=1} f{print} f && /^}$/{exit}' "$SCRIPT")"
+check "the identity check removes its throwaway repo inside the guest command" \
+  "$(printf '%s' "$gitid_body" | grep -cF 'rm -rf /tmp/id-check')" "1"
+check "the guest command carries the commit's exit code across the cleanup" \
+  "$(printf '%s' "$gitid_body" | grep -cF 'rc=$?; cd / && rm -rf /tmp/id-check; exit $rc')" "1"
+check "host-side guest_client stderr is captured, not discarded" \
+  "$(printf '%s' "$gitid_body" | grep -cF '2>/dev/null')" "0"
+check "the identity check names #415 for the reader who hits the failure" \
+  "$([ "$(printf '%s' "$gitid_body" | grep -c '#415')" -ge 1 ] && echo yes || echo no)" "yes"
+
 if [ "$fails" -eq 0 ]; then echo "PASS"; else echo "FAIL ($fails)"; fi
 exit "$fails"

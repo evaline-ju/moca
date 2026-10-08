@@ -94,5 +94,7 @@ WORKDIR /workspace
 # HOME: see the same block in ./Dockerfile.
 RUN install -d -o 1001 -g 0 -m 775 /home/sandbox
 ENV HOME=/home/sandbox
+# System gitconfig: see the same block in ./Dockerfile (#415).
+RUN printf '[user]\n\tname = MOCA sandbox\n\temail = sandbox@moca.invalid\n' > /etc/gitconfig
 USER 1001
 ENTRYPOINT ["/usr/local/bin/remote-worker"]

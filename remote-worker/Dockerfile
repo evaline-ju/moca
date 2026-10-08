@@ -138,6 +138,16 @@ WORKDIR /workspace
 # it, rather than a passwd entry that names one fixed uid (#368).
 RUN install -d -o 1001 -g 0 -m 775 /home/sandbox
 ENV HOME=/home/sandbox
+# #415: a SYSTEM gitconfig, not a user one. Without any identity, an agent's first
+# `git commit` dies with exit 128 ("Please tell me who you are") -- observed live on the
+# VM demo (docs/demos/vm-multi-user-demo.md, fix list 5) and on the P4 tier, whose rootfs
+# is exported from this image by deploy/microvm/build-rootfs.sh. /etc/gitconfig is the
+# one place that applies to ANY uid, including the arbitrary gid-0 uid under nonroot-v2
+# that #372's writable HOME prepares but cannot pre-configure, and a user's or agent's
+# own higher-precedence config still overrides both fields, so this is a floor, not a
+# ceiling. printf writes the file directly -- `git config` would work too but drags the
+# whole git machinery in just to emit two lines.
+RUN printf '[user]\n\tname = MOCA sandbox\n\temail = sandbox@moca.invalid\n' > /etc/gitconfig
 # Matches the nonroot-v2 SCC deploy-incluster.sh applies.
 USER 1001
 ENTRYPOINT ["/usr/local/bin/remote-worker"]
