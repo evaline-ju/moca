@@ -457,12 +457,11 @@ research-user2
 ### 3a. Session lists are disjoint
 
 **Sessions** in `mocactl` (`ctrl+x l`) titles each session by its first prompt, and both users ran
-the same prompt, so the two lists look alike. Show the ids instead. Each user, from their own
-login cache:
+the same prompt, so the two lists look alike. Show the ids instead. Each user, with the API token
+`mocactl auth token` prints (renewed if it lapsed):
 
 ```bash
-AUTH="${XDG_CONFIG_HOME:-$HOME/.config}/mocactl/auth.json"
-API_HDR="$(mktemp)"; jq -r '.apiToken // empty | "Authorization: Bearer " + .' "$AUTH" >"$API_HDR"
+API_HDR="$(mktemp)"; mocactl auth token | sed 's/^/Authorization: Bearer /' >"$API_HDR"
 curl -s -H @"$API_HDR" "$SH_CONTROL_PLANE_URL/v1/sessions" | jq -r '.sessions[].sessionId'
 rm -f "$API_HDR"
 ```

@@ -252,20 +252,21 @@ mocactl run "what did I just say?" --session <id>
 
 ## Act 2 — Neither can see or reach the other's
 
-Both users set up a header file from their own login cache. It keeps the API token off every
-command line:
+Both users set up a header file from `mocactl auth token`, which prints their own API token and
+renews it when it is due. The file keeps the token off every command line, and `api_hdr` rewrites
+it, so a token that lapsed during a long act is replaced instead of answering 401:
 
 ```bash
-AUTH="${XDG_CONFIG_HOME:-$HOME/.config}/mocactl/auth.json"
 CP=http://127.0.0.1:8090 HARNESS=http://127.0.0.1:8080
-API_HDR="$(mktemp)"; jq -r '.apiToken // empty | "Authorization: Bearer " + .' "$AUTH" >"$API_HDR"
-curl -s -H @"$API_HDR" "$CP/v1/me"; echo
+API_HDR="$(mktemp)"
+api_hdr() { mocactl auth token | sed 's/^/Authorization: Bearer /' >"$API_HDR" && [ -s "$API_HDR" ]; }
+api_hdr && curl -s -H @"$API_HDR" "$CP/v1/me"; echo
 ```
 
 Expected: `{"subject":"github:<numeric id>","tenant":"github:<numeric id>","roles":[]}`. The two
 users' subjects differ.
 
-Three helpers. `probe <method> <session id> [suffix]` prints the response body (which carries
+Three helpers. `probe <method> <session id> [suffix]` refreshes the header file, then prints the response body (which carries
 the error code) and then the HTTP status. `ids_set` refuses an empty or unedited `MINE` or
 `THEIRS`, and a `THEIRS` that is your own `MINE`. `not_mine` runs `probe GET "$THEIRS"` and fails
 unless the answer is a 404, so 2b's DELETE never runs against a session you own. (The blocks on
@@ -280,6 +281,7 @@ ids_set() {
 }
 probe() {
   case "$2" in '' | *'<'*) echo 'set MINE and THEIRS to real session ids first' >&2; return 1 ;; esac
+  api_hdr || { echo 'no API token: run mocactl login' >&2; return 1; }
   curl -s -w ' %{http_code}\n' -H @"$API_HDR" -X "$1" "$CP/v1/sessions/$2${3:-}"
 }
 not_mine() {
