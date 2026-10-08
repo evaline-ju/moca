@@ -372,6 +372,24 @@ lives in the same Redis as the sessions it protects, so anything that clears it 
 session it guarded; it is not a security boundary against someone who can already write that Redis.
 Under `multi`, the exchange returns grants or refuses; it never returns a real key.
 
+The pin changes what `single` serves. Before S2, `deploy/vm` leaves `MOCA_TENANCY` unset and serves
+any subject that logs in, which is what the two-user VM runbooks (`docs/demos/vm-two-user-acceptance.md`,
+`docs/demos/vm-multi-user-demo.md`) rely on. From S2, the same deployment serves its first subject and
+refuses the second. `multi` is not the way around it until S5: on the container tier, every user's
+turns share the same sandbox containers, and `multi` would claim they do not (§9.1). So the two-user
+demo is sequenced (#407):
+
+- **Until S5,** it runs against `v0.5.1`, the last tag before S2, under `single` with no pin.
+- **From S5,** it runs on `main` under `MOCA_TENANCY=multi`, with one owned sandbox per user.
+
+S2 does not add a refusal to `setup-vm.sh`. The script cannot tell a two-user posture from a
+one-user one, since anyone with a GitHub account can log in through the same OAuth app. The control
+plane's `403 single_tenant_deployment` is the refusal. Its message does not offer `multi` as the
+fix: between S2 and S5, `multi` on the container tier is the posture this section calls not honest,
+and nothing refuses it at startup until S5's owner-binding checks (§10.1, the relay row). So the
+message says that serving a second user needs `MOCA_TENANCY=multi` **with** one owned sandbox per
+user, which on the container tier is S5, and points to this section.
+
 ### 6.7 Key custody
 
 On `deploy/vm`, signing keys, the KEK and every shared token reach their processes as files through
@@ -710,7 +728,8 @@ service-link shapes, are outside what that test can see.
   `moca-egress`'s credential and S5's relay exec token and per-sandbox tokens slot in later.
 - **Tenancy.** Compose ships as `MOCA_TENANCY=single`. Its item 7 — users' own inference credentials in
   direct mode, and the operator fallback — is safe there because of §6.6's first-subject pin. Multi-user
-  compose arrives with S2 and S5.
+  compose arrives with S2 and S5. `deploy/vm` is in the same position, and its two-user demo is
+  sequenced in §6.6.
 - **Order.** #348 adds `SH_EXCHANGE_TOKEN` to the worker environment, so it lands **with or after S1's
   R1**, never before.
 
@@ -755,6 +774,13 @@ lands with S2, where each turn carries its own grant for it to assert on.
   implementations of one check in two languages from drifting.
 - Token endpoint: each check in §6.3 fails closed with its named code; a worker's `SH_EXCHANGE_TOKEN`
   is refused at `/internal/token`, and `moca-egress`'s credential is refused at `/internal/turn-grants`.
+- **The first-subject pin (§6.6)**, pinned by exact value so the runbooks can quote it. Under `single`,
+  the first subject to create a session is served, and keeps being served across a control-plane
+  restart. A second subject's session create answers status `403` with code `single_tenant_deployment`,
+  and its message makes `MOCA_TENANCY=multi` conditional on per-user sandbox owner binding (S5 on the
+  container tier) and cites §6.6. Under `multi`, `sh:cp:tenancy:subject` is never written,
+  and two subjects are both served. When this test lands, the two VM runbooks quote its name next to
+  the code (#407).
 
 ### 12.3 The `moca-egress` conformance suite
 

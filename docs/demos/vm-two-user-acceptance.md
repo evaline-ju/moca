@@ -17,10 +17,17 @@ flow (#362 item 4). It is written as a demo, so it can be performed. The epic's 
 | Access checks in every handler                                   | One ownership choke point in the control plane, plus the harness's `token.sid == body.sessionId` rule |
 | A way to hide other users' objects                               | Nothing extra: a non-owner gets the same 404 as for a session id that never existed                   |
 
-**Tenancy: `MOCA_TENANCY` unset (`single`), as `deploy/vm` ships it.** On this release `single`
-has no first-subject pin, so a second subject is served like the first. MI1 §6.6 plans a pin
-under which `single` refuses every subject after the first (`403 single_tenant_deployment`). Once
-that lands, this run needs `MOCA_TENANCY=multi`, and `multi` needs MI1 S5's sandbox owner binding.
+**Tenancy: `MOCA_TENANCY` unset (`single`), as `deploy/vm` ships it, at `v0.5.1`.** That release
+has no first-subject pin, so a second subject is served like the first. MI1 S2 adds the pin (MI1
+§6.6): from then on `single` serves the first subject and refuses every later one with
+`403 single_tenant_deployment`. `MOCA_TENANCY=multi` is not the fix until MI1 S5 binds each
+container sandbox to one owner, because until then users share sandbox containers. So (#407):
+
+- **Before S5,** run this page against `v0.5.1`: `git checkout v0.5.1` on the VM before
+  `setup-vm.sh` (0a). If the tag is not there yet, check out #465's merge commit, which it marks.
+  A `main` past S2 refuses user 2's first session, at 1d.
+- **From S5,** run it on `main` with `MOCA_TENANCY=multi`. This page is re-pinned then.
+
 Record the commit you ran against (Act 3).
 
 **Automated sibling.** The same properties, without GitHub, with two minted subjects:
@@ -421,8 +428,8 @@ Copy this into the run's report (the issue, or the PR that closes it):
   then the ownership check lets them in. That is why 0a restricts the tunnel accounts and 0b checks
   it. An SSH user with a shell, or with unrestricted forwarding, is trusted with every session on
   the VM.
-- **Tenancy as of this writing:** `MOCA_TENANCY` unset. See the top of this page for when that
-  stops working.
+- **Tenancy:** `MOCA_TENANCY` unset, at `v0.5.1`. On a `main` past MI1 S2, user 2 gets
+  `403 single_tenant_deployment`. See the top of this page.
 
 ## Fix list
 
@@ -435,7 +442,7 @@ Found while preparing this run, checked against `main` @ 6836941. Add what the l
 | 3   | **One identity per `XDG_CONFIG_HOME`.** Two users on one machine overwrite each other's `auth.json`.                                                                                                                                                                               | #404: `mocactl --profile`.                                                                            |
 | 4   | **Login misconfiguration had no hint.** The login error was GitHub's, verbatim: `device_flow_disabled` (device flow off) or `Not Found` (mistyped client id). It is diagnosable with this page or the QUICKSTART, but not on its own.                                              | Fixed (#405): mocactl names the operator's fix.                                                       |
 | 5   | **No headless `sessions` or `credentials` command.** Act 2 lists sessions with `curl`, and credentials can be added only in the TUI.                                                                                                                                               | Fixed (#406): `mocactl sessions [--json]`, `mocactl credentials add` (2a, 1b).                        |
-| 6   | **MI1 S2 first-subject pin.** Once it lands, this run under `MOCA_TENANCY=single` refuses user 2 with `403 single_tenant_deployment`.                                                                                                                                              | #407: blocks this run once S2 merges; re-pin tenancy then.                                            |
+| 6   | **MI1 S2 first-subject pin.** Once it lands, this run under `MOCA_TENANCY=single` refuses user 2 with `403 single_tenant_deployment`.                                                                                                                                              | Sequenced (#407): run at `v0.5.1` until S5, then on `main` under `multi`.                             |
 | 7   | **Shared `/workspace` on the container tier.** User 2's agent can see user 1's clone ("Notes and limits").                                                                                                                                                                         | #408: per-session directory (not a boundary).                                                         |
 
 ## Cleanup
