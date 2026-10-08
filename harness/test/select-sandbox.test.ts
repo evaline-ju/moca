@@ -9,6 +9,8 @@ import {
   assertServerSandbox,
   resolveDiscoverySource,
   resetSharedStores,
+  sessionPodCwd,
+  WORKSPACE_SUBDIR_CAPABILITY,
 } from '../src/select-sandbox.js';
 import type { LeaseStore } from '../src/sandbox-lease.js';
 import type { RecordStore, SandboxRecord } from '../src/pool-records.js';
@@ -258,6 +260,31 @@ describe('selectPoolSandbox remote dispatch', () => {
     // ...and the lease itself is taken under the holder, not the session id.
     expect(lease.acquired).toEqual(['sbx-remote-1']);
     expect(lease.acquiredHolders).toEqual(['sess-1:11111111-2222-3333-4444-555555555555']);
+  });
+
+  // #408: a container worker that honours workspace_key runs each session in <root>/<session id>.
+  // Every sandbox path is absolute under podCwd, so podCwd itself must move -- a worker-side
+  // directory alone would leave every session writing to the shared /workspace.
+  it('points podCwd at the session subdirectory when the worker advertises workspace-subdir', async () => {
+    const sel = await selectPoolSandbox(env(), '/head', 'sess-1', opts, {
+      listPods: async () => [],
+      lease: fakeLease({ 'sbx-remote-1': 0 }, opts.cap),
+      affinity: noAffinity,
+      records: fakeRecords([{ ...grpcRec, capabilities: ['bash', WORKSPACE_SUBDIR_CAPABILITY] }]),
+      makeExecClient: () => fakeExecClient,
+    });
+    expect(sel?.config.podCwd).toBe('/workspace/sess-1');
+  });
+
+  it('keeps the shared podCwd for a worker without workspace-subdir', async () => {
+    const sel = await selectPoolSandbox(env(), '/head', 'sess-1', opts, {
+      listPods: async () => [],
+      lease: fakeLease({ 'sbx-remote-1': 0 }, opts.cap),
+      affinity: noAffinity,
+      records: fakeRecords([{ ...grpcRec, capabilities: ['bash'] }]),
+      makeExecClient: () => fakeExecClient,
+    });
+    expect(sel?.config.podCwd).toBe('/workspace');
   });
 });
 
@@ -725,5 +752,18 @@ describe('assertServerSandbox (MI1 §5 R3)', () => {
     expect(() =>
       assertServerSandbox({ serverMode: true, allowLocalTools: true }, null),
     ).not.toThrow();
+  });
+});
+
+describe('sessionPodCwd', () => {
+  const capable: SandboxRecord = { ...grpcRec, capabilities: [WORKSPACE_SUBDIR_CAPABILITY] };
+
+  it('appends the session id under a configured root, ignoring trailing slashes', () => {
+    expect(sessionPodCwd('/srv/ws/', capable, 'sess-1')).toBe('/srv/ws/sess-1');
+  });
+
+  it('leaves pods (no record) and workers without the capability on podCwd', () => {
+    expect(sessionPodCwd('/workspace', undefined, 'sess-1')).toBe('/workspace');
+    expect(sessionPodCwd('/workspace', grpcRec, 'sess-1')).toBe('/workspace');
   });
 });

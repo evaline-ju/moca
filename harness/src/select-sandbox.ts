@@ -10,6 +10,7 @@ import {
   type ExecClientLike,
 } from '@moca/k8s-sandbox';
 import { RedisLeaseStore, type LeaseStore } from './sandbox-lease.js';
+import { stripTrailingSlashes } from './strip-trailing-slashes.js';
 import { RedisRecordStore, type RecordStore, type SandboxRecord } from './pool-records.js';
 import {
   affinityTimings,
@@ -373,6 +374,36 @@ export function assertServerSandbox(
   }
 }
 
+/**
+ * The Hello capability a container worker advertises when it honours `workspace_key` with a
+ * per-key directory, `<its root>/<key>` (remote-worker/internal/exec/workspace.go, #408).
+ */
+export const WORKSPACE_SUBDIR_CAPABILITY = 'workspace-subdir';
+
+/**
+ * The sandbox cwd for one session on one leased sandbox.
+ *
+ * A worker advertising {@link WORKSPACE_SUBDIR_CAPABILITY} runs each Exec in `<root>/<session id>`
+ * (the session id is the Exec's `workspace_key`, see `take` below), so the session's cwd moves there
+ * too. It has to move HERE, not only on the worker: every path the sandbox tools send is absolute
+ * under podCwd (`cd '/workspace' && …`), so a worker-side directory alone would leave every session
+ * on the shared tree. KAGENTI_SANDBOX_CWD must therefore equal the worker's SH_WORKSPACE_ROOT.
+ *
+ * Anything else keeps podCwd unchanged: pods, workers that predate the capability, and the microVM
+ * tier, whose guest already mounts the session's own workspace AT `/workspace`.
+ *
+ * Not a security boundary — the same container and Unix user, so `cd ..` reaches the others. It
+ * removes concurrent-clone collisions and one session seeing another's files.
+ */
+export function sessionPodCwd(
+  podCwd: string,
+  rec: SandboxRecord | undefined,
+  sessionId: string,
+): string {
+  if (!rec?.capabilities.includes(WORKSPACE_SUBDIR_CAPABILITY)) return podCwd;
+  return `${stripTrailingSlashes(podCwd)}/${sessionId}`;
+}
+
 export interface WorkspaceReset {
   from: string;
   reason: 'detached' | 'retiered';
@@ -631,8 +662,14 @@ async function select(
     // throw (an exec client that cannot be built, a transport constructor) releases it before the
     // original error propagates, rather than holding a slot until the lease TTL expires.
     try {
-      const config: K8sSandboxConfig = { pod: name, namespace, context, podCwd, headCwd };
       const rec = grpcById.get(name);
+      const config: K8sSandboxConfig = {
+        pod: name,
+        namespace,
+        context,
+        podCwd: sessionPodCwd(podCwd, rec, sessionId),
+        headCwd,
+      };
       const make = deps.makeTransport ?? GrpcRelayTransport;
       const transport = rec
         ? make(

@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -80,6 +81,40 @@ func capabilities() []string {
 	return out
 }
 
+// workspaceRunner builds the per-key workspace layer over BashRunner (#408).
+// SH_WORKSPACE_ROOT must equal the harness's KAGENTI_SANDBOX_CWD: the harness sends
+// <that>/<session id> as every absolute path, and this is where the directory is made.
+// SH_WORKSPACE_IDLE is the microVM worker's knob with the same meaning and default: the
+// only trigger that deletes a session's workspace (#338). Garbage is an error rather than
+// a fallback, since a misread idle can delete a waiting session's work.
+func workspaceRunner(get func(string) string) (*wexec.WorkspaceRunner, error) {
+	w := &wexec.WorkspaceRunner{
+		Root:  wexec.DefaultWorkspaceRoot,
+		Idle:  wexec.DefaultWorkspaceIdle,
+		Inner: wexec.BashRunner{},
+	}
+	if v := get("SH_WORKSPACE_ROOT"); v != "" {
+		if !filepath.IsAbs(v) {
+			return nil, fmt.Errorf("SH_WORKSPACE_ROOT=%q must be an absolute path", v)
+		}
+		w.Root = v
+	}
+	if v := get("SH_WORKSPACE_IDLE"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return nil, fmt.Errorf("SH_WORKSPACE_IDLE=%q must be a positive Go duration such as 8h or 90m", v)
+		}
+		w.Idle = d
+	}
+	return w, nil
+}
+
+// sweepInterval checks often enough that a workspace outlives its idle by at most a
+// quarter of it, and at least once a minute.
+func sweepInterval(idle time.Duration) time.Duration {
+	return max(min(idle/4, time.Minute), time.Second)
+}
+
 func nextBackoff(d time.Duration) time.Duration { return min(d*2, backoffMax) }
 
 // jitter spreads reconnects so a relay restart does not get a synchronized herd.
@@ -98,10 +133,12 @@ func main() {
 	}
 
 	cfg := session.Config{
-		SandboxID:     env("SANDBOX_ID", "sbx-laptop-1"),
-		Image:         env("SANDBOX_IMAGE", ""),
-		Trust:         env("SANDBOX_TRUST", "untrusted"),
-		Capabilities:  capabilities(),
+		SandboxID: env("SANDBOX_ID", "sbx-laptop-1"),
+		Image:     env("SANDBOX_IMAGE", ""),
+		Trust:     env("SANDBOX_TRUST", "untrusted"),
+		// The PATH probe, plus the one behaviour the harness keys on: the per-session
+		// workspace directory (wexec.WorkspaceCapability).
+		Capabilities:  append(capabilities(), wexec.WorkspaceCapability),
 		MaxConcurrent: envInt("WORKER_MAX_CONCURRENT", session.DefaultConcurrency),
 		Labels:        session.TierLabels(os.LookupEnv, "container"),
 	}
@@ -138,11 +175,18 @@ func main() {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	go func() { <-sig; log.Println("signal received, shutting down"); cancel() }()
 
+	runner, wsErr := workspaceRunner(os.Getenv)
+	if wsErr != nil {
+		log.Fatalf("%v", wsErr)
+	}
+	go runner.SweepEvery(ctx, sweepInterval(runner.Idle))
+
 	// One Session across every connection: its dedup cache must survive reconnects,
 	// or a redelivered req_id re-runs the command (spec §5).
-	sess := session.New(cfg, wexec.BashRunner{})
-	log.Printf("worker: relay=%s sandbox_id=%s tls=%v capacity=%d caps=%v labels=%v",
-		relayAddr, cfg.SandboxID, useTLS, cfg.MaxConcurrent, cfg.Capabilities, cfg.Labels)
+	sess := session.New(cfg, runner)
+	log.Printf("worker: relay=%s sandbox_id=%s tls=%v capacity=%d caps=%v labels=%v workspace_root=%s workspace_idle=%s",
+		relayAddr, cfg.SandboxID, useTLS, cfg.MaxConcurrent, cfg.Capabilities, cfg.Labels,
+		runner.Root, runner.Idle)
 
 	backoff := backoffMin
 	for ctx.Err() == nil {
