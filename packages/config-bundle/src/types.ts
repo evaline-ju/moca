@@ -112,7 +112,8 @@ export interface BuildBundleInput {
   promptsDir?: string;
   /** Already-read CLAUDE.md/AGENTS.md chain, outermost first. */
   contextFiles?: Array<{ path: string; content: string }>;
-  entry: string;
+  /** The batch entry prompt. Omitted for interactive promotion, which has no fixed first prompt. */
+  entry?: string;
   mode: PromoteMode;
   userDenyList?: string[];
   /**

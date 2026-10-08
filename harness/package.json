@@ -15,7 +15,6 @@
     "./sandbox-lease": "./src/sandbox-lease.ts",
     "./sandbox-affinity": "./src/sandbox-affinity.ts",
     "./select-sandbox": "./src/select-sandbox.ts",
-    "./config-store": "./src/config-store.ts",
     "./config-resolver": "./src/config-resolver.ts",
     "./config-overlay": "./src/config-overlay.ts",
     "./promote": "./src/promote.ts"

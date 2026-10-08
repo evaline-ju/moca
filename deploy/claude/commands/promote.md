@@ -144,3 +144,7 @@ Interpret the exit code rather than echoing the raw error:
 Finally, note what promotion does **not** carry: MCP servers and subagents are out of scope, and
 promoted memory travels read-only, so a remote run consumes what it was taught locally and returns
 discoveries in the leaf result instead of writing back.
+
+This command is for a developer with `kubectl` access to the cluster. A user who reaches MOCA only
+through its control plane promotes with `mocactl promote <dir>` (or `/promote <dir>` inside
+`mocactl`) instead: same bundle, uploaded over `/v1` with no cluster credentials (ADR-0038).

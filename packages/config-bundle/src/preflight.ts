@@ -230,13 +230,13 @@ export function checkNamespacedPrompts(namespacedDirs: string[]): PreflightFindi
  * out. Both directions are reported so an omission is never silent.
  */
 export function checkExcludedPrompts(
-  entry: string,
+  entry: string | undefined,
   requested: string[],
   actuallyExcluded: Set<string>,
 ): PreflightFinding[] {
   const findings: PreflightFinding[] = [];
   for (const name of requested) {
-    if (name === entry) {
+    if (entry !== undefined && name === entry) {
       findings.push({
         severity: 'error',
         code: 'entry_excluded',

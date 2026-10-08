@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { buildBundle, contentDigest, LOCKFILE_PATH } from '../src/build.js';
@@ -141,6 +141,19 @@ describe('buildBundle', () => {
     expect(warn[0]!.message).toContain('ns');
   });
 
+  it('skips a prompt or memory file that is a symlink out of its directory, with a warning', () => {
+    write('outside/secret.md', 'top secret');
+    symlinkSync(join(root, 'outside/secret.md'), join(root, 'prompts/leak.md'));
+    mkdirSync(join(root, 'memory'), { recursive: true });
+    symlinkSync(join(root, 'outside/secret.md'), join(root, 'memory/leak.md'));
+    const r = buildBundle(baseInput());
+    const paths = untar(r.tar).map((e) => e.path);
+    expect(paths).not.toContain('prompts/leak.md');
+    expect(paths).not.toContain('memory/leak.md');
+    expect(r.promptNames).not.toContain('leak');
+    expect(r.findings.filter((f) => f.code === 'skill_symlink_escaped')).toHaveLength(2);
+  });
+
   it('raises no namespaced_prompt_skipped finding for a flat promptsDir', () => {
     // beforeEach's fixture is already flat (prompts/go.md only); this asserts explicitly rather
     // than relying on that being incidental to the other passing tests.
@@ -197,5 +210,41 @@ describe('buildBundle --exclude-prompt', () => {
     expect(buildBundle({ ...baseInput(), excludePrompts: [] }).digest).toBe(
       buildBundle(baseInput()).digest,
     );
+  });
+});
+
+describe('buildBundle without an entry (interactive promotion)', () => {
+  const noEntry = () => {
+    const { entry: _entry, ...rest } = baseInput();
+    return rest;
+  };
+
+  it('raises no entry finding and records an empty entry in the lockfile', () => {
+    const r = buildBundle(noEntry());
+    const codes = r.findings.map((f) => f.code);
+    expect(codes).not.toContain('unknown_entry');
+    expect(codes).not.toContain('entry_excluded');
+    expect(r.lockfile.entry).toBe('');
+  });
+
+  it('still packs prompts and skills', () => {
+    const paths = untar(buildBundle(noEntry()).tar).map((e) => e.path);
+    expect(paths).toContain('prompts/go.md');
+    expect(paths).toContain('skills/keeper/SKILL.md');
+  });
+
+  it('still reports exclusions, which are about prompts, not the entry', () => {
+    const r = buildBundle({ ...noEntry(), excludePrompts: ['go', 'typo'] });
+    const codes = r.findings.map((f) => f.code);
+    expect(codes).toContain('prompt_excluded');
+    expect(codes).toContain('prompt_exclude_unmatched');
+    expect(codes).not.toContain('entry_excluded');
+  });
+
+  it('builds with zero prompts at all', () => {
+    rmSync(join(root, 'prompts'), { recursive: true, force: true });
+    const r = buildBundle(noEntry());
+    expect(r.promptNames).toEqual([]);
+    expect(r.findings.some((f) => f.severity === 'error')).toBe(false);
   });
 });

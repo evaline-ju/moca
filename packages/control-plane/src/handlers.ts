@@ -1,4 +1,26 @@
+import {
+  assertValidDigest,
+  BundleDigestMismatchError,
+  bundleKey,
+  DEFAULT_BUNDLE_TTL_SECONDS,
+  MAX_BUNDLE_BYTES,
+  prepareBundle,
+  type BundleRedisLike,
+} from '@moca/config-bundle';
+import {
+  admitBundle,
+  bundleOwnerHash,
+  dropBundleEntry,
+  MIN_BUNDLE_CHARGE_BYTES,
+  recordBundle,
+  refreshBundle,
+  touchBundle,
+  unrecordBundle,
+  withBundleLock,
+  type BundleBudgetRedisLike,
+} from './bundle-budget.js';
 import { CpError } from './errors.js';
+import { subjectHash } from './subject-document.js';
 import {
   resolveInferenceName,
   parseCredentialBody,
@@ -43,11 +65,17 @@ export interface CpConfig {
    * configFromEnv refuses a list it cannot serve, so a session is never validated against a typo.
    */
   sandboxTiers: SandboxTiers | null;
+  /** Stored config-bundle bytes one subject may hold (`SH_BUNDLE_SUBJECT_BYTES`). */
+  bundleSubjectBytes: number;
+  /** Stored config-bundle bytes the whole deployment may hold (`SH_BUNDLE_TOTAL_BYTES`). */
+  bundleTotalBytes: number;
 }
 
 export interface CpDeps {
   index: OwnershipIndex;
   credentials: CredentialStore;
+  /** Content-addressed config bundles (ADR-0038); the same Redis the ownership index uses. */
+  bundles: BundleRedisLike & BundleBudgetRedisLike;
   identity: IdentityProvider;
   signer: { kid: string; mint(input: MintInput): string };
   /**
@@ -163,17 +191,97 @@ async function turnInFlight(sessionId: string, deps: CpDeps): Promise<boolean> {
 async function auditBestEffort(
   deps: CpDeps,
   route: string,
-  name: string,
+  target: string,
   entry: Parameters<OwnershipIndex['audit']>[0],
 ): Promise<void> {
   try {
     await deps.index.audit(entry);
   } catch (err) {
     console.error(
-      `[control-plane] audit write failed for ${route} credential=${name}: ` +
-        `${(err as Error).message} -- the credential write itself SUCCEEDED`,
+      `[control-plane] audit write failed for ${route} ${target}: ` +
+        `${(err as Error).message} -- the write itself SUCCEEDED`,
     );
   }
+}
+
+/** The body of putConfigBundle; `seen` collects what the refusal audit row can name. */
+async function storeConfigBundle(
+  p: TokenClaims,
+  body: Record<string, unknown>,
+  deps: CpDeps,
+  seen: { configRef?: string; bytes?: number },
+): Promise<{ status: number; body: unknown }> {
+  const digest = body.digest;
+  if (typeof digest !== 'string') throw new CpError('invalid_request', 'digest must be a string');
+  try {
+    assertValidDigest(digest);
+  } catch {
+    throw new CpError('invalid_request', 'digest must be sha256:<64 lowercase hex>');
+  }
+  seen.configRef = digest;
+  if (typeof body.tar !== 'string' || body.tar.length === 0) {
+    throw new CpError('invalid_request', 'tar must be a non-empty base64 string');
+  }
+  // Buffer.from skips invalid characters, which would surface a garbled upload as digest_mismatch.
+  if (body.tar.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(body.tar)) {
+    throw new CpError('invalid_request', 'tar must be strict base64');
+  }
+  const tar = Buffer.from(body.tar, 'base64');
+  seen.bytes = tar.length;
+  if (tar.length > MAX_BUNDLE_BYTES) {
+    throw new CpError(
+      'invalid_request',
+      `bundle is ${tar.length} bytes; the limit is ${MAX_BUNDLE_BYTES} bytes`,
+    );
+  }
+  let uploaded: boolean;
+  const nowMs = deps.now();
+  const limits = {
+    subjectBytes: deps.config.bundleSubjectBytes,
+    totalBytes: deps.config.bundleTotalBytes,
+  };
+  const key = bundleKey(digest);
+  /** A stored digest is free: refresh it and report it unchanged. */
+  const refreshed = async () => {
+    if ((await deps.bundles.exists(key)) === 0) return false;
+    await deps.bundles.expire(key, DEFAULT_BUNDLE_TTL_SECONDS);
+    await refreshBundle(deps.bundles, digest, nowMs);
+    return true;
+  };
+  try {
+    const value = prepareBundle(digest, tar);
+    uploaded =
+      !(await refreshed()) &&
+      (await withBundleLock(async () => {
+        if (await refreshed()) return false; // stored by a concurrent upload while we queued
+        const charged = Math.max(value.length, MIN_BUNDLE_CHARGE_BYTES);
+        await admitBundle(deps.bundles, limits, p.sub, digest, charged, nowMs);
+        // Charged before the SET, so a stored bundle is never left uncharged. A record that fails
+        // partway is rolled back too, so it leaves no phantom charge on the budget.
+        try {
+          await recordBundle(deps.bundles, p.sub, digest, charged, nowMs);
+          await deps.bundles.set(key, value, { EX: DEFAULT_BUNDLE_TTL_SECONDS });
+        } catch (err) {
+          await unrecordBundle(deps.bundles, p.sub, digest).catch(() => undefined);
+          throw err;
+        }
+        return true;
+      }));
+  } catch (err) {
+    if (err instanceof CpError) throw err;
+    if (err instanceof BundleDigestMismatchError) throw new CpError('digest_mismatch', err.message);
+    console.error(
+      `[control-plane] putConfigBundle configRef=${digest}: ${(err as Error)?.message ?? String(err)}`,
+    );
+    throw new CpError('redis_unavailable', 'redis is not answering');
+  }
+  await auditBestEffort(deps, 'putConfigBundle', `configRef=${digest}`, {
+    subject: p.sub,
+    configRef: digest,
+    bytes: tar.length,
+    decision: uploaded ? 'config_bundle_uploaded' : 'config_bundle_unchanged',
+  });
+  return { status: 201, body: { digest, uploaded } };
 }
 
 /** Public view of a session record. `turns` comes from the display-only runtime hash. */
@@ -188,6 +296,7 @@ async function sessionView(rec: SessionRecord, deps: CpDeps) {
     tenant: rec.tenant,
     createdAt: rec.createdAt,
     state: rec.state,
+    configRef: rec.configRef,
     lastTurnAt: runtime.lastTurnAt ? Number(runtime.lastTurnAt) : null,
     turns: runtime.turns ? Number(runtime.turns) : 0,
     sandboxTier: tier,
@@ -251,6 +360,17 @@ export const HANDLERS: Record<string, Handler> = {
     if (requested !== undefined && typeof requested !== 'string') {
       throw new CpError('invalid_request', 'credentials.inference must be a string');
     }
+    let configRef: string | null = null;
+    if (body.configRef !== undefined) {
+      if (typeof body.configRef !== 'string') {
+        throw new CpError('configRef_invalid', 'configRef must be a string');
+      }
+      try {
+        configRef = assertValidDigest(body.configRef);
+      } catch {
+        throw new CpError('configRef_invalid', 'configRef must be sha256:<64 lowercase hex>');
+      }
+    }
     // Resolved HERE, at creation, and recorded -- so a missing key fails now rather than three turns
     // in, and a credential added later cannot turn a running session ambiguous (spec §6.4, gap #4).
     // This is also the first of the two policy points that make MU1 fail closed before P5's sentinel
@@ -293,6 +413,26 @@ export const HANDLERS: Record<string, Handler> = {
     }
     const sandboxTier = requestedTier ?? tiers?.default ?? '';
 
+    if (configRef) {
+      let found: boolean;
+      try {
+        found = (await deps.bundles.exists(bundleKey(configRef))) > 0;
+        if (found) await touchBundle(deps.bundles, configRef, deps.now());
+      } catch (err) {
+        console.error(
+          `[control-plane] createSession configRef=${configRef}: ${(err as Error)?.message ?? String(err)}`,
+        );
+        throw new CpError('redis_unavailable', 'redis is not answering');
+      }
+      // Fail at creation: a session on a missing bundle would 410 every turn.
+      if (!found) {
+        throw new CpError(
+          'config_bundle_not_found',
+          'no config bundle with that digest — promote the directory first',
+        );
+      }
+    }
+
     const sessionId = deps.newId();
     const rec: SessionRecord = {
       sessionId,
@@ -302,6 +442,7 @@ export const HANDLERS: Record<string, Handler> = {
       state: 'active',
       poolSelector: null, // MU2's tenant-labelled partition fills this (spec §8.2)
       credentialName,
+      configRef,
       sandboxTier,
       tombstone: false,
     };
@@ -415,7 +556,7 @@ export const HANDLERS: Record<string, Handler> = {
     }
     const cred = parseCredentialBody(name, ctx.body);
     await deps.credentials.put(p.sub, cred);
-    await auditBestEffort(deps, 'putCredential', name, {
+    await auditBestEffort(deps, 'putCredential', `credential=${name}`, {
       subject: p.sub,
       credential: name,
       decision: 'credential_written',
@@ -448,12 +589,76 @@ export const HANDLERS: Record<string, Handler> = {
     const p = requirePrincipal(ctx);
     const name = validateCredentialName(ctx.params.name ?? '');
     await deps.credentials.delete(p.sub, name);
-    await auditBestEffort(deps, 'deleteCredential', name, {
+    await auditBestEffort(deps, 'deleteCredential', `credential=${name}`, {
       subject: p.sub,
       credential: name,
       decision: 'credential_deleted',
     });
     // 204 whether or not it existed: a 404 here would be an existence oracle over credential names.
+    return { status: 204, body: undefined };
+  },
+
+  putConfigBundle: async (ctx, deps) => {
+    const p = requirePrincipal(ctx);
+    const seen: { configRef?: string; bytes?: number } = {};
+    try {
+      return await storeConfigBundle(p, asRecord(ctx.body), deps, seen);
+    } catch (err) {
+      if (err instanceof CpError && err.code !== 'redis_unavailable') {
+        await auditBestEffort(deps, 'putConfigBundle', `refused=${err.code}`, {
+          subject: p.sub,
+          ...seen,
+          decision: 'config_bundle_refused',
+          reason: err.code,
+        });
+      }
+      throw err;
+    }
+  },
+
+  /**
+   * Frees budget: the subject the digest is charged to, or an admin, may delete it. Sessions still
+   * naming it get 410 on their next turn, as for an expired bundle. A 403 for someone else's digest
+   * reveals nothing an upload does not: re-uploading any digest already says whether it is stored.
+   */
+  deleteConfigBundle: async (ctx, deps) => {
+    const p = requirePrincipal(ctx);
+    const digest = ctx.params.digest ?? '';
+    try {
+      assertValidDigest(digest);
+    } catch {
+      throw new CpError('invalid_request', 'digest must be sha256:<64 lowercase hex>');
+    }
+    const key = bundleKey(digest);
+    try {
+      await withBundleLock(async () => {
+        const stored = (await deps.bundles.exists(key)) > 0;
+        const owner = await bundleOwnerHash(deps.bundles, digest);
+        if (!stored && owner === null) {
+          throw new CpError('config_bundle_not_found', 'no config bundle with that digest');
+        }
+        // A bundle with no budget entry was stored by /promote straight into Redis: nobody's to delete.
+        if (!(p.roles ?? []).includes('admin') && owner !== subjectHash(p.sub)) {
+          throw new CpError(
+            'forbidden',
+            'only the subject that uploaded this bundle, or an admin, may delete it',
+          );
+        }
+        await deps.bundles.del(key);
+        await dropBundleEntry(deps.bundles, digest);
+      });
+    } catch (err) {
+      if (err instanceof CpError) throw err;
+      console.error(
+        `[control-plane] deleteConfigBundle configRef=${digest}: ${(err as Error)?.message ?? String(err)}`,
+      );
+      throw new CpError('redis_unavailable', 'redis is not answering');
+    }
+    await auditBestEffort(deps, 'deleteConfigBundle', `configRef=${digest}`, {
+      subject: p.sub,
+      configRef: digest,
+      decision: 'config_bundle_deleted',
+    });
     return { status: 204, body: undefined };
   },
 

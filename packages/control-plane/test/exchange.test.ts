@@ -8,7 +8,8 @@ import {
 } from '../src/exchange.js';
 import { HANDLERS, type CpDeps } from '../src/handlers.js';
 import { OwnershipIndex, type CpRedisLike } from '../src/ownership.js';
-import { makeDeps, ctx, alice, codeOf, seedCredential } from './helpers/deps.js';
+import { bundleKey, DEFAULT_BUNDLE_TTL_SECONDS } from '@moca/config-bundle';
+import { makeDeps, ctx, alice, codeOf, seedBundle, seedCredential } from './helpers/deps.js';
 
 /** Create a session through the real handler and return its session token. */
 async function sessionToken(d: CpDeps, id = 'sid-fixed'): Promise<string> {
@@ -86,6 +87,7 @@ describe('sessionTier (P6.3 spec §3.3)', () => {
     state: 'active' as const,
     poolSelector: null,
     credentialName: '',
+    configRef: null,
     tombstone: false,
   };
   it('is the stored tier', () => {
@@ -116,6 +118,7 @@ describe('viewTier: the tier a session view shows', () => {
     state: 'active' as const,
     poolSelector: null,
     credentialName: '',
+    configRef: null,
     tombstone: false,
   };
   it('is the stored tier', () => {
@@ -563,5 +566,68 @@ describe('spec §9.2: the credential routes survive a Redis outage, the session 
         HANDLERS.getSession!(ctx({ principal: alice, params: { id: 'sid-fixed' } }), down),
       ),
     ).toBe('redis_unavailable');
+  });
+});
+
+describe('exchange carries the session configRef', () => {
+  it('includes configRef only when the session has one', async () => {
+    const digest = 'sha256:' + 'f'.repeat(64);
+    const d = makeDeps();
+    await seedCredential(d);
+    seedBundle(d, digest);
+    const withRef = await HANDLERS.createSession!(
+      ctx({ principal: alice, body: { configRef: digest } }),
+      { ...d, newId: () => 'with-ref' },
+    );
+    const without = await HANDLERS.createSession!(ctx({ principal: alice, body: {} }), {
+      ...d,
+      newId: () => 'no-ref',
+    });
+    const a = await exchangeCredential((withRef.body as { token: string }).token, d);
+    const b = await exchangeCredential((without.body as { token: string }).token, d);
+    expect(a.configRef).toBe(digest);
+    expect('configRef' in b).toBe(false);
+  });
+});
+
+describe('exchange refreshes the session bundle TTL, best effort', () => {
+  const digest = 'sha256:' + 'f'.repeat(64);
+  async function session(d: ReturnType<typeof makeDeps>) {
+    await seedCredential(d);
+    seedBundle(d, digest);
+    const res = await HANDLERS.createSession!(
+      ctx({ principal: alice, body: { configRef: digest } }),
+      d,
+    );
+    return (res.body as { token: string }).token;
+  }
+
+  it('refreshes the bundle key on every exchange', async () => {
+    const d = makeDeps();
+    const token = await session(d);
+    const fake = d.bundles as unknown as { expires: { key: string; seconds: number }[] };
+    fake.expires.length = 0;
+    await exchangeCredential(token, d);
+    expect(fake.expires).toContainEqual({
+      key: bundleKey(digest),
+      seconds: DEFAULT_BUNDLE_TTL_SECONDS,
+    });
+  });
+
+  it('never fails the exchange when the refresh fails', async () => {
+    const d = makeDeps();
+    const token = await session(d);
+    d.bundles.expire = async () => {
+      throw new Error('redis hiccup');
+    };
+    d.bundles.hmGet = async () => {
+      throw new Error('redis hiccup');
+    };
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      expect((await exchangeCredential(token, d)).configRef).toBe(digest);
+    } finally {
+      log.mockRestore();
+    }
   });
 });

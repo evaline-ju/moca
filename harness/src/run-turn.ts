@@ -43,6 +43,7 @@ import type { LeafUsage } from './run-leaf.js';
 import { sseExtension, type TurnStreamFrame } from './turn-stream.js';
 import { promotedLoaderOptions, type PromotedConfig } from './config-resolver.js';
 import { leaseTimings } from './lease-timings.js';
+import { attachPromotedConfig, type AttachedPromotedConfig } from './promoted-config.js';
 
 // Re-exported because they are now part of executeTurn's CONTRACT: since /turn leases from the pool,
 // every caller of executeTurn can be handed these errors and needs to distinguish them from a generic
@@ -50,6 +51,8 @@ import { leaseTimings } from './lease-timings.js';
 // session waiting for its own briefly-absent sandbox). harness/package.json exposes no ./select-sandbox
 // subpath, and this is the module those callers already import.
 export { SandboxPoolSaturatedError, SandboxPoolEmptyError, SandboxAffinityPendingError };
+// Same reason: a promoted session's turn can fail with it, and server.ts maps it to 410.
+export { BundleNotFoundError } from '@moca/config-bundle';
 
 /**
  * One session store per process, not per turn.
@@ -750,6 +753,8 @@ export interface ExecuteTurnInput {
   sandbox?: TurnSandbox; // pre-leased sandbox; absent ⇒ resolve from the environment (/turn)
   /** Resolved promoted Claude Code config; absent ⇒ the loader is built exactly as before. */
   promotedConfig?: PromotedConfig;
+  /** A session's config bundle digest (ADR-0038); resolved and overlaid here unless promotedConfig is given. */
+  configRef?: string;
   /**
    * Where a leased turn runs (P6.3 spec §6), called once, as soon as the lease is taken and before any
    * model work -- with exactly what the result's `sandbox` would carry. It exists because a turn that
@@ -819,11 +824,27 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
     }, leaseTimings(process.env).heartbeatMs);
   }
 
+  let attached: AttachedPromotedConfig | undefined;
   try {
     // First, so a turn that fails anywhere after this still has its placement recorded -- see
     // `onPlacement`. Inside the try for the same reason as the frame below: a throwing callback must
     // still release the lease.
     if (acquired.placement) input.onPlacement?.(placementView(acquired.placement));
+    // After the renewal timer is armed: fetching and overlaying a multi-MB bundle can outlast a lease.
+    // Before the reset frame: that frame flushes the SSE headers, and a missing bundle must still be a
+    // plain 410, not an error frame.
+    if (input.configRef && !input.promotedConfig) {
+      const { config: sandboxConfig, transport } = acquired.sandbox;
+      const sessionId = opened.sessionManager.getSessionId();
+      attached = await attachPromotedConfig({
+        digest: input.configRef,
+        sessionId,
+        // Per turn: concurrent turns of one session must not release each other's overlay.
+        refId: `${sessionId}.${randomUUID().replace(/-/g, '')}`,
+        sandbox: sandboxConfig ? { config: sandboxConfig, transport } : null,
+        redisUrl: input.config?.redisUrl,
+      });
+    }
     // Before any model output, so the notice precedes the turn it explains. It also flushes the SSE
     // headers: a later pre-content failure then degrades to an error frame instead of a status code,
     // which is the same regime as any failure after the first token. Inside the try, so a sink that
@@ -831,12 +852,17 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
     const resetFrame = placementFrame(opened.sessionManager.getSessionId(), acquired.placement);
     if (resetFrame) input.onEvent?.(resetFrame);
     return withPlacement(
-      await executeTurnCore(input, acquired.sandbox, opened),
+      await executeTurnCore(
+        attached ? { ...input, promotedConfig: attached.promotedConfig } : input,
+        acquired.sandbox,
+        opened,
+      ),
       acquired.placement,
     );
   } finally {
-    // Clear first, then release: if release throws, the interval is already gone rather than
-    // left running against a lease nobody holds.
+    // Detach while the lease is still renewed: it is a remote exec that can outlast the lease TTL.
+    // Then clear before release, so a throwing release never leaves the interval running.
+    await attached?.detach().catch(() => {});
     if (leaseRenewal) clearInterval(leaseRenewal);
     await acquired.release().catch(() => {});
   }

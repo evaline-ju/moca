@@ -17,6 +17,7 @@ function host(hasSession = true): CommandHost & Record<string, ReturnType<typeof
     cycleTheme: vi.fn(),
     notify: vi.fn(),
     quit: vi.fn(),
+    promoteBundle: vi.fn(),
   };
   return h as never;
 }
@@ -84,6 +85,22 @@ describe('BUILTIN_COMMANDS', () => {
     expect(h.renameSession).toHaveBeenCalledWith('Payment bug');
     registry.byKeybind('ctrl+x r')!.run(h, '');
     expect(h.prefillInput).toHaveBeenCalledWith('/rename ');
+  });
+
+  it('/promote is available without a session and hands its argument to the host', async () => {
+    const h = host(false);
+    const hit = registry.bySlash('/promote ~/skills')!;
+    expect(hit.command.when?.(h)).not.toBe(false);
+    await hit.command.run(h, hit.arg);
+    expect(h.promoteBundle).toHaveBeenCalledWith('~/skills');
+  });
+
+  it('/promote without a directory prefills the input', async () => {
+    const h = host(false);
+    const hit = registry.bySlash('/promote')!;
+    await hit.command.run(h, hit.arg);
+    expect(h.prefillInput).toHaveBeenCalledWith('/promote ');
+    expect(h.promoteBundle).not.toHaveBeenCalled();
   });
 
   it('hides session-only commands when there is no session', () => {

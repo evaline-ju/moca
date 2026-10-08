@@ -40,6 +40,7 @@ interface Props {
   onResume: (id: string) => void;
   onDeleted: (id: string) => void;
   onInputless: (inputless: boolean) => void;
+  bundle?: { digest: string; skills: number; dropped: number };
 }
 
 // Every overlay owns Esc on its interactive screens. Onboarding, Sessions, New Session and
@@ -63,6 +64,7 @@ export function AppOverlay({
   onResume,
   onDeleted,
   onInputless,
+  bundle,
 }: Props) {
   const loginDeps = () => ({ cp: rt.cp!, sleep: rt.sleep, now: rt.now });
   switch (overlay.name) {
@@ -125,6 +127,7 @@ export function AppOverlay({
           onCancel={close}
           onError={onCpError}
           onInputless={onInputless}
+          bundle={bundle}
         />
       );
     case 'credentials': {

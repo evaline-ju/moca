@@ -11,6 +11,12 @@ import { CommandRegistry } from './commands/registry.js';
 import type { CachedAuth, TuiConfig } from './config.js';
 import { apiTokenValid, loginExpiryMinutes } from './core/auth.js';
 import { describeError } from './core/messages.js';
+import {
+  describePromotion,
+  promoteDirectory,
+  PromoteError,
+  type PromoteResult,
+} from './core/promote.js';
 import { sanitizeRemote } from './core/sanitize.js';
 import {
   DOUBLE_ESC_MS,
@@ -91,6 +97,7 @@ export function App({ rt, opts, env, os, write }: AppProps) {
   const [leader, setLeader] = useState(false);
   const [now, setNow] = useState(rt.now());
   const [overlayKey, setOverlayKey] = useState(0);
+  const [pendingBundle, setPendingBundle] = useState<PromoteResult>();
 
   // Overlays capture their callbacks at mount (Login resolves minutes later), so anything a
   // callback reads that can change meanwhile is read through a ref.
@@ -112,6 +119,8 @@ export function App({ rt, opts, env, os, write }: AppProps) {
   const overlayInputless = useRef(false);
   /** The endpoints and clients last known to work; onboarding restores them when abandoned. */
   const committed = useRef(connectionOf(rt));
+  const pendingBundleRef = useRef<PromoteResult | undefined>(undefined);
+  pendingBundleRef.current = pendingBundle;
 
   const theme = useMemo(
     () => resolveTheme(themeName, env, rt.config.reducedMotion || opts.noAnimation),
@@ -250,7 +259,12 @@ export function App({ rt, opts, env, os, write }: AppProps) {
     if (busy.current) return;
     busy.current = true;
     try {
-      const s = await sessionManager(rt).create(req);
+      const bundle = pendingBundleRef.current;
+      const s = await sessionManager(rt).create(
+        bundle ? { ...req, configRef: bundle.digest } : req,
+      );
+      // One-shot: a bundle silently attaching to every later session would be the surprise.
+      if (bundle) setPendingBundle(undefined);
       persist({ lastUsed: { ...rt.config.lastUsed, ...values } });
       const prompt = pendingRef.current;
       sendOnAttach.current = prompt;
@@ -393,6 +407,25 @@ export function App({ rt, opts, env, os, write }: AppProps) {
       notify(`theme: ${next}`);
     },
     notify: (m) => notify(m),
+    promoteBundle: async (arg) => {
+      if (arg === '--clear') {
+        setPendingBundle(undefined);
+        return notify(
+          pendingBundleRef.current ? 'config bundle dropped' : 'no config bundle pending',
+        );
+      }
+      if (!rt.cp) return notify('connect to a control plane first', 'warning');
+      try {
+        const r = await promoteDirectory(arg, rt.cp);
+        setPendingBundle(r);
+        notify(describePromotion(r, arg), r.warnings ? 'warning' : undefined);
+        open({ name: 'new-session' });
+      } catch (err) {
+        if (loginIfExpired(err, undefined))
+          return notify('your login expired — log in, then run /promote again', 'warning');
+        notify(err instanceof PromoteError ? err.message : describeError(err), 'error');
+      }
+    },
     quit: () => {
       retire(sessionRef.current);
       exit();
@@ -473,6 +506,15 @@ export function App({ rt, opts, env, os, write }: AppProps) {
       onInputless={(v) => {
         overlayInputless.current = v;
       }}
+      bundle={
+        pendingBundle
+          ? {
+              digest: pendingBundle.digest,
+              skills: pendingBundle.skills.length,
+              dropped: pendingBundle.dropped.length,
+            }
+          : undefined
+      }
     />
   ) : null;
 

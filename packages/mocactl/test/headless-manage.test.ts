@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../src/api/errors.js';
 import type { PutCredentialRequest, SessionSummary } from '../src/api/types.js';
 import {
+  cmdBundleDelete,
   cmdCredentialAdd,
   cmdCredentialDelete,
   cmdCredentials,
@@ -444,6 +445,47 @@ describe('cmdCredentialDelete', () => {
     expect(deleteCredential).not.toHaveBeenCalled();
     expect(o.stdout).toBe('');
     expect(o.stderr).toContain('no credential named anthropc');
+  });
+});
+
+describe('cmdBundleDelete', () => {
+  const digest = 'sha256:' + 'a'.repeat(64);
+
+  it('deletes the bundle', async () => {
+    const deleteConfigBundle = vi.fn(async () => undefined);
+    const rt = testRuntime({ cp: fakeControlPlane({ deleteConfigBundle }) });
+    const o = io();
+    expect(await cmdBundleDelete(rt, o, { digest, json: true })).toBe(0);
+    expect(deleteConfigBundle).toHaveBeenCalledWith(digest);
+    expect(JSON.parse(o.stdout)).toEqual({ digest, status: 'deleted' });
+  });
+
+  it('exits 2 for a malformed digest without calling the control plane', async () => {
+    const deleteConfigBundle = vi.fn(async () => undefined);
+    const rt = testRuntime({ cp: fakeControlPlane({ deleteConfigBundle }) });
+    const o = io();
+    expect(await cmdBundleDelete(rt, o, { digest: 'sha256:nope', json: false })).toBe(2);
+    expect(deleteConfigBundle).not.toHaveBeenCalled();
+    expect(o.stderr.join('')).toContain('sha256:<64 lowercase hex>');
+  });
+
+  it.each([
+    ['config_bundle_not_found', 404, 'no config bundle with digest'],
+    ['forbidden', 403, 'only the subject that uploaded'],
+  ])('exits 1 on %s with a message about this bundle', async (code, status, text) => {
+    const deleteConfigBundle = vi.fn(async () => {
+      throw new ApiError(
+        'control-plane',
+        status,
+        code,
+        'only the subject that uploaded this bundle, or an admin, may delete it',
+      );
+    });
+    const rt = testRuntime({ cp: fakeControlPlane({ deleteConfigBundle }) });
+    const o = io();
+    expect(await cmdBundleDelete(rt, o, { digest, json: true })).toBe(1);
+    expect(o.stdout).toBe('');
+    expect(o.stderr.join('')).toContain(text);
   });
 });
 

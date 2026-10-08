@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ApiError, classify, errorFromResponse, networkError } from '../src/api/errors.js';
+import { describeError } from '../src/core/messages.js';
 import { json } from './helpers/fake-fetch.js';
 
 describe('errorFromResponse', () => {
@@ -74,4 +75,24 @@ describe('classify', () => {
       message: 'hi',
     });
   });
+});
+
+it('maps a missing config bundle, at turn time or at creation, to one action and message', () => {
+  for (const err of [
+    new ApiError('harness', 410, 'config_bundle_not_found'),
+    new ApiError('control-plane', 404, 'config_bundle_not_found', 'no config bundle'),
+  ]) {
+    expect(classify(err)).toEqual({ kind: 'bundle-expired' });
+    expect(describeError(err)).toBe(
+      "this session's config bundle is gone (expired or never uploaded) — promote the same directory again; if it changed, start a new session",
+    );
+  }
+});
+
+it('maps a full config-bundle budget to its own action and one-line message', () => {
+  const err = new ApiError('control-plane', 429, 'bundle_quota_exceeded', 'over budget');
+  expect(classify(err)).toEqual({ kind: 'bundle-quota' });
+  expect(describeError(err)).toBe(
+    "the control plane's config-bundle storage is full for your account or the deployment — free yours with `mocactl bundles delete DIGEST`, or ask the operator",
+  );
 });

@@ -33,6 +33,8 @@ interface Props {
    * host can let Esc close the overlay from there; this overlay adds no key handler of its own.
    */
   onInputless?: (inputless: boolean) => void;
+  /** A bundle promoted with /promote, applied to the session this overlay creates. */
+  bundle?: { digest: string; skills: number; dropped: number };
 }
 
 type Phase =
@@ -58,6 +60,7 @@ export function NewSessionOverlay({
   onCancel,
   onError,
   onInputless,
+  bundle,
 }: Props) {
   const { tokens: t } = useTheme();
   const [phase, setPhase] = useState<Phase>(
@@ -109,6 +112,11 @@ export function NewSessionOverlay({
       <Text bold color={t.primary}>
         New session
       </Text>
+      {bundle ? (
+        <Text color={t.muted}>
+          {`config bundle ${bundle.digest.slice(0, 19)}… — ${bundle.skills} skills, ${bundle.dropped} dropped (/promote --clear to drop it)`}
+        </Text>
+      ) : null}
       {note ? <Text color={t.warning}>{note}</Text> : null}
       {phase.kind === 'presets' ? (
         <SelectList

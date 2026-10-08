@@ -2,14 +2,12 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { CpError, writeError } from './errors.js';
 import { checkExchangeAuth } from './exchange.js';
 import { HANDLERS, type CpDeps, type RequestCtx } from './handlers.js';
-import { matchRoute, type RouteSpec } from './routes.js';
+import { matchRoute, type RouteSpec, bodyLimitFor } from './routes.js';
 import { verifyToken } from './token.js';
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
-/** A credential body is a few hundred bytes; 64 KiB is generous and bounds a hostile caller. */
-const MAX_BODY_BYTES = 64 * 1024;
 
-function readBody(req: IncomingMessage): Promise<string> {
+function readBody(req: IncomingMessage, limit: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
@@ -22,7 +20,7 @@ function readBody(req: IncomingMessage): Promise<string> {
       // destroying the request mid-stream races the still-unread bytes sitting in the kernel's
       // receive buffer and the OS answers with an abortive RST (ECONNRESET) instead of delivering
       // the 400 the caller is waiting to read.
-      if (size > MAX_BODY_BYTES) {
+      if (size > limit) {
         tooLarge = true;
         return;
       }
@@ -91,7 +89,7 @@ export function buildHandler(deps: CpDeps): (req: IncomingMessage, res: ServerRe
       authorize(matched.route, req, deps, ctx);
 
       if (req.method === 'POST' || req.method === 'PUT') {
-        const raw = await readBody(req);
+        const raw = await readBody(req, bodyLimitFor(matched.route));
         if (raw.length > 0) {
           try {
             ctx.body = JSON.parse(raw);

@@ -8,7 +8,7 @@ import { subjectHash } from './k8s-secret-store.js';
  * session, which is why they are Kubernetes Secrets (k8s-secret-store.ts).
  *
  * Minimal structural Redis surface so unit tests inject an in-memory fake, exactly as
- * harness/src/leaf-result-store.ts and harness/src/config-store.ts do.
+ * harness/src/leaf-result-store.ts and packages/config-bundle/src/store.ts do.
  */
 export interface CpRedisLike {
   hSet(key: string, values: Record<string, string>): Promise<unknown>;
@@ -44,6 +44,8 @@ export interface SessionRecord {
   poolSelector: string | null;
   /** Which credential this session's turns run on -- chosen once, at creation (plan gap #4). */
   credentialName: string;
+  /** The config bundle this session's turns run with -- chosen once, at creation (ADR-0038). */
+  configRef: string | null;
   tombstone: boolean;
   /**
    * The session's sandbox tier, chosen once at creation (P6.3 spec §3.3). '' when the deployment
@@ -123,6 +125,7 @@ export class OwnershipIndex {
         state: rec.state,
         poolSelector: rec.poolSelector ?? '',
         credentialName: rec.credentialName,
+        configRef: rec.configRef ?? '',
         tombstone: rec.tombstone ? '1' : '0',
         sandboxTier: rec.sandboxTier ?? '',
       }),
@@ -145,6 +148,7 @@ export class OwnershipIndex {
       state: h.state === 'deleting' ? 'deleting' : 'active',
       poolSelector: h.poolSelector ? h.poolSelector : null,
       credentialName: h.credentialName ?? '',
+      configRef: h.configRef ? h.configRef : null,
       tombstone: h.tombstone === '1',
       sandboxTier: h.sandboxTier,
     };
@@ -232,7 +236,11 @@ export class OwnershipIndex {
     subject: string;
     sessionId?: string;
     credential?: string;
+    configRef?: string;
+    bytes?: number;
     decision: string;
+    /** The error code of a refusal. */
+    reason?: string;
   }): Promise<void> {
     await this.guard(() =>
       this.redis.xAdd(AUDIT_STREAM, '*', {
@@ -242,6 +250,9 @@ export class OwnershipIndex {
         ...(entry.sessionId ? { sessionId: entry.sessionId } : {}),
         // The credential NAME, never its value (spec §7.2).
         ...(entry.credential ? { credential: entry.credential } : {}),
+        ...(entry.configRef ? { configRef: entry.configRef } : {}),
+        ...(entry.bytes !== undefined ? { bytes: String(entry.bytes) } : {}),
+        ...(entry.reason ? { reason: entry.reason } : {}),
       }),
     );
   }

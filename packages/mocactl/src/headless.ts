@@ -1,3 +1,4 @@
+import { ApiError } from './api/errors.js';
 import type { CredentialConsumer, SessionSummary } from './api/types.js';
 import {
   LoginCancelledError,
@@ -15,6 +16,7 @@ import {
 } from './core/credential-checks.js';
 import { formatDiagnostics, runDiagnostics } from './core/diagnostics.js';
 import { describeError } from './core/messages.js';
+import { PromoteError, promoteDirectory, type PromoteSummary } from './core/promote.js';
 import { sanitizeRemote } from './core/sanitize.js';
 import { SessionManager, type ActiveSession } from './core/session-manager.js';
 import {
@@ -88,6 +90,7 @@ export interface RunOptions {
   options: Record<string, string>;
   json: boolean;
   signal?: AbortSignal;
+  configRef?: string;
 }
 
 /** False (with the reason on stderr) unless there is a control plane and a valid login for it. */
@@ -98,6 +101,76 @@ function ready(rt: Runtime, io: Io): rt is Runtime & Required<Pick<Runtime, 'cp'
     return false;
   }
   return true;
+}
+
+export async function cmdPromote(
+  rt: Runtime,
+  io: Io,
+  opts: { dir: string; json: boolean; dryRun?: boolean },
+): Promise<number> {
+  if (!opts.dryRun && !ready(rt, io)) return 2;
+  try {
+    // Printed BEFORE the upload, so a possible_secret or skipped-symlink warning is seen first.
+    const onBuilt = (r: PromoteSummary) => {
+      if (opts.json) {
+        if (r.report.trim()) io.err(r.report);
+        return;
+      }
+      io.out(`config root  ${r.configRoot}\n`);
+      io.out(`skills       ${r.skills.join(', ') || 'none'}\n`);
+      for (const d of r.dropped) io.out(`dropped      ${d.name}  (${d.reason})\n`);
+      io.out(`commands     ${r.prompts.join(', ') || 'none'}\n`);
+      if (r.report.trim()) io.err(r.report);
+    };
+    const r = await promoteDirectory(opts.dir, rt.cp, {}, { onBuilt, dryRun: opts.dryRun });
+    if (opts.json) {
+      io.out(JSON.stringify(r) + '\n');
+      return 0;
+    }
+    if (r.dryRun) {
+      io.out(`bundle       ${r.digest}  (dry run: not uploaded)\n`);
+      return 0;
+    }
+    io.out(`bundle       ${r.digest}  (${r.uploaded ? 'uploaded' : 'unchanged'})\n`);
+    io.out(`start a session with:  mocactl run "…" --config ${r.digest}\n`);
+    return 0;
+  } catch (err) {
+    if (err instanceof PromoteError) {
+      io.err(err.message);
+      return err.exitCode;
+    }
+    io.err(describeError(err));
+    return 1;
+  }
+}
+
+export async function cmdBundleDelete(
+  rt: Runtime,
+  io: Io,
+  opts: ManageOptions & { digest: string },
+): Promise<number> {
+  if (!/^sha256:[0-9a-f]{64}$/.test(opts.digest)) {
+    io.err('a bundle digest is sha256:<64 lowercase hex>, as `mocactl promote` prints it');
+    return 2;
+  }
+  if (!ready(rt, io)) return 2;
+  try {
+    await cancellable(rt.cp.deleteConfigBundle(opts.digest), opts.signal);
+  } catch (err) {
+    // Not describeError's "this session's bundle is gone" advice: here no session is involved.
+    if (err instanceof ApiError && err.code === 'config_bundle_not_found') {
+      io.err(`no config bundle with digest ${opts.digest}`);
+      return 1;
+    }
+    if (err instanceof ApiError && err.code === 'forbidden') {
+      io.err(sanitizeRemote(err.message));
+      return 1;
+    }
+    return failed(io, err);
+  }
+  io.err(`deleted config bundle ${opts.digest}`);
+  if (opts.json) io.out(JSON.stringify({ digest: opts.digest, status: 'deleted' }) + '\n');
+  return 0;
 }
 
 export async function cmdRun(rt: Runtime, io: Io, opts: RunOptions): Promise<number> {
@@ -140,7 +213,9 @@ export async function cmdRun(rt: Runtime, io: Io, opts: RunOptions): Promise<num
         return 2;
       }
       try {
-        session = await manager.create(r.request);
+        session = await manager.create(
+          opts.configRef !== undefined ? { ...r.request, configRef: opts.configRef } : r.request,
+        );
       } catch (err) {
         const refused = fieldRefusedByServer(err, SESSION_OPTION_FIELDS);
         if (!refused) throw err;

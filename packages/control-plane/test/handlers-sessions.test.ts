@@ -1,4 +1,6 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { bundleKey, DEFAULT_BUNDLE_TTL_SECONDS } from '@moca/config-bundle';
+import { BUNDLES_ALL_KEY, recordBundle } from '../src/bundle-budget.js';
 // Fixtures live in test/helpers so five test files share one set (created in Step 1 below).
 import { fakeRedis } from './helpers/fake-redis.js';
 import {
@@ -8,6 +10,7 @@ import {
   bob,
   admin,
   codeOf,
+  seedBundle,
   seedCredential,
   type TestDeps,
 } from './helpers/deps.js';
@@ -536,5 +539,89 @@ describe('GET and DELETE /v1/sessions/{id}, POST .../token', () => {
         op,
       ).toBe('session_not_found');
     }
+  });
+});
+
+describe('POST /v1/sessions configRef', () => {
+  const digest = 'sha256:' + 'e'.repeat(64);
+
+  it('records configRef and returns it from getSession and listSessions', async () => {
+    const d = makeDeps();
+    await seedCredential(d);
+    seedBundle(d, digest);
+    await HANDLERS.createSession!(ctx({ principal: alice, body: { configRef: digest } }), d);
+    expect((await d.index.get('sid-fixed'))!.configRef).toBe(digest);
+    const got = await HANDLERS.getSession!(
+      ctx({ principal: alice, params: { id: 'sid-fixed' } }),
+      d,
+    );
+    expect((got.body as { configRef: string | null }).configRef).toBe(digest);
+    const list = await HANDLERS.listSessions!(ctx({ principal: alice }), d);
+    expect((list.body as { sessions: { configRef: string | null }[] }).sessions[0]!.configRef).toBe(
+      digest,
+    );
+  });
+
+  it('records null when no configRef is given', async () => {
+    const d = makeDeps();
+    await seedCredential(d);
+    await HANDLERS.createSession!(ctx({ principal: alice, body: {} }), d);
+    expect((await d.index.get('sid-fixed'))!.configRef).toBeNull();
+  });
+
+  it('refuses a malformed configRef with configRef_invalid and creates nothing', async () => {
+    const d = makeDeps();
+    await seedCredential(d);
+    for (const configRef of ['', 'sha256:short', 42]) {
+      expect(
+        await codeOf(() =>
+          HANDLERS.createSession!(ctx({ principal: alice, body: { configRef } }), d),
+        ),
+      ).toBe('configRef_invalid');
+    }
+    expect(await d.index.get('sid-fixed')).toBeNull();
+  });
+
+  it('validates configRef before looking up credentials', async () => {
+    const d = makeDeps();
+    const list = vi.spyOn(d.credentials, 'list');
+    expect(
+      await codeOf(() =>
+        HANDLERS.createSession!(ctx({ principal: alice, body: { configRef: 'nope' } }), d),
+      ),
+    ).toBe('configRef_invalid');
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it('refuses a well-formed digest that was never uploaded, and creates nothing', async () => {
+    const d = makeDeps();
+    await seedCredential(d);
+    await expect(
+      HANDLERS.createSession!(ctx({ principal: alice, body: { configRef: digest } }), d),
+    ).rejects.toMatchObject({
+      code: 'config_bundle_not_found',
+      message: 'no config bundle with that digest — promote the directory first',
+    });
+    expect(await d.index.get('sid-fixed')).toBeNull();
+  });
+
+  it('refreshes the bundle TTL and its budget expiry when a session adopts it', async () => {
+    const d = makeDeps();
+    await seedCredential(d);
+    seedBundle(d, digest);
+    await recordBundle(d.bundles, alice.sub, digest, 10, NOW_MS - 5000);
+    const fake = d.bundles as unknown as {
+      expires: { key: string; seconds: number }[];
+      zsets: Map<string, Map<string, number>>;
+    };
+    fake.expires.length = 0;
+    await HANDLERS.createSession!(ctx({ principal: alice, body: { configRef: digest } }), d);
+    expect(fake.expires).toContainEqual({
+      key: bundleKey(digest),
+      seconds: DEFAULT_BUNDLE_TTL_SECONDS,
+    });
+    expect(fake.zsets.get(BUNDLES_ALL_KEY)!.get(digest)).toBe(
+      NOW_MS + DEFAULT_BUNDLE_TTL_SECONDS * 1000,
+    );
   });
 });

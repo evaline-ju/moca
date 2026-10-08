@@ -1,9 +1,10 @@
 import { generateKeyPairSync } from 'node:crypto';
+import { bundleKey } from '@moca/config-bundle';
 import { InMemoryCredentialStore, parseCredentialBody } from '../../src/credential-store.js';
 import type { CpConfig, CpDeps, RequestCtx } from '../../src/handlers.js';
 import { OwnershipIndex } from '../../src/ownership.js';
 import { makeSigner, publicKeyFromBase64, type TokenClaims } from '../../src/token.js';
-import { fakeRedis } from './fake-redis.js';
+import { fakeBundleRedis, fakeRedis } from './fake-redis.js';
 import { StubIdentity } from './stub-identity.js';
 
 /** Fixed epoch ms, so nothing in these suites depends on the wall clock. */
@@ -36,6 +37,7 @@ export function makeDeps(
   const base: TestDeps = {
     index: new OwnershipIndex(fake.redis),
     credentials: new InMemoryCredentialStore(),
+    bundles: fakeBundleRedis(),
     identity: new StubIdentity({ subject: 'github:1234', displayName: 'Alice', roles: [] }),
     signer,
     publicKeyBase64: signer.publicKeyBase64,
@@ -48,6 +50,8 @@ export function makeDeps(
       injectorConfigured: false,
       sandboxNamespace: 'default',
       sandboxTiers: null,
+      bundleSubjectBytes: 16 * 1024 * 1024,
+      bundleTotalBytes: 64 * 1024 * 1024,
       ...configOver,
     },
     now: () => NOW_MS,
@@ -95,6 +99,11 @@ export async function codeOf(fn: () => Promise<unknown> | unknown): Promise<stri
     return (e as { code: string }).code;
   }
   throw new Error('expected a throw');
+}
+
+/** Make a digest exist in the fake bundle store, as a prior POST /v1/config-bundles would. */
+export function seedBundle(deps: CpDeps, digest: string): void {
+  (deps.bundles as ReturnType<typeof fakeBundleRedis>).store.set(bundleKey(digest), 'stored');
 }
 
 /** Store an inference credential. Defaults are the ones every suite here assumes. */

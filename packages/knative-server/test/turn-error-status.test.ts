@@ -3,8 +3,9 @@ import {
   SandboxPoolSaturatedError,
   SandboxPoolEmptyError,
   SandboxAffinityPendingError,
+  BundleNotFoundError,
 } from '@moca/harness/run-turn';
-import { turnErrorStatus, turnErrorHeaders } from '../src/server.js';
+import { turnErrorStatus, turnErrorHeaders, turnErrorCode } from '../src/server.js';
 
 // /turn now leases a sandbox from the pool (it used to run tool calls in the harness process), so
 // SandboxPoolSaturatedError became something a turn can fail with. It is TRANSIENT — every
@@ -115,5 +116,18 @@ describe('turnErrorHeaders', () => {
   it('falls back to configured value when pending error has NaN retryInMs', () => {
     const pendingNaN = new SandboxAffinityPendingError('m-0', NaN);
     expect(turnErrorHeaders(503, pendingNaN)).toMatchObject({ 'Retry-After': '5' });
+  });
+});
+
+describe('an expired config bundle', () => {
+  it('is 410 config_bundle_not_found, not a 500', () => {
+    const err = new BundleNotFoundError('sha256:' + 'a'.repeat(64));
+    expect(turnErrorStatus(err)).toBe(410);
+    expect(turnErrorCode(410, err.message)).toBe('config_bundle_not_found');
+  });
+
+  it('keeps 404 session_not_found and passes other messages through', () => {
+    expect(turnErrorCode(404, 'no session in backend')).toBe('session_not_found');
+    expect(turnErrorCode(500, 'boom')).toBe('boom');
   });
 });

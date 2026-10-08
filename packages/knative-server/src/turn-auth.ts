@@ -29,6 +29,8 @@ export interface TurnAuth {
   credential: UpstreamCredential;
   /** Never undefined: an unresolvable endpoint is refused upstream, not defaulted (spec §6.2). */
   anthropicBaseUrl: string;
+  /** The session's config bundle, from the control plane -- never from the request (ADR-0038). */
+  configRef?: string;
   /** The session's sandbox tier from the exchange (P6.3); absent ⇒ the data plane's default. */
   sandboxTier?: string;
 }
@@ -204,6 +206,13 @@ async function exchange(token: string, deps: TurnAuthDeps): Promise<ExchangeResp
       'control plane returned an unknown credential header',
     );
   }
+  // A present configRef that is not a digest would be dropped and the turn run without its bundle.
+  if (
+    body.configRef !== undefined &&
+    (typeof body.configRef !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(body.configRef))
+  ) {
+    throw new CpError('credential_unavailable', 'control plane returned a malformed configRef');
+  }
   return body as unknown as ExchangeResponse;
 }
 
@@ -252,6 +261,7 @@ export async function resolveTurnAuth(
       ...(resolved.authHeader === 'x-api-key' ? { header: resolved.authHeader } : {}),
     },
     anthropicBaseUrl: resolved.anthropicBaseUrl,
+    ...(resolved.configRef ? { configRef: resolved.configRef } : {}),
     // Only a non-empty string is trusted; anything else is "no tier", never an odd value in a filter.
     ...(typeof resolved.sandboxTier === 'string' && resolved.sandboxTier
       ? { sandboxTier: resolved.sandboxTier }

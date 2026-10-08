@@ -19,6 +19,10 @@ function describe(err: unknown): string {
         return 'the harness rejected the session token — run `mocactl doctor`';
       case 'session-gone':
         return 'that session no longer exists, or is not yours';
+      case 'bundle-expired':
+        return "this session's config bundle is gone (expired or never uploaded) — promote the same directory again; if it changed, start a new session";
+      case 'bundle-quota':
+        return "the control plane's config-bundle storage is full for your account or the deployment — free yours with `mocactl bundles delete DIGEST`, or ask the operator";
       case 'endpoint-unresolved':
         return `the inference credential has no gateway endpoint (${action.message}) — edit it in /credentials`;
       case 'operator-misconfigured':

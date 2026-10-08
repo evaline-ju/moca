@@ -70,6 +70,10 @@ components:
             - forbidden
             - session_not_found
             - session_mismatch
+            - digest_mismatch
+            - bundle_quota_exceeded
+            - config_bundle_not_found
+            - configRef_invalid
             - credential_required
             - credential_ambiguous
             - credential_not_found
@@ -97,6 +101,8 @@ components:
         tenant: { type: string }
         createdAt: { type: integer, description: epoch ms }
         state: { type: string, enum: [active, deleting] }
+        configRef:
+          { type: [string, 'null'], description: recorded at creation; not a liveness signal }
         lastTurnAt: { type: [integer, 'null'] }
         turns: { type: integer }
         sandboxTier:
@@ -321,6 +327,7 @@ paths:
                   type: object
                   properties:
                     inference: { type: string }
+                configRef: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
                 sandbox:
                   type: object
                   properties:
@@ -339,6 +346,14 @@ paths:
                   expiresAt: { type: integer, description: epoch seconds }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: |
+            `config_bundle_not_found`: `configRef` names a digest that is not stored (never
+            uploaded, or expired). Promote the directory first. Adopting a stored bundle refreshes
+            its 30-day TTL.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
     get:
       operationId: listSessions
       summary: My sessions, newest first
@@ -530,6 +545,75 @@ paths:
         '204': { description: deleted }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/config-bundles:
+    post:
+      operationId: putConfigBundle
+      summary: Upload a client-built config bundle (ADR-0038)
+      description: |
+        Content-addressed: the server re-hashes the tar and refuses a mismatch. Idempotent; a digest
+        that already exists only has its TTL refreshed. The decoded tar may be at most 8 MiB. New
+        digests count against a per-subject and a deployment-wide byte budget (429 when full).
+      security: [{ sessionToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [digest, tar]
+              properties:
+                digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+                tar: { type: string, contentEncoding: base64 }
+      responses:
+        '201':
+          description: stored, or already present
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [digest, uploaded]
+                properties:
+                  digest: { type: string }
+                  uploaded: { type: boolean, description: false when it already existed }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429':
+          description: |
+            `bundle_quota_exceeded`: storing this NEW digest would exceed the caller's
+            (`SH_BUNDLE_SUBJECT_BYTES`) or the deployment's (`SH_BUNDLE_TOTAL_BYTES`) byte budget.
+            A digest that is already stored is always accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/config-bundles/{digest}:
+    delete:
+      operationId: deleteConfigBundle
+      summary: Delete a stored config bundle and free its budget (ADR-0038)
+      description: |
+        Allowed to the subject the digest is charged to (its first uploader) or an `admin`. A bundle
+        stored without a budget entry (ADR-0030 `/promote`) is admin-only. Sessions created on the
+        bundle get `410 config_bundle_not_found` on their next turn, as for an expired one.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - name: digest
+          in: path
+          required: true
+          description: percent-encode the `:`
+          schema: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+      responses:
+        '204': { description: deleted }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: '`forbidden`: the digest is charged to another subject and the caller is no admin'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`config_bundle_not_found`: no bundle and no budget entry for that digest'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /internal/credentials:
     post:
       operationId: exchangeCredential
@@ -569,6 +653,8 @@ paths:
                     { type: string, description: never absent — see endpoint_unresolved }
                   sessionId: { type: string }
                   subject: { type: string }
+                  configRef:
+                    { type: string, description: present only when the session has a config bundle }
                   sandboxTier:
                     type: string
                     description: |

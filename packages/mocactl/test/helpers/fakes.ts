@@ -49,12 +49,15 @@ export function fakeControlPlane(
       state: 'active',
       lastTurnAt: null,
       turns: 0,
+      configRef: null,
     }),
     deleteSession: async () => 'deleted',
     mintSessionToken: async () => ({ token: 'st2', expiresAt: 4_000_000_000 }),
     listCredentials: async () => [],
     putCredential: async () => undefined,
     deleteCredential: async () => undefined,
+    putConfigBundle: async (req) => ({ digest: req.digest, uploaded: true }),
+    deleteConfigBundle: async () => undefined,
   };
   const merged = { ...defaults, ...over };
   const recorded = Object.fromEntries(

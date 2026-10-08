@@ -1,5 +1,6 @@
 import { gunzipSync, gzipSync } from 'node:zlib';
-import { contentDigest, untar } from '@moca/config-bundle';
+import { contentDigest, LOCKFILE_PATH } from './build.js';
+import { canonicalTar, untar } from './tar.js';
 
 /**
  * Minimal structural Redis surface — lets unit tests inject an in-memory fake, exactly as
@@ -14,6 +15,9 @@ export interface BundleRedisLike {
 
 /** Bundles are immutable; a TTL only reclaims space for workflows nobody dispatches any more. */
 export const DEFAULT_BUNDLE_TTL_SECONDS = 60 * 60 * 24 * 30;
+
+/** Largest tar the control plane accepts; the client refuses the same bound before uploading. */
+export const MAX_BUNDLE_BYTES = 8 * 1024 * 1024;
 
 export function bundleKey(digest: string): string {
   return `config:bundle:${digest}`;
@@ -37,10 +41,28 @@ export class BundleDigestMismatchError extends Error {
 }
 
 /**
- * Store the bundle under its digest, gzipped and base64'd (base64 keeps the injectable
- * `BundleRedisLike` a plain string interface). Content-addressed, so an existing key means
- * identical content and the write is skipped. Verify the digest matches the tar first to prevent
- * key poisoning: a mismatched pair blocks any correct write under that digest for 30 days.
+ * Verify `tar` against `digest` and return the exact string `putBundle` stores for it: the verified
+ * content only, re-canonicalised (no `lockfile.json`, no trailing data), so the stored bytes are a
+ * function of the digest and the first uploader cannot pin anything unchecked for everyone.
+ */
+export function prepareBundle(digest: string, tar: Buffer): string {
+  let content: ReturnType<typeof untar>;
+  try {
+    content = untar(tar).filter((e) => e.path !== LOCKFILE_PATH);
+  } catch {
+    throw new BundleDigestMismatchError(digest, 'unreadable (untar failed)');
+  }
+  const actual = contentDigest(content);
+  if (actual !== digest) throw new BundleDigestMismatchError(digest, actual);
+  return gzipSync(canonicalTar(content)).toString('base64');
+}
+
+/**
+ * Store the bundle's verified content (canonical tar, no `lockfile.json`) under its digest, gzipped
+ * and base64'd (base64 keeps the injectable `BundleRedisLike` a plain string interface).
+ * Content-addressed, so an existing key means identical content and the write is skipped. Verify the
+ * digest matches the tar first to prevent key poisoning: a mismatched pair blocks any correct write
+ * under that digest for 30 days.
  */
 export async function putBundle(
   redis: BundleRedisLike,
@@ -48,22 +70,14 @@ export async function putBundle(
   tar: Buffer,
   ttlSeconds: number = DEFAULT_BUNDLE_TTL_SECONDS,
 ): Promise<{ uploaded: boolean }> {
-  // Verify digest matches tar before anything else
-  let actual: string;
-  try {
-    actual = contentDigest(untar(tar));
-  } catch {
-    throw new BundleDigestMismatchError(digest, 'unreadable (untar failed)');
-  }
-  if (actual !== digest) throw new BundleDigestMismatchError(digest, actual);
-
+  const value = prepareBundle(digest, tar);
   const key = bundleKey(digest);
   if ((await redis.exists(key)) > 0) {
     // Refresh TTL on skip: re-promotion must not let bundles age out while in active use
     await redis.expire(key, ttlSeconds);
     return { uploaded: false };
   }
-  await redis.set(key, gzipSync(tar).toString('base64'), { EX: ttlSeconds });
+  await redis.set(key, value, { EX: ttlSeconds });
   return { uploaded: true };
 }
 

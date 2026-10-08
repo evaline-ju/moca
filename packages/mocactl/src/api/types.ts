@@ -31,6 +31,7 @@ export interface SessionSummary {
   state: 'active' | 'deleting';
   lastTurnAt: number | null;
   turns: number;
+  configRef?: string | null;
   /**
    * The sandbox tier the session runs in (P6.3); null when the deployment declares no tiers, absent
    * before P6.3.
@@ -45,6 +46,8 @@ export interface SessionPage {
 
 export interface CreateSessionRequest {
   credentials?: { inference?: string };
+  /** A promoted config bundle digest; fixed for the session's life (ADR-0038). */
+  configRef?: string;
   sandbox?: { tier?: string };
 }
 
@@ -100,6 +103,12 @@ export interface ControlPlaneApi {
   listCredentials(): Promise<CredentialDescriptor[]>;
   putCredential(name: string, req: PutCredentialRequest): Promise<void>;
   deleteCredential(name: string): Promise<void>;
+  putConfigBundle(req: {
+    digest: string;
+    tar: string;
+  }): Promise<{ digest: string; uploaded: boolean }>;
+  /** Only the subject the digest is charged to, or an admin, may delete it. */
+  deleteConfigBundle(digest: string): Promise<void>;
 }
 
 export interface StreamTurnArgs {

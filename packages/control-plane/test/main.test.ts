@@ -53,6 +53,22 @@ describe('configFromEnv', () => {
     expect(c.allowOperatorFallback).toBe(false); // spec §6.4: default false
     expect(c.injectorConfigured).toBe(false);
     expect(c.sandboxNamespace).toBe('default');
+    expect(c.bundleSubjectBytes).toBe(16 * 1024 * 1024);
+    expect(c.bundleTotalBytes).toBe(64 * 1024 * 1024);
+  });
+
+  it('reads the config-bundle byte budgets and refuses a bad one, naming the variable', () => {
+    const c = configFromEnv({
+      ...baseEnv,
+      SH_BUNDLE_SUBJECT_BYTES: '1000',
+      SH_BUNDLE_TOTAL_BYTES: '5000',
+    });
+    expect([c.bundleSubjectBytes, c.bundleTotalBytes]).toEqual([1000, 5000]);
+    for (const name of ['SH_BUNDLE_SUBJECT_BYTES', 'SH_BUNDLE_TOTAL_BYTES']) {
+      for (const bad of ['0', '-5', 'abc', '1.5', '10MiB']) {
+        expect(() => configFromEnv({ ...baseEnv, [name]: bad }), `${name}=${bad}`).toThrow(name);
+      }
+    }
   });
 
   it('reads the operator fallback only from an explicit true', () => {

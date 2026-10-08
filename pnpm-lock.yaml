@@ -63,6 +63,9 @@ importers:
 
   packages/control-plane:
     dependencies:
+      '@moca/config-bundle':
+        specifier: workspace:*
+        version: link:../config-bundle
       redis:
         specifier: ^6.3.0
         version: 6.3.0
@@ -153,6 +156,9 @@ importers:
 
   packages/mocactl:
     dependencies:
+      '@moca/config-bundle':
+        specifier: workspace:*
+        version: link:../config-bundle
       chalk:
         specifier: ^5.4.0
         version: 5.6.2

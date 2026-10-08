@@ -18,6 +18,7 @@ const rec = (over: Partial<SessionRecord> = {}): SessionRecord => ({
   state: 'active',
   poolSelector: null,
   credentialName: 'my-anthropic',
+  configRef: null,
   sandboxTier: '',
   tombstone: false,
   ...over,

@@ -103,8 +103,13 @@ FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
 # so this adds no bytes to the image; it turns an inheritance into a guarantee. It is curl-MINIMAL
 # because the full `curl` package conflicts with it on UBI 9, and -minimal speaks HTTP(S), which is
 # all the research turn needs. curl is NOT in `probed`: it is not an advertised capability.
+#
+# tar, gzip and util-linux-core (flock) are what the promoted-config overlay runs in this sandbox
+# (harness/src/config-overlay.ts: `base64 -d | tar -x -z` under `flock`). tar was absent, so every
+# turn of a session started with a config bundle failed "config overlay failed (exit 127)"
+# (ADR-0038); gzip and util-linux-core were inherited from the base and are listed so they stay.
 # hadolint ignore=DL3041
-RUN microdnf install -y --nodocs bash coreutils-single findutils file git python3 curl-minimal ca-certificates \
+RUN microdnf install -y --nodocs bash coreutils-single findutils file git python3 curl-minimal ca-certificates tar gzip util-linux-core \
     && microdnf clean all
 COPY --from=build /out/remote-worker /usr/local/bin/remote-worker
 COPY --from=rg /usr/local/bin/rg /usr/local/bin/rg

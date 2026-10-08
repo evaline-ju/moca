@@ -140,3 +140,31 @@ describe('digestDirName', () => {
     expect(digestDirName('a:b:c')).toBe('a-b-c');
   });
 });
+
+describe('untar on hostile input', () => {
+  const hostile = (size: string, opts: { mode?: string } = {}) => {
+    const h = Buffer.alloc(512);
+    h.write('evil.md', 0, 100, 'utf8');
+    h.write(opts.mode ?? '0000644\0', 100, 8, 'ascii');
+    h.write(size, 124, 12, 'ascii');
+    h.write('0', 156, 1, 'ascii');
+    return Buffer.concat([h, Buffer.alloc(1024)]);
+  };
+
+  // A hang is synchronous, so the timeout only reports it; the RED run used a shell timeout.
+  it('throws on a negative size instead of looping', { timeout: 1000 }, () => {
+    expect(() => untar(hostile('-1000'))).toThrow(/size/);
+  });
+
+  it('throws on a non-octal size', { timeout: 1000 }, () => {
+    expect(() => untar(hostile('0000009'))).toThrow(/size/);
+  });
+
+  it('throws on a non-octal mode', { timeout: 1000 }, () => {
+    expect(() => untar(hostile('00000000001', { mode: '-000644' }))).toThrow(/mode/);
+  });
+
+  it('throws on an entry whose content runs past the end of the archive', { timeout: 1000 }, () => {
+    expect(() => untar(hostile('00000010000').subarray(0, 600))).toThrow(/truncated/);
+  });
+});

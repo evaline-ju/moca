@@ -81,7 +81,7 @@ export interface OverlayPaths {
  * dangling and its turn running unconfigured — the plausible-but-wrong-work failure the promotion
  * design exists to prevent (spec §4.4).
  */
-export function buildCacheAcquireScript(digest: string, sessionId: string): string {
+export function buildCacheAcquireScript(digest: string, refId: string): string {
   return [
     `set -eu`,
     // Marker so a test's fake transport can tell this call from the others by content rather
@@ -96,7 +96,7 @@ export function buildCacheAcquireScript(digest: string, sessionId: string): stri
     // failing the ref write below and killing the leaf on a pure teardown race.
     `  mkdir -p "$REFS"`,
     `  find "$REFS" -maxdepth 1 -type f -mmin +${REF_STALE_MINUTES} -delete 2>/dev/null || true`,
-    `  : > "$REFS/${assertSafeSessionId(sessionId)}"`,
+    `  : > "$REFS/${assertSafeSessionId(refId)}"`,
     `  if [ -d "$DIR" ]; then printf 'hit'; else printf 'miss'; fi`,
     `) 9>"$LOCK"`,
   ].join('\n');
@@ -165,7 +165,28 @@ export function buildLeafBindScript(digest: string, sessionId: string): string {
 }
 
 /**
+ * Concurrent turns of one session share its link: a /runs leaf holds `<sid>`, each /v1/turn turn its
+ * own `<sid>.<nonce>`, so the link goes only once no ref of that session is left under any digest. Inside the lock,
+ * so it is atomic against a sibling turn's acquire. A prefix match can only over-retain the link
+ * (a later bind replaces it with `ln -sfn`), never drop it under a live turn.
+ */
+function sessionLinkReleaseLines(sessionId: string): string[] {
+  const sid = assertSafeSessionId(sessionId);
+  return [
+    `  KEEP=`,
+    `  for f in /workspace/.sh-config/.refs/*/${sid} /workspace/.sh-config/.refs/*/${sid}.*; do`,
+    `    if [ -e "$f" ]; then KEEP=1; break; fi`,
+    `  done`,
+    `  [ -n "$KEEP" ] || rm -f ${sq(leafConfigDir(sid))} 2>/dev/null || true`,
+  ];
+}
+
+/**
  * Drop the per-leaf link and this leaf's ref, and tear the shared cache down once no leaf holds one.
+ *
+ * `refId` defaults to `sessionId` (the /runs leaf); a distinct `refId` is one /v1/turn turn. Either
+ * way the link goes only once no ref of the session is left (`sessionLinkReleaseLines`): a /runs leaf
+ * and a /v1/turn turn of one control-plane session share the same link.
  *
  * The cache used to outlive every leaf by design; #216 is what that cost. Reuse is still real for
  * the case it was built for — a concurrent fan-out holds many refs at once, so the bundle is pushed
@@ -176,18 +197,22 @@ export function buildLeafBindScript(digest: string, sessionId: string): string {
  * Best-effort throughout (`set -u`, not `set -eu`), matching `cleanupWorkspace` (converge.ts:76): a
  * teardown hiccup must never mask the turn's actual verdict.
  */
-export function buildConfigCleanupScript(sessionId: string, digest: string): string {
+export function buildConfigCleanupScript(
+  sessionId: string,
+  digest: string,
+  refId: string = sessionId,
+): string {
   return [
     `set -u`,
-    `rm -f ${sq(leafConfigDir(sessionId))} 2>/dev/null || true`,
     `DIR=${sq(configCacheDir(digest))}; REFS=${sq(configRefsDir(digest))}`,
     `LOCK=/workspace/.sh-config.lock`,
     `(`,
     // The same lock the acquire and populate scripts use, so "drop my ref, then count what is left"
     // is atomic against a concurrent leaf claiming one.
     `  flock 9 || exit 0`,
-    `  rm -f "$REFS/${assertSafeSessionId(sessionId)}" 2>/dev/null || true`,
+    `  rm -f "$REFS/${assertSafeSessionId(refId)}" 2>/dev/null || true`,
     `  find "$REFS" -maxdepth 1 -type f -mmin +${REF_STALE_MINUTES} -delete 2>/dev/null || true`,
+    ...sessionLinkReleaseLines(sessionId),
     `  if [ -z "$(ls -A "$REFS" 2>/dev/null)" ]; then`,
     // ADR-0031's `chmod -R a-w` clears the write bit on the cache's DIRECTORIES too, and a directory
     // needs write permission on itself to unlink its entries. Without restoring it first the rm
@@ -224,8 +249,9 @@ export async function overlayConfig(
   digest: string,
   sessionId: string,
   tarGz: Buffer,
+  refId: string = sessionId,
 ): Promise<OverlayPaths> {
-  const acquired = await run(transport, buildCacheAcquireScript(digest, sessionId));
+  const acquired = await run(transport, buildCacheAcquireScript(digest, refId));
   if (acquired.trim() !== 'hit') {
     await run(transport, buildCachePopulateScript(digest), Buffer.from(tarGz.toString('base64')));
   }

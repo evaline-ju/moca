@@ -18,6 +18,7 @@ const rec: SessionRecord = {
   state: 'active',
   poolSelector: null,
   credentialName: 'my-anthropic',
+  configRef: null,
   tombstone: false,
 };
 

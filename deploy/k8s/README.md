@@ -81,6 +81,11 @@ Image choice, for `--target kind`:
   `--build`.
 - `--skip-build` assumes both images are already loaded, which makes a re-run take seconds.
 
+Each run stamps the loaded images' IDs on the pod templates (`moca.dev/image-id`). A rebuilt image
+keeps its `:local` tag, so without that the apply would see no change and the pods would keep
+running the old image. With it, a new image rolls the workloads that run it, and an unchanged image
+rolls nothing.
+
 Other settings come from the environment: `SH_ADMIN_SUBJECTS`, `SH_ALLOW_OPERATOR_FALLBACK`
 (default `false`), `SH_SANDBOX_COUNT` (default 2, at most 4 digits; 0 runs no container sandboxes) and
 `SH_WAIT_SECONDS` (default 120, the wait for sandboxes to attach). `--help` prints the synopsis.

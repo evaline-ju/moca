@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { USAGE, main } from '../src/cli.js';
 import type { Io } from '../src/headless.js';
@@ -205,5 +208,56 @@ describe('main', () => {
     const build = () => ({ ...fakeBuild(), configWarning: 'ignoring unreadable x' }) as Runtime;
     await main(['frobnicate'], {}, o, { buildRuntime: build });
     expect(o.errs[0]).toBe('ignoring unreadable x');
+  });
+
+  it('promote --dry-run builds and prints without a login or a control plane', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mocactl-cli-promote-'));
+    mkdirSync(join(dir, '.claude/commands'), { recursive: true });
+    writeFileSync(join(dir, '.claude/commands/go.md'), 'go');
+    const o = io();
+    expect(await main(['promote', dir, '--dry-run'], {}, o, { buildRuntime: fakeBuild })).toBe(0);
+    expect(o.outs.join('')).toContain('dry run: not uploaded');
+    expect(USAGE).toContain('mocactl promote DIR [--dry-run] [--json]');
+  });
+
+  it('bundles delete needs exactly one digest, and bundles has no other subcommand', async () => {
+    expect(await main(['bundles', 'delete'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
+    expect(await main(['bundles', 'delete', 'a', 'b'], {}, io(), { buildRuntime: fakeBuild })).toBe(
+      2,
+    );
+    const o = io();
+    expect(await main(['bundles', 'list'], {}, o, { buildRuntime: fakeBuild })).toBe(2);
+    expect(o.errs.join('')).toContain('unknown bundles command "list"');
+    expect(USAGE).toContain('mocactl bundles delete DIGEST [--json]');
+  });
+
+  it('promote needs exactly one directory', async () => {
+    expect(await main(['promote'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
+    expect(await main(['promote', 'a', 'b'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
+  });
+
+  it('rejects --config together with --session, and --config outside run', async () => {
+    const o = io();
+    expect(
+      await main(['run', 'hi', '--session', 's1', '--config', 'sha256:x'], {}, o, {
+        buildRuntime: fakeBuild,
+      }),
+    ).toBe(2);
+    expect(o.errs.join('')).toContain('fixed when it is created');
+    const o2 = io();
+    expect(
+      await main(['sessions', '--config', 'sha256:x'], {}, o2, { buildRuntime: fakeBuild }),
+    ).toBe(2);
+    expect(o2.errs.join('')).toContain('only applies to');
+  });
+
+  it('rejects an empty or blank --config rather than running without the bundle', async () => {
+    for (const blank of ['', '   ']) {
+      const o = io();
+      expect(await main(['run', 'hi', '--config', blank], {}, o, { buildRuntime: fakeBuild })).toBe(
+        2,
+      );
+      expect(o.errs.join('')).toContain('--config');
+    }
   });
 });

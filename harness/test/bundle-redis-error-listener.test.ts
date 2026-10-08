@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 
 /**
- * The promoted-config bundle client (`getBundleRedis`, run-leaf.ts) runs inside the worker process --
+ * The promoted-config bundle client (`getBundleRedis`, promoted-config.ts) runs inside the worker process --
  * `POST /runs` with a `configRef` reaches it -- and is memoised for the process's life. It had no
  * `'error'` listener, so once a worker had served one such run, a Redis restart was an uncaught
  * `SocketClosedUnexpectedlyError` and the worker exited, taking its in-flight turns with it: the same
@@ -36,7 +36,7 @@ beforeEach(() => {
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
 
-const load = async () => (await import('../src/run-leaf.js')).getBundleRedis;
+const load = async () => (await import('../src/promoted-config.js')).getBundleRedis;
 
 describe('getBundleRedis (#423 Task 16b sweep)', () => {
   it('survives an error emitted on an established connection', async () => {

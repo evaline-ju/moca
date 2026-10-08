@@ -62,7 +62,16 @@ export function canonicalTar(entries: TarEntry[]): Buffer {
   return Buffer.concat(parts);
 }
 
-/** Read a canonical archive back. Ignores anything that is not a regular file. */
+/** Unsigned octal or nothing: `parseInt` would accept a sign and junk, and a negative size can walk
+ * the read offset backwards forever. */
+function octalField(text: string, field: string): number {
+  const t = text.trim();
+  if (!/^[0-7]*$/.test(t)) throw new Error(`invalid tar ${field} field: ${JSON.stringify(t)}`);
+  return t === '' ? 0 : parseInt(t, 8);
+}
+
+/** Read a canonical archive back. Ignores anything that is not a regular file. Throws on a
+ * malformed header or a truncated entry; the offset strictly advances, so it always terminates. */
 export function untar(tar: Buffer): TarEntry[] {
   const out: TarEntry[] = [];
   for (let off = 0; off + BLOCK <= tar.length;) {
@@ -75,10 +84,11 @@ export function untar(tar: Buffer): TarEntry[] {
     };
     const name = cstr(0, 100);
     const prefix = cstr(345, 155);
-    const mode = parseInt(cstr(100, 8).trim() || '0', 8);
-    const size = parseInt(cstr(124, 12).trim() || '0', 8);
+    const mode = octalField(cstr(100, 8), 'mode');
+    const size = octalField(cstr(124, 12), 'size');
     const type = h.subarray(156, 157).toString('ascii');
     off += BLOCK;
+    if (off + size > tar.length) throw new Error(`truncated tar: entry ${name} runs past the end`);
     if (type === '0' || type === '\0') {
       out.push({
         path: prefix ? `${prefix}/${name}` : name,
@@ -86,7 +96,9 @@ export function untar(tar: Buffer): TarEntry[] {
         mode,
       });
     }
-    off += Math.ceil(size / BLOCK) * BLOCK;
+    const next = off + Math.ceil(size / BLOCK) * BLOCK;
+    if (next < off) throw new Error('tar offset did not advance');
+    off = next;
   }
   return out;
 }
