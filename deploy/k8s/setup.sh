@@ -704,6 +704,11 @@ write_settings() {
     die "moca-settings holds SH_API_TOKEN_TTL_SECONDS='$api_ttl': re-run with it set to a whole number of seconds, or set but empty (SH_API_TOKEN_TTL_SECONDS=) for the default"
   valid_ttl "$session_ttl" ||
     die "moca-settings holds SH_SESSION_TOKEN_TTL_SECONDS='$session_ttl': re-run with it set to a whole number of seconds, or set but empty (SH_SESSION_TOKEN_TTL_SECONDS=) for the default"
+  # Valid but long: a stray extra digit must not mint near-permanent bearer tokens unnoticed.
+  ((${api_ttl:-0} <= 604800)) ||
+    log "WARNING: SH_API_TOKEN_TTL_SECONDS=$api_ttl is over 7 days: every API token a login mints stays valid that long"
+  ((${session_ttl:-0} <= 604800)) ||
+    log "WARNING: SH_SESSION_TOKEN_TTL_SECONDS=$session_ttl is over 7 days: every session token stays valid that long"
   after="$(jq -ncS --arg id "$CLIENT_ID" --arg admins "$admins" --arg url "$(public_harness_url)" \
     --arg fb "$fb" --arg tiers "$TIERS" --arg dtier "$DEFAULT_TIER" --arg api_ttl "$api_ttl" --arg session_ttl "$session_ttl" \
     '{SH_GITHUB_CLIENT_ID: $id, SH_ADMIN_SUBJECTS: $admins, SH_PUBLIC_HARNESS_URL: $url, SH_ALLOW_OPERATOR_FALLBACK: $fb,
@@ -810,17 +815,21 @@ ensure_tls() {
   refresh_relay_ca
 }
 
-# self_issued_crt JSON: the tls.crt of secret_json's output when it is self-issued (subject ==
-# issuer: the self-signed one route_cert made, or an operator's own), else nothing. A certificate
-# that chains to an issuer needs no file: mocactl keeps the system pool (NODE_EXTRA_CA_CERTS only
-# adds), and an operator who uses a private issuer trusts it already.
+# self_issued_crt JSON NAME: the tls.crt of secret_json's output for Secret NAME when it is
+# self-issued (subject == issuer: the self-signed one route_cert made, or an operator's own), else
+# nothing. A certificate that chains to an issuer needs no file: mocactl keeps the system pool
+# (NODE_EXTRA_CA_CERTS only adds), and an operator who uses a private issuer trusts it already. An
+# unreadable one is said, not silently treated as issued: the supervisor cannot serve it either.
 self_issued_crt() {
   local crt subject issuer
   crt="$(json_value "$1" tls.crt)"
-  [[ -n "$crt" ]] || return 0
-  subject="$(printf '%s\n' "$crt" | openssl x509 -noout -subject_hash 2>/dev/null)" || return 0
-  issuer="$(printf '%s\n' "$crt" | openssl x509 -noout -issuer_hash 2>/dev/null)" || return 0
-  [[ "$subject" != "$issuer" ]] || printf '%s\n' "$crt"
+  if [[ -n "$crt" ]] &&
+    subject="$(printf '%s\n' "$crt" | openssl x509 -noout -subject_hash 2>/dev/null)" &&
+    issuer="$(printf '%s\n' "$crt" | openssl x509 -noout -issuer_hash 2>/dev/null)"; then
+    [[ "$subject" != "$issuer" ]] || printf '%s\n' "$crt"
+    return 0
+  fi
+  log "WARNING: Secret $2 holds no readable certificate (tls.crt), so no trust file carries the supervisor's: fix or delete the Secret and re-run"
 }
 
 # refresh_supervisor_ca SECRET: SUP_CA holds SECRET's certificate when it is self-issued, and is
@@ -829,10 +838,12 @@ self_issued_crt() {
 refresh_supervisor_ca() {
   local json crt
   json="$(secret_json "$1" "$NS")"
-  crt="$(self_issued_crt "$json")"
+  crt="$(self_issued_crt "$json" "$1")"
   mkdir -p "$(dirname "$SUP_CA")"
   if [[ -n "$crt" ]]; then
-    printf '%s' "$crt" >"$SUP_CA"
+    # $(...) dropped the final newline; without it write_trust_file would glue the ingress CA onto
+    # this certificate's END line, and Node then ignores the whole NODE_EXTRA_CA_CERTS file.
+    printf '%s\n' "$crt" >"$SUP_CA"
     chmod 644 "$SUP_CA"
   else
     rm -f "$SUP_CA"
@@ -849,14 +860,14 @@ write_trust_file() {
   if json="$(kc get configmap default-ingress-cert -n openshift-config-managed --ignore-not-found -o json 2>"$err")"; then
     bundle="$(cm_value "$json" ca-bundle.crt)"
     [[ -n "$bundle" ]] ||
-      log "WARNING: openshift-config-managed/default-ingress-cert has no ca-bundle.crt, so $TRUST_CA lacks the ingress CA"
+      log "WARNING: openshift-config-managed/default-ingress-cert is missing or has no ca-bundle.crt, so $TRUST_CA lacks the ingress CA"
   else
     log "WARNING: could not read openshift-config-managed/default-ingress-cert, so $TRUST_CA lacks the ingress CA: $(head -c 300 "$err")"
   fi
   rm -f "$err"
   mkdir -p "$(dirname "$TRUST_CA")"
   {
-    [[ ! -f "$SUP_CA" ]] || cat "$SUP_CA"
+    [[ ! -f "$SUP_CA" ]] || printf '%s\n' "$(cat "$SUP_CA")"
     [[ -z "$bundle" ]] || printf '%s\n' "$bundle"
   } >"$TRUST_CA"
   if [[ -s "$TRUST_CA" ]]; then chmod 644 "$TRUST_CA"; else rm -f "$TRUST_CA"; fi
