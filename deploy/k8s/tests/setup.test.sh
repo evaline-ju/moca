@@ -11,7 +11,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 export MOCK_LOG="$TMP/mock.log" MOCK_STATE="$TMP/state" SH_WAIT_SECONDS=2
 # Sticky input: a value in the caller's shell would be a GIVEN default tier in every run below.
-unset SH_SANDBOX_DEFAULT_TIER
+unset SH_SANDBOX_DEFAULT_TIER SH_SANDBOX_EGRESS_EXCEPT
 REAL_PATH="$PATH"
 export REAL_PATH
 REAL_BASH="$(command -v bash)"
@@ -1103,5 +1103,51 @@ gen | grep -q 'secretName: op-cert' || fail '--tls-secret was lost beside the se
 [[ "$(dtier_stored moca-single)" == microvm ]] || fail 'a Routes re-run dropped the sticky default tier'
 gen | grep -q 'value: moca.example.test' || fail 'a default-tier re-run dropped the sticky Routes'
 pass 'ocp-single: Routes, --tls-secret and the sticky default tier coexist; one annotations add per Deployment'
+
+echo "== SH_SANDBOX_EGRESS_EXCEPT: extra sandbox egress exceptions (#446)"
+egress_stored() { setup_cm "${1:-moca}" | jq -r '.data.SH_SANDBOX_EGRESS_EXCEPT // empty'; }
+egress_adds() { gen | grep -c 'path: /spec/egress/1/to/0/ipBlock/except/-' || true; }
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind)
+! gen | grep -q 'name: NetworkPolicy\|kind: NetworkPolicy' || fail 'no SH_SANDBOX_EGRESS_EXCEPT still patched the sandbox policy'
+[[ -z "$(egress_stored)" ]] || fail 'no SH_SANDBOX_EGRESS_EXCEPT still recorded one'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_EGRESS_EXCEPT=' 203.0.113.0/24, 198.51.100.7/32,,'; expect_ok --target kind)
+gen | grep -qF -- '- target: { kind: NetworkPolicy, name: moca-sandbox }' || fail 'SH_SANDBOX_EGRESS_EXCEPT did not patch the sandbox policy'
+gen | grep -qF -- '- { op: test, path: /spec/egress/1/to/0/ipBlock/cidr, value: 0.0.0.0/0 }' || fail 'the egress patch lacks its test op'
+gen | grep -qF 'value: 203.0.113.0/24 }' && gen | grep -qF 'value: 198.51.100.7/32 }' || fail 'the egress patch lacks a range'
+[[ "$(egress_adds)" == 2 ]] || fail 'the egress patch does not add exactly the two ranges'
+[[ "$(egress_stored)" == 203.0.113.0/24,198.51.100.7/32 ]] || fail "moca-setup holds '$(egress_stored)', not the normalised ranges"
+pass 'kind: SH_SANDBOX_EGRESS_EXCEPT is normalised, rendered as a guarded patch and recorded'
+
+# Sticky: a re-run without it keeps the ranges; set-but-empty clears them.
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind)
+[[ "$(egress_adds)" == 2 ]] || fail 'a re-run without SH_SANDBOX_EGRESS_EXCEPT dropped the ranges'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_EGRESS_EXCEPT=; expect_ok --target kind)
+[[ "$(egress_adds)" == 0 && -z "$(egress_stored)" ]] || fail 'SH_SANDBOX_EGRESS_EXCEPT= did not clear the ranges'
+pass 'SH_SANDBOX_EGRESS_EXCEPT is sticky; empty clears it'
+
+# Refused before anything touches a cluster: nothing is applied, nothing recorded.
+for bad in 203.0.113.1/24 0.0.0.0/0 203.0.113.0 256.0.0.0/8 010.1.0.0/16 2001:db8::/32 10.0.0.0/8 203.0.113.0/24,203.0.113.0/24; do
+  reset_state
+  (export SH_GITHUB_CLIENT_ID=Iv1.a SH_SANDBOX_EGRESS_EXCEPT="$bad"; expect_fail --target kind)
+  expect_out 'SH_SANDBOX_EGRESS_EXCEPT'
+  ! grep -q '^kubectl .*apply' "$MOCK_LOG" || fail "SH_SANDBOX_EGRESS_EXCEPT='$bad' reached kubectl apply"
+done
+# A bad stored value names where it came from and refuses the run.
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind)
+jq '.data.SH_SANDBOX_EGRESS_EXCEPT = "203.0.113.1/24"' "$MOCK_STATE/moca__ConfigMap__moca-setup.json" >"$TMP/cm" &&
+  mv "$TMP/cm" "$MOCK_STATE/moca__ConfigMap__moca-setup.json"
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_fail --target kind)
+expect_out 'host bits set'
+pass 'SH_SANDBOX_EGRESS_EXCEPT: malformed, overlapping-built-in and duplicate ranges are refused, given or stored'
+
+# ocp-single under a custom namespace: the policy patch sits under patches:, before namespace:.
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SINGLE_NAMESPACE=moca-tenant-1 SH_SANDBOX_EGRESS_EXCEPT=203.0.113.0/24
+  expect_ok --target ocp-single)
+[[ "$(egress_adds)" == 1 ]] || fail 'ocp-single: SH_SANDBOX_EGRESS_EXCEPT did not patch the sandbox policy'
+[[ "$(egress_stored moca-tenant-1)" == 203.0.113.0/24 ]] || fail 'ocp-single did not record SH_SANDBOX_EGRESS_EXCEPT'
+pass 'ocp-single: SH_SANDBOX_EGRESS_EXCEPT is rendered and recorded in its namespace'
 
 echo "setup.test.sh: all passed"

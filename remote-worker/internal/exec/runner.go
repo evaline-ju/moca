@@ -95,11 +95,15 @@ type Spec struct {
 	Stdin     []byte
 	TimeoutS  uint32
 	Streaming bool
-	// WorkspaceKey is Exec.workspace_key: the lease's run id. BashRunner IGNORES it —
-	// on the container path an empty key means today's single shared workspace, which
-	// is what makes the proto field additive (spec §3.4). vmpool.Runner keys a per-run
-	// host-side workspace on it and refuses an empty one.
+	// WorkspaceKey is Exec.workspace_key: the session id. BashRunner IGNORES it;
+	// WorkspaceRunner, which wraps it on the container path, turns a non-empty key into
+	// Dir, and an empty key means today's single shared workspace, which is what makes
+	// the proto field additive (spec §3.4). vmpool.Runner keys a per-run host-side
+	// workspace on it and refuses an empty one.
 	WorkspaceKey string
+	// Dir is the directory the child starts in; empty means the worker's own. Never on the
+	// wire: WorkspaceRunner derives it from a validated WorkspaceKey (#408).
+	Dir string
 }
 
 // Sink receives output as it is produced. data is owned by the callee. Chunk is
@@ -187,6 +191,7 @@ func (BashRunner) Run(ctx context.Context, s Spec, sink Sink) (int32, error) {
 	}
 
 	cmd := exec.CommandContext(runCtx, "bash", "-c", s.Command)
+	cmd.Dir = s.Dir
 	// An explicit environment: the container's, minus the worker's own settings (MI1 §5 R6). Left
 	// unset, cmd.Env inherits everything, SANDBOX_TOKEN included.
 	cmd.Env = commandEnv(os.Environ())

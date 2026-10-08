@@ -25,6 +25,13 @@ const DIGEST = `sha256:${'0123456789abcdef'.repeat(4)}`;
 const HASH = 'f'.repeat(64);
 const SUP_HOST = 'moca-moca.apps.example.test';
 const CP_HOST = 'moca-control-plane-moca.apps.example.test';
+const BUILTIN_EXCEPT = [
+  '10.0.0.0/8',
+  '172.16.0.0/12',
+  '192.168.0.0/16',
+  '100.64.0.0/10',
+  '169.254.0.0/16',
+];
 
 describe.skipIf(NO_KUBECTL)('the generated OCP overlay (setup.sh write_overlay)', () => {
   let objs: K8sObject[] = [];
@@ -94,6 +101,11 @@ describe.skipIf(NO_KUBECTL)('the generated OCP overlay (setup.sh write_overlay)'
     // The supervisor reads the sandbox tiers from moca-settings too (P6.3), so a change rolls it.
     const sup = find(objs, 'Deployment', 'moca-supervisor', 'moca');
     expect(sup.spec.template.metadata.annotations['moca.dev/settings-hash']).toBe(HASH);
+  });
+
+  it('leaves the sandbox egress except list at the built-in ranges with no SH_SANDBOX_EGRESS_EXCEPT', () => {
+    const p = find(objs, 'NetworkPolicy', 'moca-sandbox', 'moca-sandbox');
+    expect([...p.spec.egress[1].to[0].ipBlock.except].sort()).toEqual([...BUILTIN_EXCEPT].sort());
   });
 
   it('renders nothing of P4 with no P4 IDs, so the relay matches slice 1', () => {
@@ -373,3 +385,58 @@ describe.skipIf(NO_KUBECTL)('the generated OCP overlay stamps no image ID', () =
     expect(JSON.stringify(objs)).not.toContain('moca.dev/image-id');
   });
 });
+
+// SH_SANDBOX_EGRESS_EXCEPT (#446): the extra ranges land in the sandbox's internet rule, after the
+// built-in ones, on the base's policy (ocp, and kind through the same base) and on ocp-single's
+// replacement of it -- including under a custom namespace, where the namespace transformer runs
+// after the patch.
+for (const [target, ns] of [
+  ['ocp', 'moca-sandbox'],
+  ['ocp-single', 'moca-tenant-1'],
+] as const) {
+  describe.skipIf(NO_KUBECTL)(
+    `the generated ${target} overlay with SH_SANDBOX_EGRESS_EXCEPT (setup.sh write_overlay)`,
+    () => {
+      const DIR = resolve(K8S_DIR, `.generated/test-egress-${target}`);
+      const EXTRA = ['203.0.113.0/24', '198.51.100.7/32'];
+      let objs: K8sObject[] = [];
+      beforeAll(() => {
+        execFileSync('bash', [WRITER, DIR], {
+          env: {
+            ...process.env,
+            GO_TARGET: target,
+            ...(target === 'ocp-single' ? { GO_NS: ns, GO_SBX_NS: ns } : {}),
+            GO_SUP_HOST: SUP_HOST,
+            GO_CP_HOST: CP_HOST,
+            GO_SANDBOX_COUNT: '2',
+            GO_CLIENT_ID: 'Iv1.generated-overlay-test',
+            GO_SETTINGS_HASH: HASH,
+            GO_EGRESS_EXCEPT: EXTRA.join(' '),
+          },
+          stdio: ['ignore', 'ignore', 'inherit'],
+        });
+        const out = execFileSync('kubectl', ['kustomize', DIR], { encoding: 'utf8' });
+        objs = parseAllDocuments(out)
+          .map((d) => d.toJS() as K8sObject | null)
+          .filter((o): o is K8sObject => o !== null);
+      });
+      afterAll(() => {
+        rmSync(DIR, { recursive: true, force: true });
+      });
+
+      it('appends the ranges to the internet rule, keeping the built-in ones and all ports', () => {
+        const p = find(objs, 'NetworkPolicy', 'moca-sandbox', ns);
+        const rule = p.spec.egress[1];
+        expect(rule.to[0].ipBlock.cidr).toBe('0.0.0.0/0');
+        expect(rule.to[0].ipBlock.except).toEqual([...BUILTIN_EXCEPT, ...EXTRA]);
+        expect(rule.ports).toBeUndefined();
+      });
+
+      it('leaves the relay rule alone', () => {
+        const p = find(objs, 'NetworkPolicy', 'moca-sandbox', ns);
+        expect(p.spec.egress[0].ports).toEqual([{ protocol: 'TCP', port: 9443 }]);
+        expect(p.spec.egress).toHaveLength(2);
+      });
+    },
+  );
+}

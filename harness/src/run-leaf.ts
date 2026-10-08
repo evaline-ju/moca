@@ -13,6 +13,7 @@ import {
   type SelectedSandbox,
 } from './select-sandbox.js';
 import { leaseTimings } from './lease-timings.js';
+import { stripTrailingSlashes } from './strip-trailing-slashes.js';
 import { convergeWorkspace, cleanupWorkspace, captureWorkspaceDiff } from './converge.js';
 import {
   setupSwebenchWorkspace,
@@ -156,23 +157,6 @@ export type LeafResult =
       reason: 'no_verdict' | 'invalid_verdict' | 'bad_inputs' | 'error' | 'saturated';
       message?: string;
     };
-
-/**
- * Strip trailing "/" from a workspace root with a linear scan.
- *
- * Deliberately not `/\/+$/`: CodeQL flags that as polynomial (js/polynomial-redos), and the input
- * is caller-controlled -- workspaceRef arrives on the LeafEnvelope, i.e. straight off the request
- * body with no normalisation in between. The regex retries from every position on a long run of
- * slashes, so `/w` + 100k slashes + a non-slash costs ~15s of CPU per call; this costs ~0.005ms.
- *
- * Shared by both prompt builders on purpose. 8efd213 rewrote the same regex in buildSolvePrompt
- * but missed the copy in buildLeafPrompt; one implementation means there is no second copy to miss.
- */
-function stripTrailingSlashes(ref: string): string {
-  let end = ref.length;
-  while (end > 0 && ref.charCodeAt(end - 1) === 47 /* "/" */) end--;
-  return ref.slice(0, end);
-}
 
 export function buildLeafPrompt(item: LeafItem, workspaceRef?: string): string {
   // The file/grep tools run in the sandbox pod; give the agent the absolute path so it does

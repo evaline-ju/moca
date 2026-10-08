@@ -27,8 +27,12 @@ function mountInteractive(rt: Runtime) {
     columns: 100,
     rows: 40,
     frames: [] as string[],
-    write(s: string) {
+    // Honour the Writable callback: Ink 8 awaits `write('', cb)` to flush the redraw when
+    // suspendTerminal() resumes, so a fake that drops it never gives the terminal back.
+    write(s: string, ...rest: unknown[]) {
       stdout.frames.push(s);
+      const cb = rest.find((a): a is () => void => typeof a === 'function');
+      cb?.();
       return true;
     },
   });

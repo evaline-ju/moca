@@ -6,8 +6,8 @@
 #
 # Globals come from the environment as GO_<name>: GO_TARGET, GO_IMAGE, GO_SANDBOX_IMAGE, GO_SUP_HOST,
 # GO_CP_HOST, GO_SANDBOX_COUNT, GO_CLIENT_ID, GO_SETTINGS_HASH, GO_P4_IDS, GO_RELAY_HOST, GO_ROUTE_DOMAIN,
-# GO_TLS_SECRET, GO_HARNESS_IMAGE_ID, GO_SANDBOX_IMAGE_ID, GO_NS and GO_SBX_NS (ocp-single's
-# namespace; default setup.sh's own) -- what
+# GO_TLS_SECRET, GO_HARNESS_IMAGE_ID, GO_SANDBOX_IMAGE_ID, GO_EGRESS_EXCEPT (space-separated CIDRs),
+# GO_NS and GO_SBX_NS (ocp-single's namespace; default setup.sh's own) -- what
 # setup.sh's earlier steps would have set. Prefixed because sourcing setup.sh resets its own globals
 # (TARGET='' and so on).
 set -euo pipefail
@@ -30,6 +30,7 @@ SH_SOURCE_ONLY=1 source "$here/../../../../../deploy/k8s/setup.sh"
   TLS_SECRET="${GO_TLS_SECRET-}"
   HARNESS_IMAGE_ID="${GO_HARNESS_IMAGE_ID-}"
   SANDBOX_IMAGE_ID="${GO_SANDBOX_IMAGE_ID-}"
+  EGRESS_EXCEPT="${GO_EGRESS_EXCEPT-}"
   NS="${GO_NS-moca}"
   SBX_NS="${GO_SBX_NS-moca-sandbox}"
 }

@@ -1,4 +1,4 @@
-import { Box, Text, useApp, useInput, useStdout } from 'ink';
+import { Box, Text, useApp, useInput, useWindowSize } from 'ink';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, classify } from './api/errors.js';
 import type { Usage } from './api/frames.js';
@@ -83,8 +83,7 @@ function retire(s: ActiveSession | undefined): void {
 
 export function App({ rt, opts, env, os, write }: AppProps) {
   const { exit, suspendTerminal } = useApp();
-  const { stdout } = useStdout();
-  const [width, setWidth] = useState(stdout.columns || 80);
+  const { columns: width } = useWindowSize();
   const [themeName, setThemeName] = useState(rt.config.theme);
   const [details, setDetails] = useState(rt.config.details);
   const [thinking, setThinking] = useState(rt.config.thinking);
@@ -216,11 +215,6 @@ export function App({ rt, opts, env, os, write }: AppProps) {
     if (warnings.length > 0) notify(warnings.join(' · '), 'warning');
     else if (!overlay)
       notify('type a message to start a session · ctrl+x l to resume one · ? for help');
-    const onResize = () => setWidth(stdout.columns || 80);
-    stdout.on('resize', onResize);
-    return () => {
-      stdout.off('resize', onResize);
-    };
   }, []);
 
   // A new snapshot means <Static> must re-print from scratch. This runs after useSession's own

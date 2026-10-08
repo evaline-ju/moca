@@ -14,12 +14,14 @@
 # (ocp-single only: the one namespace everything lands in; default moca-single, must already exist),
 # SH_ROUTE_DOMAIN (ocp-single only: opt in to Routes -- the public DNS domain whose hosts
 # moca.<domain> and moca-control-plane.<domain> are the Route hostnames; see README §12.5),
-# SH_SOURCE_ONLY=1 (define the functions and stop, for tests).
+# SH_SANDBOX_EGRESS_EXCEPT (every target: comma-separated IPv4 CIDRs the sandbox's internet egress
+# rule excepts on top of the private, CGNAT and link-local ranges -- e.g. a publicly routable node
+# network; README §6, #446), SH_SOURCE_ONLY=1 (define the functions and stop, for tests).
 #
 # Idempotent: a re-run converges and never rotates a secret. Inputs are sticky: a re-run keeps every
 # setting, --image, --sandbox-image (ocp), SH_SANDBOX_COUNT, SH_P4_SANDBOX_IDS,
-# SH_SANDBOX_DEFAULT_TIER (not kind) and, on ocp-single, SH_ROUTE_DOMAIN and --tls-secret it is not
-# given; an explicitly empty variable (SH_ADMIN_SUBJECTS=) clears it. No secret value is ever put on
+# SH_SANDBOX_DEFAULT_TIER (not kind), SH_SANDBOX_EGRESS_EXCEPT and, on ocp-single, SH_ROUTE_DOMAIN
+# and --tls-secret it is not given; an explicitly empty variable (SH_ADMIN_SUBJECTS=) clears it. No secret value is ever put on
 # a command line -- values travel through pipes and through the environment of the one jq that
 # writes each Secret.
 set -euo pipefail
@@ -56,6 +58,10 @@ SINGLE_NS=''
 # empty when the stack is reached by port-forward. Validated in parse_args, resolved sticky in
 # load_setup_inputs.
 ROUTE_DOMAIN=''
+# SH_SANDBOX_EGRESS_EXCEPT (#446), space-separated once normalised; resolved sticky in
+# load_setup_inputs. EGRESS_EXCEPT_GIVEN: the variable was set (even to empty) -- set in parse_args.
+EGRESS_EXCEPT=''
+EGRESS_EXCEPT_GIVEN=''
 # --tls-secret: a preinstalled kubernetes.io/tls Secret to serve the supervisor's Route with,
 # instead of --tls-cert or a generated self-signed one. ocp-single only, and only with Routes.
 TLS_SECRET=''
@@ -121,6 +127,10 @@ parse_args() {
   *) die "SH_SANDBOX_DEFAULT_TIER='$SH_SANDBOX_DEFAULT_TIER' must be container or microvm" ;;
   esac
   P4_IDS="$(normalize_p4_ids "${SH_P4_SANDBOX_IDS-}")"
+  # The extra sandbox egress exceptions: same rule, unset keeps the earlier run's, set-but-empty
+  # clears them. Validated here, so a malformed CIDR never reaches kustomize or the cluster.
+  EGRESS_EXCEPT_GIVEN="${SH_SANDBOX_EGRESS_EXCEPT+x}"
+  EGRESS_EXCEPT="$(normalize_egress_except "${SH_SANDBOX_EGRESS_EXCEPT-}")"
   [[ -z "$P4_IDS" ]] || [[ "$TARGET" == ocp ]] ||
     die "SH_P4_SANDBOX_IDS ($P4_IDS) needs --target ocp: a P4 host outside the cluster reaches the relay through an OpenShift Route, and $TARGET has none"
   if [[ -n "$TLS_SECRET" ]]; then
@@ -294,6 +304,40 @@ normalize_p4_ids() {
   printf '%s' "$out"
 }
 
+# The ranges the sandbox's internet egress rule always excepts (base/sandbox.yaml and
+# overlays/ocp-single/patch-policies.yaml): RFC 1918, CGNAT, link-local.
+BUILTIN_EGRESS_EXCEPT='10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16'
+
+# normalize_egress_except "203.0.113.0/24, 198.51.100.7/32,," -> "203.0.113.0/24 198.51.100.7/32":
+# comma-separated, each entry trimmed, empty entries dropped. Each must be an IPv4 CIDR in canonical
+# form (no host bits set, no leading zeros) with a prefix of 1-32: the rule's cidr is 0.0.0.0/0, and
+# an except entry must be a strict subset of it. A range listed twice, or one the rule already
+# excepts, is refused rather than rendered twice.
+normalize_egress_except() {
+  [[ -n "$1" ]] || return 0
+  [[ "$1" != *$'\n'* ]] || die "SH_SANDBOX_EGRESS_EXCEPT must be one line"
+  local -a parts
+  local c out='' o1 o2 o3 o4 len ip octet='(0|[1-9][0-9]{0,2})'
+  IFS=',' read -ra parts <<<"$1"
+  for c in ${parts[@]+"${parts[@]}"}; do
+    c="${c#"${c%%[![:space:]]*}"}"
+    c="${c%"${c##*[![:space:]]}"}"
+    [[ -n "$c" ]] || continue
+    [[ "$c" =~ ^$octet\.$octet\.$octet\.$octet/([1-9]|[12][0-9]|3[0-2])$ ]] ||
+      die "SH_SANDBOX_EGRESS_EXCEPT: '$c' is not an IPv4 CIDR a.b.c.d/N with N 1-32"
+    o1="${BASH_REMATCH[1]}" o2="${BASH_REMATCH[2]}" o3="${BASH_REMATCH[3]}" o4="${BASH_REMATCH[4]}" len="${BASH_REMATCH[5]}"
+    ((o1 <= 255 && o2 <= 255 && o3 <= 255 && o4 <= 255)) ||
+      die "SH_SANDBOX_EGRESS_EXCEPT: '$c' has an octet above 255"
+    ip=$(((o1 << 24) | (o2 << 16) | (o3 << 8) | o4))
+    ((len == 32 || (ip & ((1 << (32 - len)) - 1)) == 0)) ||
+      die "SH_SANDBOX_EGRESS_EXCEPT: '$c' has host bits set; give the network address of the range"
+    case " $BUILTIN_EGRESS_EXCEPT " in *" $c "*) die "SH_SANDBOX_EGRESS_EXCEPT: '$c' is always excepted already" ;; esac
+    case " $out " in *" $c "*) die "SH_SANDBOX_EGRESS_EXCEPT lists '$c' twice" ;; esac
+    out="${out:+$out }$c"
+  done
+  printf '%s' "$out"
+}
+
 # Sandbox tiers (P6.3, docs/specs/2026-10-04-p6-on-kubernetes-slice3-design.md §7): a stack with BOTH
 # container sandboxes and P4 hosts is tiered -- each session stays in the tier it was created in.
 # A single-tier stack stays untiered on purpose: a pre-P6.3 worker advertises no tier and a tiered
@@ -355,6 +399,10 @@ load_setup_inputs() {
       '{SH_SANDBOX_COUNT: $n, IMAGE: $i, SANDBOX_IMAGE: $s, SH_P4_SANDBOX_IDS: $p, SH_SANDBOX_DEFAULT_TIER: $t}
         | with_entries(select(.value != ""))')"
   fi
+  # The extra sandbox egress exceptions apply on every target, Kind too (#446).
+  [[ -n "$EGRESS_EXCEPT_GIVEN" ]] || EGRESS_EXCEPT="$(normalize_egress_except "$(cm_value "$json" SH_SANDBOX_EGRESS_EXCEPT)")"
+  data="$(jq -nc --argjson d "$data" --arg e "${EGRESS_EXCEPT// /,}" \
+    '($d + {SH_SANDBOX_EGRESS_EXCEPT: $e}) | with_entries(select(.value != ""))')"
   # ocp-single adds its namespace, so a later smoke.sh finds it without being told
   # (smoke.sh reads this key to pick its own -n). SH_ROUTE_DOMAIN is sticky the same way as every
   # other input: unset keeps the earlier run's value (Routes stay on), set-and-empty turns them
@@ -864,6 +912,17 @@ write_overlay() {
       # Neither pod template carries annotations on kind (the relay's only one is ocp's p4-relay).
       printf '      - { op: add, path: /spec/template/metadata/annotations, value: { %s } }\n' "$sandbox_ann"
       printf '  - target: { kind: Deployment, name: sandbox-relay }\n    patch: |-\n      - { op: add, path: /spec/template/metadata/annotations, value: { moca.dev/image-id: "%s" } }\n' "$HARNESS_IMAGE_ID"
+    fi
+    # SH_SANDBOX_EGRESS_EXCEPT (#446): appended to the sandbox internet rule's except list, which is
+    # egress[1] in the base and in ocp-single's patch-policies.yaml. The test op makes kustomize
+    # fail loudly, rather than patch the wrong rule, if that ever moves.
+    if [[ -n "$EGRESS_EXCEPT" ]]; then
+      printf '  - target: { kind: NetworkPolicy, name: moca-sandbox }\n    patch: |-\n'
+      printf '      - { op: test, path: /spec/egress/1/to/0/ipBlock/cidr, value: 0.0.0.0/0 }\n'
+      local cidr
+      for cidr in $EGRESS_EXCEPT; do
+        printf '      - { op: add, path: /spec/egress/1/to/0/ipBlock/except/-, value: %s }\n' "$cidr"
+      done
     fi
     if [[ "$TARGET" == ocp ]]; then
       printf '  - target: { kind: Route, name: moca }\n    patch: |-\n      - { op: replace, path: /spec/host, value: %s }\n' "$SUP_HOST"
