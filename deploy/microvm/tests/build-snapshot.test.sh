@@ -1601,8 +1601,20 @@ check "the identity check pins user.useConfigOnly (fails closed on an unconfigur
   "$([ "$(grep -c 'user.useConfigOnly=true' "$SCRIPT")" -ge 1 ] && echo yes || echo no)" "yes"
 check "the identity check runs a real empty commit, not just a config lookup" \
   "$([ "$(grep -c 'commit --allow-empty' "$SCRIPT")" -ge 1 ] && echo yes || echo no)" "yes"
+# The throwaway repo MUST be removed inside the same guest command that created it:
+# check_git_identity runs before quiesce_guest, and the snapshot captures guest RAM --
+# /tmp's tmpfs included -- so a repo left behind ships in every sandbox restored from the
+# artifact. And the cleanup must not swallow the commit's exit code: `rc=$?; ...; exit $rc`
+# carries it across the rm, so a failed identity check still fails the build.
+gitid_body="$(awk '/^check_git_identity\(\) \{/{f=1} f{print} f && /^}$/{exit}' "$SCRIPT")"
+check "the identity check removes its throwaway repo inside the guest command" \
+  "$(printf '%s' "$gitid_body" | grep -cF 'rm -rf /tmp/id-check')" "1"
+check "the guest command carries the commit's exit code across the cleanup" \
+  "$(printf '%s' "$gitid_body" | grep -cF 'rc=$?; cd / && rm -rf /tmp/id-check; exit $rc')" "1"
+check "host-side guest_client stderr is captured, not discarded" \
+  "$(printf '%s' "$gitid_body" | grep -cF '2>/dev/null')" "0"
 check "the identity check names #415 for the reader who hits the failure" \
-  "$([ "$(awk '/^check_git_identity\(\) \{/{f=1} f{print} f && /^}$/{exit}' "$SCRIPT" | grep -c '#415')" -ge 1 ] && echo yes || echo no)" "yes"
+  "$([ "$(printf '%s' "$gitid_body" | grep -c '#415')" -ge 1 ] && echo yes || echo no)" "yes"
 
 if [ "$fails" -eq 0 ]; then echo "PASS"; else echo "FAIL ($fails)"; fi
 exit "$fails"

@@ -838,19 +838,30 @@ probe_capabilities() {
 # when nothing sets a name -- the same exit an agent's first commit would get. init +
 # --allow-empty commit is the smallest command sequence that performs a real commit: the
 # identity lookup is the only part that can fail on a sandbox that has git installed at
-# all, and /tmp is a tmpfs (init mounts it), so the throwaway repo leaves no trace.
+# all.
+#
+# The throwaway repo is removed INSIDE the same guest command, with the commit's exit code
+# carried across the cleanup (`rc=$?; ...; exit $rc`): this check runs BEFORE quiesce_guest
+# and the snapshot, and the snapshot captures guest RAM -- /tmp's tmpfs included -- so
+# anything left there ships in every sandbox restored from this artifact. Removing the repo
+# from the host, after guest_client returns, would be too late: the guest is paused and
+# snapshotted by then. Host-side stderr is merged into $out (2>&1, not 2>/dev/null) so a
+# guest_client transport failure -- dial error, CONNECT refused -- reports itself with its
+# own diagnostics instead of masquerading as "no usable identity" over an empty Guest
+# output line.
 check_git_identity() {
   local uds="$1"
   local out rc
   out="$("$STAGE/guest_client" -uds "$uds" -port 1024 -timeout-s 30 \
-    -command 'git init -q /tmp/id-check && cd /tmp/id-check && git -c user.useConfigOnly=true commit --allow-empty -m x 2>&1' \
-    2>/dev/null)" && rc=0 || rc=$?
+    -command 'git init -q /tmp/id-check && cd /tmp/id-check && git -c user.useConfigOnly=true commit --allow-empty -m x 2>&1; rc=$?; cd / && rm -rf /tmp/id-check; exit $rc' \
+    2>&1)" && rc=0 || rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "build-snapshot.sh: the guest git has no usable identity (exit $rc). An agent's" >&2
     echo "  first \`git commit\` in this sandbox will fail with exit 128 until it configures" >&2
     echo "  one itself (#415). The sandbox image should bake a system gitconfig" >&2
     echo "  (/etc/gitconfig, user.name/user.email -- see remote-worker/Dockerfile); this" >&2
-    echo "  rootfs was built from an image without it. Guest output: $out" >&2
+    echo "  rootfs was built from an image without it -- or guest_client could not reach the" >&2
+    echo "  guest at all, in which case its diagnostics follow. Output: $out" >&2
     exit 1
   fi
 }

@@ -107,13 +107,16 @@ func TestBothDockerfilesBakeASystemGitIdentity(t *testing.T) {
 // TestTheBakedGitIdentitySatisfiesACommit proves the CONTENT of that printf line, not just
 // its presence: the exact bytes the Dockerfiles write are extracted, installed as a scratch
 // environment's SYSTEM config (GIT_CONFIG_SYSTEM, the same precedence slot /etc/gitconfig
-// occupies in the image), and a real `git commit` is run in a throwaway repo with NO other
-// config of any kind -- the same first-commit-no-prior-config situation an agent hits. The
-// static test above catches the line's deletion; this catches the subtler drift of a line
-// that still prints A gitconfig, just one git silently ignores (a typo'd section header, a
-// missing key, an escaped \t that landed literally). Needs only git on PATH (the tool these
-// images exist to provide); skips rather than fails when the host lacks it, because a CI
-// runner without git is not an image defect.
+// occupies in the image -- needs git >= 2.32, older git ignores the variable), and a real
+// `git commit` is run in a throwaway repo with NO other config of any kind -- the same
+// first-commit-no-prior-config situation an agent hits. The static test above catches the
+// line's deletion; this catches the subtler drift of a line that still prints A gitconfig,
+// just one git silently ignores (a typo'd section header, a missing key, an escaped \t that
+// landed literally). Two guards keep it honest about that: the commit runs with
+// user.useConfigOnly (so an unconfigured git cannot fall back to an auto-guessed identity
+// and pass anyway), and the resulting commit's author is asserted to BE the baked one, not
+// just any. Needs only git on PATH (the tool these images exist to provide); skips rather
+// than fails when the host lacks it, because a CI runner without git is not an image defect.
 func TestTheBakedGitIdentitySatisfiesACommit(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH; the content check needs it")
@@ -166,11 +169,28 @@ func TestTheBakedGitIdentitySatisfiesACommit(t *testing.T) {
 	}
 	for _, args := range [][]string{
 		{"init", "-q"},
-		{"commit", "--allow-empty", "-m", "#415"},
+		// user.useConfigOnly=true, same as build-snapshot.sh's check_git_identity: without
+		// it, a git whose config sets no name/email does not fail -- it falls back to an
+		// identity auto-guessed from the passwd entry and hostname, and only refuses when
+		// the guessed email is not fully qualified. On a host whose hostname resolves to an
+		// FQDN (many CI runners), a broken baked gitconfig would still commit and this test
+		// would pass on exactly the drift it exists to catch.
+		{"-c", "user.useConfigOnly=true", "commit", "--allow-empty", "-m", "#415"},
 	} {
 		if out, err := run(args...); err != nil {
 			t.Fatalf("git %v (with only the baked system gitconfig, no prior config): %v\n%s",
 				args, err, out)
 		}
+	}
+	// Assert WHICH identity committed, not merely that a commit happened: useConfigOnly
+	// above makes an unconfigured git fail, and this makes a wrongly-configured one fail
+	// too, so the test cannot pass on any identity other than the one the images bake.
+	out, err := run("log", "-1", "--format=%an <%ae>")
+	if err != nil {
+		t.Fatalf("git log -1 after the no-prior-config commit: %v\n%s", err, out)
+	}
+	if got, want := strings.TrimSpace(string(out)), "MOCA sandbox <sandbox@moca.invalid>"; got != want {
+		t.Fatalf("the first commit carried %q, want %q -- the baked gitconfig is not the "+
+			"identity git actually used", got, want)
 	}
 }
