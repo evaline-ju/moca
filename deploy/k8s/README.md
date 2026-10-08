@@ -145,10 +145,13 @@ remove everything: `kind delete cluster --name moca`.
 **Inputs are sticky.** A re-run keeps every input it is not given, so you change one input by
 re-running with just that one:
 
-- `SH_GITHUB_CLIENT_ID`, `SH_ADMIN_SUBJECTS` and `SH_ALLOW_OPERATOR_FALLBACK` live in the
-  ConfigMap `moca-settings`. A variable that is **unset** keeps the stored value. A variable set
-  to empty **clears** it: `SH_ADMIN_SUBJECTS= deploy/k8s/setup.sh ...` removes every admin, and
-  `SH_GITHUB_CLIENT_ID=` takes the control plane back to 0 replicas.
+- `SH_GITHUB_CLIENT_ID`, `SH_ADMIN_SUBJECTS`, `SH_ALLOW_OPERATOR_FALLBACK`,
+  `SH_API_TOKEN_TTL_SECONDS` and `SH_SESSION_TOKEN_TTL_SECONDS` live in the ConfigMap
+  `moca-settings`. A variable that is **unset** keeps the stored value. A variable set to empty
+  **clears** it: `SH_ADMIN_SUBJECTS= deploy/k8s/setup.sh ...` removes every admin,
+  `SH_GITHUB_CLIENT_ID=` takes the control plane back to 0 replicas, and an empty token lifetime is
+  the control plane's default (900 seconds for the API token a login gets, 300 for a session
+  token). A lifetime is a whole number of seconds; a change rolls the control plane.
 - `SH_SANDBOX_COUNT`, and on OpenShift `--image` and `--sandbox-image`, live in the ConfigMap
   `moca-setup` (namespace `moca`, nothing secret in it). A given value replaces the stored one.
   To go back to a default, pass it explicitly (`SH_SANDBOX_COUNT=2`,
@@ -410,16 +413,22 @@ sets both Route hosts: `moca-moca.<apps domain>` (supervisor, passthrough) and
 `moca-control-plane-moca.<apps domain>` (control plane, edge). `--sandbox-image` overrides the
 sandbox image the same way `--image` overrides the harness.
 
-**Without `--tls-cert`,** it generates a self-signed certificate for the supervisor host (825 days),
-prints a warning, and the line every `mocactl` user needs:
+**Without `--tls-cert`,** it generates a self-signed certificate for the supervisor host (825 days)
+and prints a warning. Every run then writes the file `mocactl` users trust, and prints the line
+they need:
 
 ```
-export NODE_EXTRA_CA_CERTS=<checkout>/deploy/k8s/.generated/ocp/moca-supervisor-ca.crt
+export NODE_EXTRA_CA_CERTS=<checkout>/deploy/k8s/.generated/ocp/moca-ca.crt
 ```
 
-Copy that file to both laptops and export it there before running `mocactl`. If the cluster's
-default ingress certificate (the control plane's edge Route) is not publicly trusted either, put
-its CA in the same file.
+`moca-ca.crt` holds the supervisor's certificate when it is self-issued, and the cluster's default
+ingress CA (`ca-bundle.crt` of `openshift-config-managed/default-ingress-cert`), which signs the
+control plane's edge Route and is usually not publicly trusted either. Both are read back from the
+cluster on every run, so a re-run, or a run from a second checkout, prints the line and rebuilds the
+file too. If the ingress CA cannot be read, the run warns and the file holds the supervisor's
+certificate alone. With an issued `--tls-cert`, the file holds only the ingress CA.
+
+Copy that file to both laptops and export it there before running `mocactl`.
 
 **Look for:** `EXIT:0`, `N sandbox(es) attached to the relay`, and the two Route URLs.
 
@@ -501,8 +510,12 @@ export NODE_EXTRA_CA_CERTS=<the CA file>
 export SH_CONTROL_PLANE_URL=https://moca-control-plane-moca.<apps domain>
 ```
 
-`mocactl` renews its 15-minute API token by itself, for 30 days after its last use (90 at most), so
-one login before the acts is enough. `MOCA_TENANCY` is unset, as on the VM demo; see its note on tenancy.
+`mocactl` renews its API token by itself, for 30 days after its last use (90 at most), so one
+login before the acts is enough. The token lasts 15 minutes unless `setup.sh` was run with
+`SH_API_TOKEN_TTL_SECONDS` (§2's sticky settings). A longer value buys nothing with a renewing
+login and costs revocation latency: `mocactl logout` stops new tokens at once, but a token already
+minted stays valid for its whole lifetime. `MOCA_TENANCY` is unset, as on the VM demo; see its note
+on tenancy.
 
 **L4 baseline (operator), before act 1.** Record the supervisor's counters:
 

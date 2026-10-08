@@ -694,6 +694,12 @@ Nor does it claim, for the control plane:
   and the container worker ignores `workspace_key` (`remote-worker/internal/exec/runner.go`). So
   users share `/workspace`, the Unix user and the process list. Owner binding is MI1 S5
   (`docs/specs/2026-09-28-moca-multi-user-isolation-design.md` §9).
+- **Two users after MI1 S2.** `setup-vm.sh` leaves `MOCA_TENANCY` unset (`single`). Until MI1 S2,
+  `single` serves every subject that logs in. From S2 it serves only the first and refuses the rest
+  with `403 single_tenant_deployment` (MI1 §6.6). `setup-vm.sh` adds no refusal of its own, since
+  it cannot tell how many people will log in. `MOCA_TENANCY=multi` serves two users honestly only
+  once S5's owner binding lands. Until then, run a two-user demo at `v0.5.1`
+  (`docs/demos/vm-two-user-acceptance.md`, #407).
 - **Ownership against loopback access.** Session ownership is enforced at the control plane's API.
   Its index is in Redis on `127.0.0.1:6379`, unauthenticated, so anyone with a shell or an
   unrestricted SSH forward on the VM can rewrite it. Restrict non-operator SSH accounts ("Reaching
