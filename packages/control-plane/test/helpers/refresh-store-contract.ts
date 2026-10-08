@@ -17,9 +17,6 @@ const DAY = 86_400 * S;
 const T0 = 1_757_000_000_000;
 const POLICY: RefreshPolicy = { idleTtlS: 30 * 86_400, maxTtlS: 90 * 86_400, graceS: 30 };
 
-/** The decisions in order, for assertions that read like the spec's step list. */
-const decisions = (a: AuditFields[]) => a.map((e) => [e.decision, e.reason ?? ''].join(':'));
-
 /**
  * The behaviour B14 spec §4.3 pins, run against every RefreshStore. The Lua script and the
  * TypeScript fake disagreeing is the failure mode this exists for: handler tests run on the fake,
@@ -31,7 +28,6 @@ export function refreshStoreContract(name: string, make: MakeStore): void {
     const setup = async (policy: RefreshPolicy = POLICY) => (h = await make(policy));
     afterEach(async () => {
       await h?.done();
-      h = undefined as any;
     });
     const login = (subject = 'github:1', nowMs = T0) =>
       h.store.issue({ subject, displayName: 'Ada', label: 'laptop', nowMs });
@@ -296,19 +292,68 @@ export function refreshStoreContract(name: string, make: MakeStore): void {
       const a1 = await login('github:1');
       const a2 = await login('github:1');
       const b = await login('github:2');
-      expect(await h.store.revokeAllFor('github:1', T0 + S)).toBe(2);
-      expect((await h.store.rotate(a1.refreshToken, T0 + 2 * S)).ok).toBe(false);
-      expect((await h.store.rotate(a2.refreshToken, T0 + 2 * S)).ok).toBe(false);
-      expect((await h.store.rotate(b.refreshToken, T0 + 2 * S)).ok).toBe(true);
-      const revoked = (await h.audit()).filter((e) => e.decision === 'refresh_revoked');
-      expect(revoked.map((e) => [e.family, e.reason]).sort()).toEqual(
-        [
-          [a1.family, 'logout_all'],
-          [a2.family, 'logout_all'],
-        ].sort(),
+      expect(await h!.store.revokeAllFor('github:1', T0 + S)).toBe(2);
+      expect((await h!.store.rotate(a1.refreshToken, T0 + 2 * S)).ok).toBe(false);
+      expect((await h!.store.rotate(a2.refreshToken, T0 + 2 * S)).ok).toBe(false);
+      expect((await h!.store.rotate(b.refreshToken, T0 + 2 * S)).ok).toBe(true);
+      const auditAfterRotates = await h!.audit();
+      // Extract issued and rotated entries (in order), and revoked entries (sorted by family).
+      const issuedEntries = auditAfterRotates.filter((e) => e.decision === 'refresh_issued');
+      const actualRevoked = auditAfterRotates
+        .filter((e) => e.decision === 'refresh_revoked')
+        .sort((x, y) => x.family!.localeCompare(y.family!));
+      const refusedAndRotated = auditAfterRotates.filter(
+        (e) =>
+          e.decision === 'refresh_refused' ||
+          (e.decision === 'refresh_rotated' && e.family === b.family),
       );
+      const expectedRevoked = [
+        {
+          ts: String(T0 + S),
+          subject: 'github:1',
+          decision: 'refresh_revoked' as const,
+          family: a1.family,
+          reason: 'logout_all',
+        },
+        {
+          ts: String(T0 + S),
+          subject: 'github:1',
+          decision: 'refresh_revoked' as const,
+          family: a2.family,
+          reason: 'logout_all',
+        },
+      ].sort((x, y) => x.family!.localeCompare(y.family!));
+      // Verify full audit: issued entries, revoked entries (sorted), then refused+rotated.
+      expect([...issuedEntries, ...actualRevoked, ...refusedAndRotated]).toEqual([
+        { ts: String(T0), subject: 'github:1', decision: 'refresh_issued', family: a1.family },
+        { ts: String(T0), subject: 'github:1', decision: 'refresh_issued', family: a2.family },
+        { ts: String(T0), subject: 'github:2', decision: 'refresh_issued', family: b.family },
+        ...expectedRevoked,
+        {
+          ts: String(T0 + 2 * S),
+          subject: 'github:1',
+          decision: 'refresh_refused',
+          family: a1.family,
+          reason: 'revoked',
+        },
+        {
+          ts: String(T0 + 2 * S),
+          subject: 'github:1',
+          decision: 'refresh_refused',
+          family: a2.family,
+          reason: 'revoked',
+        },
+        {
+          ts: String(T0 + 2 * S),
+          subject: 'github:2',
+          decision: 'refresh_rotated',
+          family: b.family,
+        },
+      ]);
       // Already-revoked families are not counted twice.
-      expect(await h.store.revokeAllFor('github:1', T0 + 3 * S)).toBe(0);
+      const auditLengthBeforeSecond = auditAfterRotates.length;
+      expect(await h!.store.revokeAllFor('github:1', T0 + 3 * S)).toBe(0);
+      expect((await h!.audit()).length).toBe(auditLengthBeforeSecond);
     });
 
     it('checks revoked BEFORE grace: revoked token never gets a grace answer', async () => {
