@@ -16,7 +16,9 @@
 # moca.<domain> and moca-control-plane.<domain> are the Route hostnames; see README §12.5),
 # SH_SANDBOX_EGRESS_EXCEPT (every target: comma-separated IPv4 CIDRs the sandbox's internet egress
 # rule excepts on top of the private, CGNAT and link-local ranges -- e.g. a publicly routable node
-# network; README §6, #446), SH_SOURCE_ONLY=1 (define the functions and stop, for tests).
+# network; README §6, #446), SH_API_TOKEN_TTL_SECONDS and SH_SESSION_TOKEN_TTL_SECONDS (the
+# control plane's token lifetimes, whole seconds; empty means its defaults, 3600 and 300; #432),
+# SH_SOURCE_ONLY=1 (define the functions and stop, for tests).
 #
 # Idempotent: a re-run converges and never rotates a secret. Inputs are sticky: a re-run keeps every
 # setting, --image, --sandbox-image (ocp), SH_SANDBOX_COUNT, SH_P4_SANDBOX_IDS,
@@ -164,8 +166,18 @@ parse_args() {
   SH_SANDBOX_COUNT="${SH_SANDBOX_COUNT:-}"
   [[ -z "$SH_SANDBOX_COUNT" || "$SH_SANDBOX_COUNT" =~ ^[0-9]{1,4}$ ]] ||
     die "SH_SANDBOX_COUNT='$SH_SANDBOX_COUNT' must be a whole number of at most 4 digits (0 runs no container sandboxes)"
+  # The token lifetimes: validated here when given; a stored one is checked in write_settings.
+  local ttl
+  for ttl in SH_API_TOKEN_TTL_SECONDS SH_SESSION_TOKEN_TTL_SECONDS; do
+    valid_ttl "${!ttl-}" || die "$ttl='${!ttl}' must be a whole number of seconds, 1 to 8 digits (empty: the control plane's default)"
+  done
   SH_WAIT_SECONDS="${SH_WAIT_SECONDS:-120}"
 }
+
+# valid_ttl VALUE: empty (the control plane's default) or a positive whole number of seconds. At
+# most 8 digits (over three years): the control plane silently takes its default for anything it
+# cannot read as a positive number, so a typo must be refused here instead.
+valid_ttl() { [[ -z "$1" || "$1" =~ ^[1-9][0-9]{0,7}$ ]]; }
 
 is_kind() { [[ "$TARGET" == kind || "$TARGET" == kind-ci ]]; }
 
@@ -626,6 +638,10 @@ DEFAULT_TIER=''
 STORED_DEFAULT_TIER=''
 GEN_DIR=''
 RELAY_CA="$K8S_DIR/.generated/ocp/moca-relay-ca.crt"
+# The supervisor's self-issued certificate, when it has one (refresh_supervisor_ca), and on
+# --target ocp the file mocactl users trust: that certificate plus the cluster's ingress CA (#432).
+SUP_CA=''
+TRUST_CA="$K8S_DIR/.generated/ocp/moca-ca.crt"
 P4_BUNDLES="$K8S_DIR/.generated/ocp/p4"
 ROUTE_CERT_MADE=''
 
@@ -668,9 +684,10 @@ sha256() {
 # set, even to empty (SH_ADMIN_SUBJECTS=), replaces it. SH_PUBLIC_HARNESS_URL is not an input: it is
 # derived from the target (and the Route host) on every run; nor are SH_SANDBOX_TIERS and
 # SH_SANDBOX_DEFAULT_TIER, which derive_tiers derives from the stack (its sticky input lives in
-# moca-setup). They are written even when '' so every stack hashes the same six keys.
+# moca-setup). They are written even when '' so every stack hashes the same eight keys; an empty
+# token lifetime is the control plane's default.
 write_settings() {
-  local before after admins fb
+  local before after admins fb api_ttl session_ttl
   before="$(configmap_json moca-settings)"
   if [[ -n "${SH_GITHUB_CLIENT_ID+x}" ]]; then CLIENT_ID="$SH_GITHUB_CLIENT_ID"; else CLIENT_ID="$(cm_value "$before" SH_GITHUB_CLIENT_ID)"; fi
   if [[ -z "$CLIENT_ID" && "$TARGET" == kind-ci ]]; then
@@ -680,10 +697,18 @@ write_settings() {
   if [[ -n "${SH_ADMIN_SUBJECTS+x}" ]]; then admins="$SH_ADMIN_SUBJECTS"; else admins="$(cm_value "$before" SH_ADMIN_SUBJECTS)"; fi
   if [[ -n "${SH_ALLOW_OPERATOR_FALLBACK+x}" ]]; then fb="$SH_ALLOW_OPERATOR_FALLBACK"; else fb="$(cm_value "$before" SH_ALLOW_OPERATOR_FALLBACK)"; fi
   fb="${fb:-false}"
+  if [[ -n "${SH_API_TOKEN_TTL_SECONDS+x}" ]]; then api_ttl="$SH_API_TOKEN_TTL_SECONDS"; else api_ttl="$(cm_value "$before" SH_API_TOKEN_TTL_SECONDS)"; fi
+  if [[ -n "${SH_SESSION_TOKEN_TTL_SECONDS+x}" ]]; then session_ttl="$SH_SESSION_TOKEN_TTL_SECONDS"; else session_ttl="$(cm_value "$before" SH_SESSION_TOKEN_TTL_SECONDS)"; fi
+  # A given value was checked in parse_args; a stored one names where it came from, and how to clear it.
+  valid_ttl "$api_ttl" ||
+    die "moca-settings holds SH_API_TOKEN_TTL_SECONDS='$api_ttl': re-run with it set to a whole number of seconds, or set but empty (SH_API_TOKEN_TTL_SECONDS=) for the default"
+  valid_ttl "$session_ttl" ||
+    die "moca-settings holds SH_SESSION_TOKEN_TTL_SECONDS='$session_ttl': re-run with it set to a whole number of seconds, or set but empty (SH_SESSION_TOKEN_TTL_SECONDS=) for the default"
   after="$(jq -ncS --arg id "$CLIENT_ID" --arg admins "$admins" --arg url "$(public_harness_url)" \
-    --arg fb "$fb" --arg tiers "$TIERS" --arg dtier "$DEFAULT_TIER" \
+    --arg fb "$fb" --arg tiers "$TIERS" --arg dtier "$DEFAULT_TIER" --arg api_ttl "$api_ttl" --arg session_ttl "$session_ttl" \
     '{SH_GITHUB_CLIENT_ID: $id, SH_ADMIN_SUBJECTS: $admins, SH_PUBLIC_HARNESS_URL: $url, SH_ALLOW_OPERATOR_FALLBACK: $fb,
-      SH_SANDBOX_TIERS: $tiers, SH_SANDBOX_DEFAULT_TIER: $dtier}')"
+      SH_SANDBOX_TIERS: $tiers, SH_SANDBOX_DEFAULT_TIER: $dtier,
+      SH_API_TOKEN_TTL_SECONDS: $api_ttl, SH_SESSION_TOKEN_TTL_SECONDS: $session_ttl}')"
   jq -n --arg ns "$NS" --argjson data "$after" \
     '{apiVersion: "v1", kind: "ConfigMap", metadata: {name: "moca-settings", namespace: $ns}, data: $data}' |
     kc apply --server-side --force-conflicts --field-manager=moca-setup -f - >/dev/null
@@ -751,36 +776,106 @@ check_tls_secret() {
 
 ensure_tls() {
   if [[ "$TARGET" == ocp-single ]]; then
+    SUP_CA="$K8S_DIR/.generated/ocp-single/moca-supervisor-ca.crt"
     # A certificate source with no Routes was already refused in load_setup_inputs (which sees
     # the sticky domain, and refuses before moca-setup records anything); by here Routes are on.
-    [[ -n "$ROUTE_DOMAIN" ]] || return 0
+    # Without them nothing serves a certificate, so an earlier run's CA file is stale.
+    [[ -n "$ROUTE_DOMAIN" ]] || { rm -f "$SUP_CA"; return 0; }
     # --tls-secret: a preinstalled certificate the sidecar references by name; no copy is made, so
     # an operator's Secret is never duplicated (and never rotated by a later self-signed default).
     if [[ -n "$TLS_SECRET" ]]; then
       check_tls_secret
       log "serving the supervisor Route with the preinstalled Secret $TLS_SECRET"
+      refresh_supervisor_ca "$TLS_SECRET"
       return 0
     fi
-    local ca="$K8S_DIR/.generated/ocp-single/moca-supervisor-ca.crt" host="moca.$ROUTE_DOMAIN"
-    route_cert moca-supervisor-tls "$host" "$TLS_CERT" "$TLS_KEY" "$ca"
-    if [[ "$ROUTE_CERT_MADE" == self-signed ]]; then
+    local host="moca.$ROUTE_DOMAIN"
+    route_cert moca-supervisor-tls "$host" "$TLS_CERT" "$TLS_KEY" "$SUP_CA"
+    [[ "$ROUTE_CERT_MADE" != self-signed ]] ||
       log "WARNING: no --tls-cert given, so the supervisor uses a SELF-SIGNED certificate for $host."
-      log "  Every mocactl user must trust it: export NODE_EXTRA_CA_CERTS=$ca"
-    fi
+    refresh_supervisor_ca moca-supervisor-tls
     return 0
   fi
   [[ "$TARGET" == ocp ]] || return 0
-  local ca="$K8S_DIR/.generated/ocp/moca-supervisor-ca.crt"
-  route_cert moca-supervisor-tls "$SUP_HOST" "$TLS_CERT" "$TLS_KEY" "$ca"
-  if [[ "$ROUTE_CERT_MADE" == self-signed ]]; then
+  SUP_CA="$K8S_DIR/.generated/ocp/moca-supervisor-ca.crt"
+  route_cert moca-supervisor-tls "$SUP_HOST" "$TLS_CERT" "$TLS_KEY" "$SUP_CA"
+  [[ "$ROUTE_CERT_MADE" != self-signed ]] ||
     log "WARNING: no --tls-cert given, so the supervisor uses a SELF-SIGNED certificate for $SUP_HOST."
-    log "  Every mocactl user must trust it: export NODE_EXTRA_CA_CERTS=$ca"
-  fi
+  refresh_supervisor_ca moca-supervisor-tls
+  write_trust_file
   [[ -n "$P4_IDS" ]] || return 0
   route_cert moca-relay-tls "$RELAY_HOST" "$RELAY_TLS_CERT" "$RELAY_TLS_KEY" "$RELAY_CA"
   [[ "$ROUTE_CERT_MADE" != self-signed ]] ||
     log "no --relay-tls-cert given: the relay Route uses a SELF-SIGNED certificate for $RELAY_HOST; every P4 bundle carries it as relay-ca.crt"
   refresh_relay_ca
+}
+
+# self_issued_crt JSON: the tls.crt of secret_json's output when it is self-issued (subject ==
+# issuer: the self-signed one route_cert made, or an operator's own), else nothing. A certificate
+# that chains to an issuer needs no file: mocactl keeps the system pool (NODE_EXTRA_CA_CERTS only
+# adds), and an operator who uses a private issuer trusts it already.
+self_issued_crt() {
+  local crt subject issuer
+  crt="$(json_value "$1" tls.crt)"
+  [[ -n "$crt" ]] || return 0
+  subject="$(printf '%s\n' "$crt" | openssl x509 -noout -subject_hash 2>/dev/null)" || return 0
+  issuer="$(printf '%s\n' "$crt" | openssl x509 -noout -issuer_hash 2>/dev/null)" || return 0
+  [[ "$subject" != "$issuer" ]] || printf '%s\n' "$crt"
+}
+
+# refresh_supervisor_ca SECRET: SUP_CA holds SECRET's certificate when it is self-issued, and is
+# absent otherwise. Read back from the Secret on every run (#432), so the file -- and the trust
+# line print_access shows -- is right whichever run, or checkout, created the certificate.
+refresh_supervisor_ca() {
+  local json crt
+  json="$(secret_json "$1" "$NS")"
+  crt="$(self_issued_crt "$json")"
+  mkdir -p "$(dirname "$SUP_CA")"
+  if [[ -n "$crt" ]]; then
+    printf '%s' "$crt" >"$SUP_CA"
+    chmod 644 "$SUP_CA"
+  else
+    rm -f "$SUP_CA"
+  fi
+}
+
+# write_trust_file (ocp): TRUST_CA holds what mocactl must trust to reach both Routes -- SUP_CA (the
+# supervisor's passthrough Route) and the cluster's default ingress CA, which signs the control
+# plane's edge Route and is usually not publicly trusted either (#432). Reading the ingress CA is
+# best effort: without it the file still serves the supervisor, and the run says what is missing.
+write_trust_file() {
+  local json='' bundle='' err
+  err="$(mktemp)"
+  if json="$(kc get configmap default-ingress-cert -n openshift-config-managed --ignore-not-found -o json 2>"$err")"; then
+    bundle="$(cm_value "$json" ca-bundle.crt)"
+    [[ -n "$bundle" ]] ||
+      log "WARNING: openshift-config-managed/default-ingress-cert has no ca-bundle.crt, so $TRUST_CA lacks the ingress CA"
+  else
+    log "WARNING: could not read openshift-config-managed/default-ingress-cert, so $TRUST_CA lacks the ingress CA: $(head -c 300 "$err")"
+  fi
+  rm -f "$err"
+  mkdir -p "$(dirname "$TRUST_CA")"
+  {
+    [[ ! -f "$SUP_CA" ]] || cat "$SUP_CA"
+    [[ -z "$bundle" ]] || printf '%s\n' "$bundle"
+  } >"$TRUST_CA"
+  if [[ -s "$TRUST_CA" ]]; then chmod 644 "$TRUST_CA"; else rm -f "$TRUST_CA"; fi
+}
+
+# trust_line: what every mocactl user must export, printed on every run (#432), not only on the run
+# that made the certificate. Nothing when there is nothing to trust.
+trust_line() {
+  if [[ "$TARGET" == ocp && -f "$TRUST_CA" ]]; then
+    if [[ -f "$SUP_CA" ]]; then
+      printf "The supervisor's certificate is SELF-SIGNED. Every mocactl user must trust it and the cluster's ingress CA, both in one file:\n"
+    else
+      printf "If mocactl does not trust the cluster's ingress certificate (the control plane Route), trust its CA:\n"
+    fi
+    printf '  export NODE_EXTRA_CA_CERTS=%s\n' "$TRUST_CA"
+  elif [[ "$TARGET" == ocp-single && -n "$SUP_CA" && -f "$SUP_CA" ]]; then
+    printf "The supervisor's certificate is SELF-SIGNED. Every mocactl user must trust it:\n"
+    printf '  export NODE_EXTRA_CA_CERTS=%s\n' "$SUP_CA"
+  fi
 }
 
 # The CA a P4 host must trust (spec §4.4), read back from moca-relay-tls on every run so it is right
@@ -1052,6 +1147,7 @@ P6 is up on OpenShift, namespace $NS (single-namespace dev/test target), served 
   control plane:  https://moca-control-plane.$ROUTE_DOMAIN
 then:  mocactl --control-plane-url https://moca-control-plane.$ROUTE_DOMAIN login
 EOF
+      trust_line >&2
     else
       cat >&2 <<EOF
 P6 is up on OpenShift, namespace $NS (single-namespace dev/test target; no Routes). Reach it by port-forward:
@@ -1067,6 +1163,7 @@ P6 is up on OpenShift.
   control plane:  https://$CP_HOST
 then:  mocactl --control-plane-url https://$CP_HOST login
 EOF
+    trust_line >&2
     if [[ -n "$P4_IDS" ]]; then
       local id dir
       printf 'P4 hosts attach to https://%s (the relay, TLS passthrough). One bundle each -- it holds\n' "$RELAY_HOST" >&2
