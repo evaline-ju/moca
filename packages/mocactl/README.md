@@ -61,6 +61,7 @@ mocactl doctor [--json]                     # seven checks, one fix per failure;
 mocactl run "prompt" [--session ID | --new] [--option inferenceCredential=NAME] [--json]
 mocactl promote DIR [--dry-run] [--json]    # upload DIR's .claude/skills and .claude/commands
 mocactl run "prompt" --config DIGEST        # start the new session with that config bundle
+mocactl bundles delete DIGEST [--json]      # delete a bundle you promoted; frees your budget
 ```
 
 ```bash
@@ -82,7 +83,12 @@ TUI, `/promote DIR` attaches it to the next session you create; its toast counts
 and warnings. With exactly one inference credential and no presets, the new-session overlay creates
 the session as soon as it opens, so `/promote DIR` starts the session right away. A session's
 bundle is fixed when it is created, so
-`--config` cannot be combined with `--session`. Rollout order: upgrade the harness before the
+`--config` cannot be combined with `--session`.
+
+Stored bundles count against a per-account and a deployment-wide byte budget (`429` when full).
+`mocactl bundles delete DIGEST` deletes a bundle you promoted and frees its share; an admin may
+delete anyone's. Sessions created on it then fail their next turn as for an expired bundle.
+`mocactl promote DIR --dry-run` prints a directory's digest without uploading. Rollout order: upgrade the harness before the
 control plane — an older harness ignores `configRef`, so turns would run without the skills and
 report no error.
 

@@ -156,15 +156,23 @@ POST /v1/config-bundles   auth: api   sessionScoped: false   operationId: 'putCo
 - **Byte budget.** A NEW digest is charged its stored size (the gzip+base64 value, floored at
   4 KiB for its key and index overhead) to the subject that first stored it; admit, charge and store
   are serialized in-process (the control plane runs as a single replica), and the charge is recorded
-  before the store and rolled back if it fails; one over the subject's `SH_BUNDLE_SUBJECT_BYTES` (32 MiB) or the deployment's
+  before the store and rolled back if it fails; one over the subject's `SH_BUNDLE_SUBJECT_BYTES` (16 MiB) or the deployment's
   `SH_BUNDLE_TOTAL_BYTES` (64 MiB) is refused with `429 bundle_quota_exceeded`. Re-uploading a stored
   digest is free. Entries (zsets `sh:cp:bundles:all` and `sh:cp:bundles:owner:<subjectHash>`, scored
-  by expiry, plus hash `sh:cp:bundles:meta`) age out with the bundle's TTL.
+  by expiry, plus hash `sh:cp:bundles:meta`) age out with the bundle's TTL. A session's turn
+  refreshes its bundle's entry only while the key still exists, so an expired bundle's entry is never
+  revived; storing a digest whose key is gone first drops any stale entry it left.
+- **Delete:** `DELETE /v1/config-bundles/{digest}` removes the key and its budget entry under the
+  same lock, `204`. Allowed to the subject the digest is charged to or an `admin` (`403 forbidden`
+  otherwise; a bundle with no budget entry, stored by `/promote`, is admin-only);
+  `404 config_bundle_not_found` when there is neither key nor entry. Audited as
+  `config_bundle_deleted`. `mocactl bundles delete DIGEST` calls it.
 - **Redis:** `CpDeps` gains `bundles: BundleRedisLike`, wired in `main.ts` to the same node-redis
   client `OwnershipIndex` already uses.
 - **No ownership record.** Intentionally just content-addressed storage, structurally identical to
   what direct Redis access does today — the control plane mediates the write, it does not become a
-  new authorization boundary over bundle contents.
+  new authorization boundary over bundle contents. The budget's first-uploader field gates only
+  who may delete a digest, never who may read or use it.
 
 ### 2.4 Control plane: `configRef` on the session and in the exchange
 

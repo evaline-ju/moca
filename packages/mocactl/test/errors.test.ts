@@ -93,6 +93,6 @@ it('maps a full config-bundle budget to its own action and one-line message', ()
   const err = new ApiError('control-plane', 429, 'bundle_quota_exceeded', 'over budget');
   expect(classify(err)).toEqual({ kind: 'bundle-quota' });
   expect(describeError(err)).toBe(
-    "the control plane's config-bundle storage is full for your account or the deployment — try again later or ask the operator",
+    "the control plane's config-bundle storage is full for your account or the deployment — free yours with `mocactl bundles delete DIGEST`, or ask the operator",
   );
 });

@@ -134,6 +134,13 @@ export const ROUTES: readonly RouteSpec[] = [
     operationId: 'putConfigBundle',
   },
   {
+    method: 'DELETE',
+    path: '/v1/config-bundles/{digest}',
+    auth: 'api',
+    sessionScoped: false,
+    operationId: 'deleteConfigBundle',
+  },
+  {
     method: 'POST',
     path: '/internal/credentials',
     auth: 'exchange',

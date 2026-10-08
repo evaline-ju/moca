@@ -1,3 +1,4 @@
+import { ApiError } from './api/errors.js';
 import type { CredentialConsumer, SessionSummary } from './api/types.js';
 import {
   LoginCancelledError,
@@ -141,6 +142,35 @@ export async function cmdPromote(
     io.err(describeError(err));
     return 1;
   }
+}
+
+export async function cmdBundleDelete(
+  rt: Runtime,
+  io: Io,
+  opts: ManageOptions & { digest: string },
+): Promise<number> {
+  if (!/^sha256:[0-9a-f]{64}$/.test(opts.digest)) {
+    io.err('a bundle digest is sha256:<64 lowercase hex>, as `mocactl promote` prints it');
+    return 2;
+  }
+  if (!ready(rt, io)) return 2;
+  try {
+    await cancellable(rt.cp.deleteConfigBundle(opts.digest), opts.signal);
+  } catch (err) {
+    // Not describeError's "this session's bundle is gone" advice: here no session is involved.
+    if (err instanceof ApiError && err.code === 'config_bundle_not_found') {
+      io.err(`no config bundle with digest ${opts.digest}`);
+      return 1;
+    }
+    if (err instanceof ApiError && err.code === 'forbidden') {
+      io.err(sanitizeRemote(err.message));
+      return 1;
+    }
+    return failed(io, err);
+  }
+  io.err(`deleted config bundle ${opts.digest}`);
+  if (opts.json) io.out(JSON.stringify({ digest: opts.digest, status: 'deleted' }) + '\n');
+  return 0;
 }
 
 export async function cmdRun(rt: Runtime, io: Io, opts: RunOptions): Promise<number> {

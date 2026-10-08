@@ -19,6 +19,7 @@ describe('the route table', () => {
         'PUT /v1/credentials/{name}',
         'DELETE /v1/credentials/{name}',
         'POST /v1/config-bundles',
+        'DELETE /v1/config-bundles/{digest}',
         'POST /internal/credentials',
         'GET /healthz',
         'GET /readyz',

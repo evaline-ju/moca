@@ -19,7 +19,9 @@ export interface BundleBudgetRedisLike {
   hSet(key: string, values: Record<string, string>): Promise<unknown>;
   hmGet(key: string, fields: string[]): Promise<(string | null)[]>;
   hDel(key: string, fields: string[]): Promise<unknown>;
+  /** node-redis answers 1, or 0 when the key does not exist. */
   expire(key: string, seconds: number): Promise<unknown>;
+  del(key: string): Promise<unknown>;
 }
 
 /**
@@ -51,18 +53,39 @@ function parseMeta(raw: string | null): { bytes: number; owner: string } | null 
   return i > 0 && Number.isFinite(bytes) ? { bytes, owner: raw.slice(i + 1) } : null;
 }
 
+/** The subjectHash a digest is charged to, or null when it has no budget entry. */
+export async function bundleOwnerHash(
+  redis: BundleBudgetRedisLike,
+  digest: string,
+): Promise<string | null> {
+  const [raw] = await redis.hmGet(BUNDLES_META_KEY, [digest]);
+  return parseMeta(raw ?? null)?.owner ?? null;
+}
+
+/** Remove whatever budget entry `digest` has, under whichever subject it is charged to. */
+export async function dropBundleEntry(redis: BundleBudgetRedisLike, digest: string): Promise<void> {
+  const owner = await bundleOwnerHash(redis, digest);
+  await redis.zRem(BUNDLES_ALL_KEY, digest);
+  if (owner !== null) await redis.zRem(ownerZsetFor(owner), digest);
+  await redis.hDel(BUNDLES_META_KEY, [digest]);
+}
+
 /**
- * Refuse a NEW digest of `bytes` stored bytes that would take `subject` or the deployment past its
+ * Refuse a NEW `digest` of `bytes` stored bytes that would take `subject` or the deployment past its
  * budget. Only sound under `withBundleLock`: admit, record and store must not interleave.
  */
 export async function admitBundle(
   redis: BundleBudgetRedisLike,
   limits: BundleBudgetLimits,
   subject: string,
+  digest: string,
   bytes: number,
   nowMs: number,
 ): Promise<void> {
   const ownKey = bundleOwnerKey(subject);
+  // The caller found no key for `digest`, so any entry it still has is stale: counting it on top of
+  // the new charge would refuse the very re-promotion that restores the bundle.
+  await dropBundleEntry(redis, digest);
   const expired = await redis.zRange(BUNDLES_ALL_KEY, '-inf', nowMs, { BY: 'SCORE' });
   if (expired.length > 0) {
     await redis.hDel(BUNDLES_META_KEY, expired);
@@ -132,7 +155,9 @@ export async function touchBundle(
   digest: string,
   nowMs: number,
 ): Promise<void> {
-  await redis.expire(bundleKey(digest), DEFAULT_BUNDLE_TTL_SECONDS);
+  // An expired key's entry lingers until the next admit; refreshing it would revive a charge for
+  // bytes Redis no longer holds, and every 410ing turn of a dead session would keep it alive.
+  if (Number(await redis.expire(bundleKey(digest), DEFAULT_BUNDLE_TTL_SECONDS)) !== 1) return;
   await refreshBundle(redis, digest, nowMs);
 }
 

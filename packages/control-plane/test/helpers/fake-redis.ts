@@ -122,7 +122,13 @@ export function fakeBundleRedis(): BundleRedisLike &
     },
     async expire(key, seconds) {
       expires.push({ key, seconds });
-      return 1;
+      // Like EXPIRE: 0 for a key that does not exist.
+      return store.has(key) || (zsets.get(key)?.size ?? 0) > 0 || (hashes.get(key)?.size ?? 0) > 0
+        ? 1
+        : 0;
+    },
+    async del(key) {
+      return store.delete(key) ? 1 : 0;
     },
     async zAdd(key, member) {
       z(key).set(member.value, member.score);

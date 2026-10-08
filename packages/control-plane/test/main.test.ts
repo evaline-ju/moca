@@ -53,7 +53,7 @@ describe('configFromEnv', () => {
     expect(c.allowOperatorFallback).toBe(false); // spec §6.4: default false
     expect(c.injectorConfigured).toBe(false);
     expect(c.sandboxNamespace).toBe('default');
-    expect(c.bundleSubjectBytes).toBe(32 * 1024 * 1024);
+    expect(c.bundleSubjectBytes).toBe(16 * 1024 * 1024);
     expect(c.bundleTotalBytes).toBe(64 * 1024 * 1024);
   });
 

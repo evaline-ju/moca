@@ -2,6 +2,7 @@ import { parseArgs } from 'node:util';
 import { parseOptionFlags } from './core/session-options.js';
 import type { CredentialConsumer } from './api/types.js';
 import {
+  cmdBundleDelete,
   cmdCredentialAdd,
   cmdCredentialDelete,
   cmdCredentials,
@@ -23,6 +24,7 @@ export const USAGE = `usage:
   mocactl run "prompt" --config DIGEST            start the new session with a promoted config bundle
   mocactl promote DIR [--dry-run] [--json]       upload DIR's .claude/skills and .claude/commands
                                                  (--dry-run: build and report, upload nothing)
+  mocactl bundles delete DIGEST [--json]         delete a bundle you promoted and free its budget
   mocactl sessions [--json]                      list your sessions
   mocactl sessions delete ID [--json]
   mocactl credentials [--json]                   list your credentials (never their secrets)
@@ -167,6 +169,12 @@ export async function main(
     case 'promote': {
       if (rest.length !== 1) return usage(io);
       return cmdPromote(rt, io, { dir: rest[0]!, json, dryRun: values['dry-run'] === true });
+    }
+    case 'bundles': {
+      const [sub, digest, ...extra] = rest;
+      if (sub !== 'delete') return sub === undefined ? usage(io) : unknown(io, 'bundles', sub);
+      if (digest === undefined || extra.length > 0) return usage(io);
+      return cmdBundleDelete(rt, io, { digest, json, signal });
     }
     case 'sessions': {
       const [sub, id, ...extra] = rest;

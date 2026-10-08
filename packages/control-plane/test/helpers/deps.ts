@@ -50,7 +50,7 @@ export function makeDeps(
       injectorConfigured: false,
       sandboxNamespace: 'default',
       sandboxTiers: null,
-      bundleSubjectBytes: 32 * 1024 * 1024,
+      bundleSubjectBytes: 16 * 1024 * 1024,
       bundleTotalBytes: 64 * 1024 * 1024,
       ...configOver,
     },

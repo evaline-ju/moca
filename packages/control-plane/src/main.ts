@@ -103,7 +103,9 @@ export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
     sandboxNamespace: env.SH_SANDBOX_NAMESPACE || 'default',
     publicHarnessUrl: urlEnv(env, 'SH_PUBLIC_HARNESS_URL'),
     sandboxTiers: parseSandboxTiers(env),
-    bundleSubjectBytes: byteBudgetEnv(env, 'SH_BUNDLE_SUBJECT_BYTES', 32 * 1024 * 1024),
+    // A quarter of the total: four subjects, not two, to fill it, and still room for one
+    // incompressible max-size bundle (~10.7 MiB stored).
+    bundleSubjectBytes: byteBudgetEnv(env, 'SH_BUNDLE_SUBJECT_BYTES', 16 * 1024 * 1024),
     bundleTotalBytes: byteBudgetEnv(env, 'SH_BUNDLE_TOTAL_BYTES', 64 * 1024 * 1024),
   };
   checkInferenceConfig(config);

@@ -87,10 +87,19 @@ and apply it on the interactive turn path:
   plane. An older harness ignores `configRef`, so turns would run without the skills and no error.
 - Follow-up owed: `GET /v1/config-bundles/{digest}` (metadata only) if bundle reuse across sessions
   turns out to matter.
-- Positive: uploads are bounded by a per-subject (`SH_BUNDLE_SUBJECT_BYTES`, 32 MiB) and a
+- Positive: uploads are bounded by a per-subject (`SH_BUNDLE_SUBJECT_BYTES`, 16 MiB) and a
   deployment-wide (`SH_BUNDLE_TOTAL_BYTES`, 64 MiB) budget of stored bytes (4 KiB floor per bundle);
   a new digest over either is refused with `429 bundle_quota_exceeded`, and entries age out with the
   bundle's 30-day TTL. The check is serialized in-process, which assumes a single control-plane replica.
+  The subject share is a quarter of the total, so it takes four subjects, not two, to fill it, and
+  still holds one incompressible max-size bundle (~10.7 MiB stored).
+- Positive: `DELETE /v1/config-bundles/{digest}` (`mocactl bundles delete`) frees budget. The subject
+  the digest is charged to, or an `admin`, may delete it; a bundle stored by ADR-0030's `/promote`
+  has no budget entry and is admin-only. Sessions on a deleted bundle get 410 on their next turn.
+- Negative / accepted cost: the budget is still first-come. Subjects that hold their share and keep
+  re-uploading can keep the deployment full until an admin deletes their bundles
+  (`SH_ADMIN_SUBJECTS`); a per-subject share small enough to rule that out would refuse a max-size
+  bundle.
 - Follow-up owed: LRU cleanup of the harness pod's `/tmp/sh-config` digest cache, which today grows
   with every distinct digest a pod resolves.
 

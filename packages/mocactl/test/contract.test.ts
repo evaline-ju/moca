@@ -50,6 +50,7 @@ const USED: Array<{ method: string; path: string; reads?: string[]; sends?: stri
     reads: ['digest', 'uploaded'],
     sends: ['digest', 'tar'],
   },
+  { method: 'delete', path: '/v1/config-bundles/{digest}' },
 ];
 
 // Codes the client branches on (api/errors.ts, core/session-manager.ts).
@@ -68,6 +69,8 @@ const CODES_USED = [
   'internal_error',
   'credential_required',
   'credential_ambiguous',
+  'config_bundle_not_found',
+  'forbidden',
 ];
 
 function responseSchema(op: any): any {
@@ -134,8 +137,12 @@ describe('control-plane contract (docs/api/openapi.yaml)', () => {
     });
     await cProxy.deleteCredential('NAME');
     await cProxy.putConfigBundle({ digest: 'sha256:x', tar: '' });
+    await cProxy.deleteConfigBundle('DIGEST');
     const seen = calls.map((k) => {
-      const path = new URL(k.url).pathname.replace('/ID', '/{id}').replace('/NAME', '/{name}');
+      const path = new URL(k.url).pathname
+        .replace('/ID', '/{id}')
+        .replace('/NAME', '/{name}')
+        .replace('/DIGEST', '/{digest}');
       return `${k.method.toLowerCase()} ${path}`;
     });
     expect(new Set(seen)).toEqual(new Set(USED.map((u) => `${u.method} ${u.path}`)));

@@ -113,6 +113,10 @@ export class ControlPlaneClient implements ControlPlaneApi {
     return this.json('POST', '/v1/config-bundles', { body: req });
   }
 
+  async deleteConfigBundle(digest: string): Promise<void> {
+    await this.request('DELETE', `/v1/config-bundles/${encodeURIComponent(digest)}`);
+  }
+
   getSession(id: string): Promise<SessionSummary> {
     return this.json('GET', `/v1/sessions/${encodeURIComponent(id)}`);
   }

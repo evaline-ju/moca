@@ -107,6 +107,8 @@ export interface ControlPlaneApi {
     digest: string;
     tar: string;
   }): Promise<{ digest: string; uploaded: boolean }>;
+  /** Only the subject the digest is charged to, or an admin, may delete it. */
+  deleteConfigBundle(digest: string): Promise<void>;
 }
 
 export interface StreamTurnArgs {

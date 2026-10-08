@@ -57,6 +57,7 @@ export function fakeControlPlane(
     putCredential: async () => undefined,
     deleteCredential: async () => undefined,
     putConfigBundle: async (req) => ({ digest: req.digest, uploaded: true }),
+    deleteConfigBundle: async () => undefined,
   };
   const merged = { ...defaults, ...over };
   const recorded = Object.fromEntries(

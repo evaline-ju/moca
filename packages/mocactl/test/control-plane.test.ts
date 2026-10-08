@@ -117,6 +117,15 @@ describe('ControlPlaneClient', () => {
   });
 });
 
+it('deleteConfigBundle DELETEs the percent-encoded digest', async () => {
+  const { fetch, calls } = scriptedFetch(() => new Response(null, { status: 204 }));
+  await client(fetch).deleteConfigBundle('sha256:ab');
+  expect(calls[0]).toMatchObject({
+    method: 'DELETE',
+    url: 'http://cp/v1/config-bundles/sha256%3Aab',
+  });
+});
+
 it('putConfigBundle POSTs digest and tar to /v1/config-bundles', async () => {
   const { fetch, calls } = scriptedFetch(json({ digest: 'sha256:x', uploaded: true }, 201));
   expect(await client(fetch).putConfigBundle({ digest: 'sha256:x', tar: 'AAAA' })).toEqual({

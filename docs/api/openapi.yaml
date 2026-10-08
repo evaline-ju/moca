@@ -585,6 +585,35 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+  /v1/config-bundles/{digest}:
+    delete:
+      operationId: deleteConfigBundle
+      summary: Delete a stored config bundle and free its budget (ADR-0038)
+      description: |
+        Allowed to the subject the digest is charged to (its first uploader) or an `admin`. A bundle
+        stored without a budget entry (ADR-0030 `/promote`) is admin-only. Sessions created on the
+        bundle get `410 config_bundle_not_found` on their next turn, as for an expired one.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - name: digest
+          in: path
+          required: true
+          description: percent-encode the `:`
+          schema: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+      responses:
+        '204': { description: deleted }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: '`forbidden`: the digest is charged to another subject and the caller is no admin'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`config_bundle_not_found`: no bundle and no budget entry for that digest'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /internal/credentials:
     post:
       operationId: exchangeCredential

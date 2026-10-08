@@ -220,6 +220,17 @@ describe('main', () => {
     expect(USAGE).toContain('mocactl promote DIR [--dry-run] [--json]');
   });
 
+  it('bundles delete needs exactly one digest, and bundles has no other subcommand', async () => {
+    expect(await main(['bundles', 'delete'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
+    expect(await main(['bundles', 'delete', 'a', 'b'], {}, io(), { buildRuntime: fakeBuild })).toBe(
+      2,
+    );
+    const o = io();
+    expect(await main(['bundles', 'list'], {}, o, { buildRuntime: fakeBuild })).toBe(2);
+    expect(o.errs.join('')).toContain('unknown bundles command "list"');
+    expect(USAGE).toContain('mocactl bundles delete DIGEST [--json]');
+  });
+
   it('promote needs exactly one directory', async () => {
     expect(await main(['promote'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
     expect(await main(['promote', 'a', 'b'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);

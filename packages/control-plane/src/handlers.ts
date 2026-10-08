@@ -9,6 +9,8 @@ import {
 } from '@moca/config-bundle';
 import {
   admitBundle,
+  bundleOwnerHash,
+  dropBundleEntry,
   MIN_BUNDLE_CHARGE_BYTES,
   recordBundle,
   refreshBundle,
@@ -18,6 +20,7 @@ import {
   type BundleBudgetRedisLike,
 } from './bundle-budget.js';
 import { CpError } from './errors.js';
+import { subjectHash } from './subject-document.js';
 import {
   resolveInferenceName,
   parseCredentialBody,
@@ -252,7 +255,7 @@ async function storeConfigBundle(
       (await withBundleLock(async () => {
         if (await refreshed()) return false; // stored by a concurrent upload while we queued
         const charged = Math.max(value.length, MIN_BUNDLE_CHARGE_BYTES);
-        await admitBundle(deps.bundles, limits, p.sub, charged, nowMs);
+        await admitBundle(deps.bundles, limits, p.sub, digest, charged, nowMs);
         // Charged before the SET, so a stored bundle is never left uncharged. A record that fails
         // partway is rolled back too, so it leaves no phantom charge on the budget.
         try {
@@ -611,6 +614,52 @@ export const HANDLERS: Record<string, Handler> = {
       }
       throw err;
     }
+  },
+
+  /**
+   * Frees budget: the subject the digest is charged to, or an admin, may delete it. Sessions still
+   * naming it get 410 on their next turn, as for an expired bundle. A 403 for someone else's digest
+   * reveals nothing an upload does not: re-uploading any digest already says whether it is stored.
+   */
+  deleteConfigBundle: async (ctx, deps) => {
+    const p = requirePrincipal(ctx);
+    const digest = ctx.params.digest ?? '';
+    try {
+      assertValidDigest(digest);
+    } catch {
+      throw new CpError('invalid_request', 'digest must be sha256:<64 lowercase hex>');
+    }
+    const key = bundleKey(digest);
+    try {
+      await withBundleLock(async () => {
+        const stored = (await deps.bundles.exists(key)) > 0;
+        const owner = await bundleOwnerHash(deps.bundles, digest);
+        if (!stored && owner === null) {
+          throw new CpError('config_bundle_not_found', 'no config bundle with that digest');
+        }
+        // A bundle with no budget entry was stored by /promote straight into Redis: nobody's to delete.
+        if (!(p.roles ?? []).includes('admin') && owner !== subjectHash(p.sub)) {
+          throw new CpError(
+            'forbidden',
+            'only the subject that uploaded this bundle, or an admin, may delete it',
+          );
+        }
+        await deps.bundles.del(key);
+        await dropBundleEntry(deps.bundles, digest);
+      });
+    } catch (err) {
+      if (err instanceof CpError) throw err;
+      console.error(
+        `[control-plane] deleteConfigBundle configRef=${digest}: ${(err as Error)?.message ?? String(err)}`,
+      );
+      throw new CpError('redis_unavailable', 'redis is not answering');
+    }
+    await auditBestEffort(deps, 'deleteConfigBundle', `configRef=${digest}`, {
+      subject: p.sub,
+      configRef: digest,
+      decision: 'config_bundle_deleted',
+    });
+    return { status: 204, body: undefined };
   },
 
   getSessionResources: async (ctx, deps) => {
