@@ -501,8 +501,8 @@ export NODE_EXTRA_CA_CERTS=<the CA file>
 export SH_CONTROL_PLANE_URL=https://moca-control-plane-moca.<apps domain>
 ```
 
-The API token lasts an hour (`SH_API_TOKEN_TTL_SECONDS` is not set by `setup.sh`). Log in close to
-the start of the acts. `MOCA_TENANCY` is unset, as on the VM demo; see its note on tenancy.
+`mocactl` renews its 15-minute API token by itself, for 30 days after its last use (90 at most), so
+one login before the acts is enough. `MOCA_TENANCY` is unset, as on the VM demo; see its note on tenancy.
 
 **L4 baseline (operator), before act 1.** Record the supervisor's counters:
 
@@ -628,8 +628,8 @@ rm -f "$HDR"; kill "$PF"
 Each delete answers 204.
 
 **On each laptop,** delete the run's sessions (`mocactl sessions delete ID`) and credentials
-(`mocactl credentials delete NAME`), and remove
-`"${XDG_CONFIG_HOME:-$HOME/.config}/mocactl/auth.json"` to log out. On the cluster, delete the
+(`mocactl credentials delete NAME`), and run
+`mocactl logout` (it revokes the login on the control plane and deletes `auth.json`). On the cluster, delete the
 three namespaces (`moca`, `moca-sandbox`, `moca-credentials`); deleting `moca` deletes the Redis
 PVC with it. The `nonroot-v2` grants are cluster objects:
 `oc adm policy remove-scc-from-user nonroot-v2 -z <sa> -n <ns>` for each ServiceAccount.
