@@ -10,6 +10,7 @@ import {
   type ExecClientLike,
 } from '@moca/k8s-sandbox';
 import { RedisLeaseStore, type LeaseStore } from './sandbox-lease.js';
+import { stripTrailingSlashes } from './strip-trailing-slashes.js';
 import { RedisRecordStore, type RecordStore, type SandboxRecord } from './pool-records.js';
 import {
   affinityTimings,
@@ -400,7 +401,7 @@ export function sessionPodCwd(
   sessionId: string,
 ): string {
   if (!rec?.capabilities.includes(WORKSPACE_SUBDIR_CAPABILITY)) return podCwd;
-  return `${podCwd.replace(/\/+$/, '')}/${sessionId}`;
+  return `${stripTrailingSlashes(podCwd)}/${sessionId}`;
 }
 
 export interface WorkspaceReset {
