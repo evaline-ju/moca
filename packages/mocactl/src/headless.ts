@@ -120,7 +120,7 @@ export async function cmdLogout(rt: Runtime, io: Io, opts: { all: boolean }): Pr
     setAuth(rt, null);
     io.err(
       `logged out of this machine, but the control plane did not confirm: ${describeError(err)} — ` +
-        'the login stays valid there until it expires, or until `mocactl logout --all` succeeds',
+        'the login stays valid there until it expires; to end it now, run `mocactl login` and then `mocactl logout --all`',
     );
     return 1;
   }

@@ -606,6 +606,35 @@ describe('mocactl logout', () => {
     const o = io();
     expect(await cmdLogout(rt, o, { all: false })).toBe(1);
     expect(loadAuth(rt.paths, 'http://cp')).toBeNull();
-    expect(o.stderr.join('')).toMatch(/logout --all/);
+    expect(o.stderr.join('')).toMatch(/mocactl login.*logout --all/);
+  });
+
+  it('--all refreshes an expired API token before revoking every login', async () => {
+    const rt = testRuntime();
+    const nowSec = Math.floor(rt.now() / 1000);
+    const auth = {
+      ...rt.auth!,
+      expiresAt: nowSec - 60,
+      refreshToken: 'mrt_cur',
+      refreshExpiresAt: nowSec + 86_400,
+    };
+    saveAuth(rt.paths, auth);
+    rt.auth = auth;
+    rt.cp = fakeControlPlane({
+      refreshAuth: async () => ({
+        token: 'api-new',
+        subject: 'github:1',
+        roles: [],
+        expiresAt: nowSec + 900,
+        refreshToken: 'mrt_new',
+        refreshExpiresAt: auth.refreshExpiresAt,
+      }),
+      revokeAllAuth: async () => 2,
+    });
+    expect(await cmdLogout(rt, io(), { all: true })).toBe(0);
+    const calls = (rt.cp as ReturnType<typeof fakeControlPlane>).calls;
+    expect(calls.indexOf('refreshAuth')).toBeGreaterThanOrEqual(0);
+    expect(calls.indexOf('refreshAuth')).toBeLessThan(calls.indexOf('revokeAllAuth'));
+    expect(loadAuth(rt.paths, 'http://cp')).toBeNull();
   });
 });
