@@ -69,6 +69,8 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s base: control plane', () => {
       'SH_ADMIN_SUBJECTS',
       'SH_PUBLIC_HARNESS_URL',
       'SH_ALLOW_OPERATOR_FALLBACK',
+      'SH_API_TOKEN_TTL_SECONDS',
+      'SH_SESSION_TOKEN_TTL_SECONDS',
     ]) {
       expect(envVar(cp(), k)).toEqual({
         name: k,

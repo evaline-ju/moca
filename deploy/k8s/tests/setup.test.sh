@@ -388,10 +388,10 @@ grep -q "^kubectl --context kind-moca apply -k $REPO/deploy/k8s/.generated/kind\
 grep -q '^  - ../../overlays/kind$' "$MOCK_STATE/applied-kustomization.yaml" || fail 'the generated overlay does not build on overlays/kind'
 [[ "$(setting SH_PUBLIC_HARNESS_URL)" == http://127.0.0.1:8080 ]] || fail 'kind advertises the wrong harness URL'
 # The control plane's configMapKeyRefs are not optional, bar the two tier keys: a missing key stops
-# the pod opaquely. The tier keys are written on every run too ('' when untiered, as here), so the
-# hash input is the same six keys on every stack.
-[[ "$(jq -c '.data | keys' "$MOCK_STATE/moca__ConfigMap__moca-settings.json")" == '["SH_ADMIN_SUBJECTS","SH_ALLOW_OPERATOR_FALLBACK","SH_GITHUB_CLIENT_ID","SH_PUBLIC_HARNESS_URL","SH_SANDBOX_DEFAULT_TIER","SH_SANDBOX_TIERS"]' ]] ||
-  fail 'moca-settings must hold exactly the six keys the control plane and the supervisor reference'
+# the pod opaquely. The tier keys and the token lifetimes are written on every run too ('' when
+# untiered or defaulted, as here), so the hash input is the same eight keys on every stack.
+[[ "$(jq -c '.data | keys' "$MOCK_STATE/moca__ConfigMap__moca-settings.json")" == '["SH_ADMIN_SUBJECTS","SH_ALLOW_OPERATOR_FALLBACK","SH_API_TOKEN_TTL_SECONDS","SH_GITHUB_CLIENT_ID","SH_PUBLIC_HARNESS_URL","SH_SANDBOX_DEFAULT_TIER","SH_SANDBOX_TIERS","SH_SESSION_TOKEN_TTL_SECONDS"]' ]] ||
+  fail 'moca-settings must hold exactly the eight keys the control plane and the supervisor reference'
 [[ -z "$(setting SH_SANDBOX_TIERS)" && -z "$(setting SH_SANDBOX_DEFAULT_TIER)" ]] || fail 'kind is never tiered'
 expect_out 'port-forward svc/moca-supervisor 8080:8080'
 pass 'kind: generated overlay applied; control plane held at 0 without a client id; access printed'
@@ -1092,8 +1092,8 @@ jq -nc '{apiVersion: "v1", kind: "Secret", metadata: {name: "op-cert", namespace
 for k in SH_SINGLE_NAMESPACE SH_ROUTE_DOMAIN SH_TLS_SECRET SH_SANDBOX_DEFAULT_TIER SH_SANDBOX_COUNT; do
   setup_cm moca-single | jq -e --arg k "$k" '.data | has($k)' >/dev/null || fail "ocp-single with Routes: moca-setup lacks $k"
 done
-[[ "$(jq -r '.data | keys | length' "$MOCK_STATE/moca-single__ConfigMap__moca-settings.json")" == 6 ]] ||
-  fail 'ocp-single with Routes: moca-settings does not hold exactly six keys'
+[[ "$(jq -r '.data | keys | length' "$MOCK_STATE/moca-single__ConfigMap__moca-settings.json")" == 8 ]] ||
+  fail 'ocp-single with Routes: moca-settings does not hold exactly eight keys'
 [[ "$(jq -r '.data.SH_PUBLIC_HARNESS_URL' "$MOCK_STATE/moca-single__ConfigMap__moca-settings.json")" == https://moca.example.test ]] ||
   fail 'ocp-single with Routes: SH_PUBLIC_HARNESS_URL is not the supervisor Route'
 [[ "$(annotation_adds moca-control-plane)" == 1 && "$(annotation_adds moca-supervisor)" == 1 ]] ||
@@ -1149,5 +1149,127 @@ reset_state
 [[ "$(egress_adds)" == 1 ]] || fail 'ocp-single: SH_SANDBOX_EGRESS_EXCEPT did not patch the sandbox policy'
 [[ "$(egress_stored moca-tenant-1)" == 203.0.113.0/24 ]] || fail 'ocp-single did not record SH_SANDBOX_EGRESS_EXCEPT'
 pass 'ocp-single: SH_SANDBOX_EGRESS_EXCEPT is rendered and recorded in its namespace'
+
+echo "== #432: the combined trust file, the trust line on every run, settable token lifetimes"
+# pem_count FILE: the certificates FILE PARSES to -- not its BEGIN lines, which still count two
+# PEMs glued onto one line (END----------BEGIN), a file OpenSSL and Node reject whole.
+pem_count() {
+  openssl crl2pkcs7 -nocrl -certfile "$1" 2>/dev/null | openssl pkcs7 -print_certs -noout 2>/dev/null |
+    grep -c '^subject=' || true
+}
+GEN_OCP="$REPO/deploy/k8s/.generated/ocp"
+# The cluster's ingress CA, as openshift-config-managed/default-ingress-cert holds it.
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=ingress-operator@test' \
+  -keyout "$TMP/ingress.key" -out "$TMP/ingress.crt" 2>/dev/null
+seed_ingress_ca() {
+  jq -n --rawfile c "$TMP/ingress.crt" '{apiVersion: "v1", kind: "ConfigMap",
+    metadata: {name: "default-ingress-cert", namespace: "openshift-config-managed"}, data: {"ca-bundle.crt": $c}}' \
+    >"$MOCK_STATE/openshift-config-managed__ConfigMap__default-ingress-cert.json"
+}
+reset_state
+seed_ingress_ca
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp)
+[[ "$(pem_count "$GEN_OCP/moca-ca.crt")" == 2 ]] || fail 'moca-ca.crt must hold the supervisor certificate and the ingress CA'
+grep -qF "$(sed -n 2p "$TMP/ingress.crt")" "$GEN_OCP/moca-ca.crt" || fail 'moca-ca.crt lacks the ingress CA'
+grep -qF "$(sed -n 2p "$GEN_OCP/moca-supervisor-ca.crt")" "$GEN_OCP/moca-ca.crt" || fail 'moca-ca.crt lacks the supervisor certificate'
+! grep -q 'END CERTIFICATE-----.' "$GEN_OCP/moca-ca.crt" || fail 'moca-ca.crt glues a PEM onto an END line'
+expect_out "export NODE_EXTRA_CA_CERTS=$GEN_OCP/moca-ca.crt"
+pass 'ocp: moca-ca.crt holds the self-signed supervisor certificate and the ingress CA, and the run names it'
+
+: >"$MOCK_LOG"
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp)
+! grep -q 'create secret tls' "$MOCK_LOG" || fail 'a re-run replaced the TLS Secret'
+expect_out "export NODE_EXTRA_CA_CERTS=$GEN_OCP/moca-ca.crt"
+expect_out 'SELF-SIGNED'
+# A second checkout: no local CA file, the Secret is the only record of the certificate.
+sup_crt="$(sv moca moca-supervisor-tls tls.crt)"
+rm -rf "$GEN_OCP"
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp)
+# Byte for byte, final newline included: $(cat ...) would strip it, and a file without one glues
+# the next PEM onto its END line in moca-ca.crt.
+printf '%s\n' "$sup_crt" | cmp -s - "$GEN_OCP/moca-supervisor-ca.crt" || fail 'the CA file is not the Secret tls.crt, newline-terminated'
+[[ "$(pem_count "$GEN_OCP/moca-ca.crt")" == 2 ]] || fail 'a second checkout did not rebuild moca-ca.crt'
+expect_out "export NODE_EXTRA_CA_CERTS=$GEN_OCP/moca-ca.crt"
+pass 'ocp: the trust line is printed on every run, and a second checkout rebuilds the files from the Secret'
+
+# An operator certificate that chains to an issuer: nothing of the supervisor's needs trusting, so
+# only the ingress CA is in the file, and the line says so.
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=test-ca' -keyout "$TMP/ca.key" -out "$TMP/ca.crt" 2>/dev/null
+openssl req -newkey rsa:2048 -nodes -subj '/CN=moca-moca.apps.example.test' -keyout "$TMP/leaf.key" -out "$TMP/leaf.csr" 2>/dev/null
+openssl x509 -req -in "$TMP/leaf.csr" -CA "$TMP/ca.crt" -CAkey "$TMP/ca.key" -CAcreateserial -days 1 -out "$TMP/leaf.crt" 2>/dev/null
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp --tls-cert "$TMP/leaf.crt" --tls-key "$TMP/leaf.key")
+[[ ! -e "$GEN_OCP/moca-supervisor-ca.crt" ]] || fail 'an issued operator certificate left a supervisor CA file'
+[[ "$(pem_count "$GEN_OCP/moca-ca.crt")" == 1 ]] || fail 'with an issued operator certificate moca-ca.crt must hold the ingress CA alone'
+! grep -q 'SELF-SIGNED' "$TMP/out" || fail 'an issued operator certificate was called self-signed'
+expect_out "ingress certificate"
+expect_out "export NODE_EXTRA_CA_CERTS=$GEN_OCP/moca-ca.crt"
+pass 'ocp: with an issued --tls-cert, moca-ca.crt is the ingress CA alone and nothing is called self-signed'
+
+# A tls.crt that does not parse is said, not silently treated as an issued certificate.
+jq '.data["tls.crt"] = "Y3J0"' "$MOCK_STATE/moca__Secret__moca-supervisor-tls.json" >"$TMP/s" &&
+  mv "$TMP/s" "$MOCK_STATE/moca__Secret__moca-supervisor-tls.json"
+rm -f "$MOCK_STATE/openshift-config-managed__ConfigMap__default-ingress-cert.json"
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp)
+expect_out 'Secret moca-supervisor-tls holds no readable certificate'
+expect_out 'default-ingress-cert is missing or has no ca-bundle.crt'
+[[ ! -e "$GEN_OCP/moca-ca.crt" ]] || fail 'with nothing to trust, moca-ca.crt was still written'
+pass 'ocp: an unreadable supervisor certificate and a missing ingress CA are both said'
+
+# The ingress CA is best effort: unreadable, the file still carries the supervisor's, and the run says so.
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a MOCK_GET_CM_FAIL=default-ingress-cert; expect_ok --target ocp)
+[[ "$(pem_count "$GEN_OCP/moca-ca.crt")" == 1 ]] || fail 'without the ingress CA, moca-ca.crt must still hold the supervisor certificate'
+expect_out 'could not read openshift-config-managed/default-ingress-cert'
+expect_out "export NODE_EXTRA_CA_CERTS=$GEN_OCP/moca-ca.crt"
+pass 'ocp: an unreadable ingress CA is a warning, not a failure'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=example.test; expect_ok --target ocp-single)
+: >"$MOCK_LOG"
+(unset SH_ROUTE_DOMAIN; export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp-single)
+! grep -q 'create secret tls' "$MOCK_LOG" || fail 'an ocp-single re-run replaced the TLS Secret'
+expect_out "export NODE_EXTRA_CA_CERTS=$REPO/deploy/k8s/.generated/ocp-single/moca-supervisor-ca.crt"
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=; expect_ok --target ocp-single)
+! grep -q 'NODE_EXTRA_CA_CERTS' "$TMP/out" || fail 'ocp-single without Routes still printed a trust line'
+pass 'ocp-single: the trust line is printed on every run with Routes, and not without them'
+
+# The token lifetimes: sticky settings, like the others.
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_API_TOKEN_TTL_SECONDS=28800 SH_SESSION_TOKEN_TTL_SECONDS=600; expect_ok --target kind --skip-build)
+[[ "$(setting SH_API_TOKEN_TTL_SECONDS)" == 28800 && "$(setting SH_SESSION_TOKEN_TTL_SECONDS)" == 600 ]] ||
+  fail 'the token lifetimes were not written to moca-settings'
+h_ttl="$(settings_hash)"
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
+[[ "$(setting SH_API_TOKEN_TTL_SECONDS)" == 28800 && "$(setting SH_SESSION_TOKEN_TTL_SECONDS)" == 600 ]] ||
+  fail 'a re-run without the token lifetimes dropped them'
+[[ "$(settings_hash)" == "$h_ttl" ]] || fail 'an unchanged re-run changed the settings hash'
+! grep -q 'over 7 days' "$TMP/out" || fail 'an 8-hour API token lifetime was warned about'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_API_TOKEN_TTL_SECONDS=2592000; expect_ok --target kind --skip-build)
+expect_out 'SH_API_TOKEN_TTL_SECONDS=2592000 is over 7 days'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_API_TOKEN_TTL_SECONDS=28800; expect_ok --target kind --skip-build)
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_API_TOKEN_TTL_SECONDS=; expect_ok --target kind --skip-build)
+[[ -z "$(setting SH_API_TOKEN_TTL_SECONDS)" && "$(setting SH_SESSION_TOKEN_TTL_SECONDS)" == 600 ]] ||
+  fail 'SH_API_TOKEN_TTL_SECONDS= did not clear only the API token lifetime'
+[[ "$(settings_hash)" != "$h_ttl" ]] || fail 'a changed token lifetime did not change the settings hash (the control plane would not roll)'
+grep -q 'key: SH_API_TOKEN_TTL_SECONDS' "$REPO/deploy/k8s/base/control-plane.yaml" &&
+  grep -q 'key: SH_SESSION_TOKEN_TTL_SECONDS' "$REPO/deploy/k8s/base/control-plane.yaml" ||
+  fail 'the control plane does not read the token lifetimes from moca-settings'
+pass 'SH_API_TOKEN_TTL_SECONDS and SH_SESSION_TOKEN_TTL_SECONDS are sticky settings; empty is the default; a change rolls; over 7 days warns'
+
+for bad in 0 -5 1h 3600.5 123456789; do
+  reset_state
+  (export SH_GITHUB_CLIENT_ID=Iv1.a SH_API_TOKEN_TTL_SECONDS="$bad"; expect_fail --target kind --skip-build)
+  expect_out "SH_API_TOKEN_TTL_SECONDS='$bad'"
+  ! grep -q '^kubectl .*apply' "$MOCK_LOG" || fail "SH_API_TOKEN_TTL_SECONDS='$bad' reached kubectl apply"
+done
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_SESSION_TOKEN_TTL_SECONDS=5m; expect_fail --target kind --skip-build)
+expect_out "SH_SESSION_TOKEN_TTL_SECONDS='5m'"
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
+jq '.data.SH_SESSION_TOKEN_TTL_SECONDS = "5m"' "$MOCK_STATE/moca__ConfigMap__moca-settings.json" >"$TMP/cm" &&
+  mv "$TMP/cm" "$MOCK_STATE/moca__ConfigMap__moca-settings.json"
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_fail --target kind --skip-build)
+expect_out "moca-settings holds SH_SESSION_TOKEN_TTL_SECONDS='5m'"
+pass 'a malformed token lifetime is refused, given (before any apply) or stored'
 
 echo "setup.test.sh: all passed"
