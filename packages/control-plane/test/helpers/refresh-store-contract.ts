@@ -29,7 +29,10 @@ export function refreshStoreContract(name: string, make: MakeStore): void {
   describe(`RefreshStore contract: ${name}`, () => {
     let h: Awaited<ReturnType<MakeStore>>;
     const setup = async (policy: RefreshPolicy = POLICY) => (h = await make(policy));
-    afterEach(async () => h?.done());
+    afterEach(async () => {
+      await h?.done();
+      h = undefined as any;
+    });
     const login = (subject = 'github:1', nowMs = T0) =>
       h.store.issue({ subject, displayName: 'Ada', label: 'laptop', nowMs });
 
@@ -52,16 +55,27 @@ export function refreshStoreContract(name: string, make: MakeStore): void {
         family: i.family,
         subject: 'github:1',
         graceReplay: false,
+        absExpS: i.absExpS,
       });
       if (!r1.ok) throw new Error('unreachable');
       expect(r1.refreshToken).not.toBe(i.refreshToken);
       expect(r1.displayName).toBe('Ada');
       const r2 = await h.store.rotate(r1.refreshToken, T0 + 120 * S);
-      expect(r2.ok).toBe(true);
-      expect(decisions(await h.audit())).toEqual([
-        'refresh_issued:',
-        'refresh_rotated:',
-        'refresh_rotated:',
+      expect(r2).toMatchObject({ ok: true, absExpS: i.absExpS });
+      expect(await h.audit()).toEqual([
+        { ts: String(T0), subject: 'github:1', decision: 'refresh_issued', family: i.family },
+        {
+          ts: String(T0 + 60 * S),
+          subject: 'github:1',
+          decision: 'refresh_rotated',
+          family: i.family,
+        },
+        {
+          ts: String(T0 + 120 * S),
+          subject: 'github:1',
+          decision: 'refresh_rotated',
+          family: i.family,
+        },
       ]);
     });
 
@@ -69,13 +83,36 @@ export function refreshStoreContract(name: string, make: MakeStore): void {
       await setup();
       const i = await login();
       const r1 = await h.store.rotate(i.refreshToken, T0);
+      if (!r1.ok) throw new Error('unreachable');
       const again = await h.store.rotate(i.refreshToken, T0 + 10 * S);
-      expect(again).toMatchObject({ ok: true, graceReplay: true });
-      if (!r1.ok || !again.ok) throw new Error('unreachable');
+      expect(again).toMatchObject({ ok: true, graceReplay: true, absExpS: i.absExpS });
+      if (!again.ok) throw new Error('unreachable');
       expect(again.refreshToken).toBe(r1.refreshToken);
       // The family is still live: the successor keeps working.
-      expect((await h.store.rotate(r1.refreshToken, T0 + 20 * S)).ok).toBe(true);
-      expect(decisions(await h.audit())).toContain('refresh_rotated:grace_replay');
+      const r3 = await h.store.rotate(r1.refreshToken, T0 + 20 * S);
+      expect(r3).toMatchObject({ ok: true, absExpS: i.absExpS });
+      expect(await h.audit()).toEqual([
+        { ts: String(T0), subject: 'github:1', decision: 'refresh_issued', family: i.family },
+        {
+          ts: String(T0),
+          subject: 'github:1',
+          decision: 'refresh_rotated',
+          family: i.family,
+        },
+        {
+          ts: String(T0 + 10 * S),
+          subject: 'github:1',
+          decision: 'refresh_rotated',
+          family: i.family,
+          reason: 'grace_replay',
+        },
+        {
+          ts: String(T0 + 20 * S),
+          subject: 'github:1',
+          decision: 'refresh_rotated',
+          family: i.family,
+        },
+      ]);
     });
 
     it('revokes the family when the previous token comes back after the grace window', async () => {
@@ -92,9 +129,27 @@ export function refreshStoreContract(name: string, make: MakeStore): void {
         ok: false,
         reason: 'revoked',
       });
-      expect(decisions(await h.audit()).slice(-2)).toEqual([
-        'refresh_reuse_detected:',
-        'refresh_refused:revoked',
+      expect(await h.audit()).toEqual([
+        { ts: String(T0), subject: 'github:1', decision: 'refresh_issued', family: i.family },
+        {
+          ts: String(T0),
+          subject: 'github:1',
+          decision: 'refresh_rotated',
+          family: i.family,
+        },
+        {
+          ts: String(T0 + 31 * S),
+          subject: 'github:1',
+          decision: 'refresh_reuse_detected',
+          family: i.family,
+        },
+        {
+          ts: String(T0 + 32 * S),
+          subject: 'github:1',
+          decision: 'refresh_refused',
+          family: i.family,
+          reason: 'revoked',
+        },
       ]);
     });
 
@@ -120,10 +175,33 @@ export function refreshStoreContract(name: string, make: MakeStore): void {
       const r2 = await h.store.rotate(r1.refreshToken, T0 + 58 * DAY);
       expect(r2.ok).toBe(true);
       if (!r2.ok) throw new Error('unreachable');
-      expect(await h.store.rotate(r2.refreshToken, T0 + 88 * DAY)).toEqual({
+      const r3 = await h.store.rotate(r2.refreshToken, T0 + 88 * DAY);
+      expect(r3).toEqual({
         ok: false,
         reason: 'idle_expired',
       });
+      expect(await h.audit()).toEqual([
+        { ts: String(T0), subject: 'github:1', decision: 'refresh_issued', family: i.family },
+        {
+          ts: String(T0 + 29 * DAY),
+          subject: 'github:1',
+          decision: 'refresh_rotated',
+          family: i.family,
+        },
+        {
+          ts: String(T0 + 58 * DAY),
+          subject: 'github:1',
+          decision: 'refresh_rotated',
+          family: i.family,
+        },
+        {
+          ts: String(T0 + 88 * DAY),
+          subject: 'github:1',
+          decision: 'refresh_refused',
+          family: i.family,
+          reason: 'idle_expired',
+        },
+      ]);
     });
 
     it('never extends past the absolute limit, however often it is used', async () => {
@@ -131,10 +209,27 @@ export function refreshStoreContract(name: string, make: MakeStore): void {
       const i = await login();
       const r1 = await h.store.rotate(i.refreshToken, T0 + 9 * DAY);
       if (!r1.ok) throw new Error('unreachable');
-      expect(await h.store.rotate(r1.refreshToken, T0 + 15 * DAY)).toEqual({
+      const r2 = await h.store.rotate(r1.refreshToken, T0 + 15 * DAY);
+      expect(r2).toEqual({
         ok: false,
         reason: 'abs_expired',
       });
+      expect(await h.audit()).toEqual([
+        { ts: String(T0), subject: 'github:1', decision: 'refresh_issued', family: i.family },
+        {
+          ts: String(T0 + 9 * DAY),
+          subject: 'github:1',
+          decision: 'refresh_rotated',
+          family: i.family,
+        },
+        {
+          ts: String(T0 + 15 * DAY),
+          subject: 'github:1',
+          decision: 'refresh_refused',
+          family: i.family,
+          reason: 'abs_expired',
+        },
+      ]);
     });
 
     it('refuses an unknown token and audits it without a subject', async () => {
@@ -165,8 +260,28 @@ export function refreshStoreContract(name: string, make: MakeStore): void {
         ok: false,
         reason: 'revoked',
       });
-      expect(decisions(await h.audit()).filter((d) => d.startsWith('refresh_revoked'))).toEqual([
-        'refresh_revoked:logout',
+      expect(await h.audit()).toEqual([
+        { ts: String(T0), subject: 'github:1', decision: 'refresh_issued', family: i.family },
+        {
+          ts: String(T0),
+          subject: 'github:1',
+          decision: 'refresh_rotated',
+          family: i.family,
+        },
+        {
+          ts: String(T0 + S),
+          subject: 'github:1',
+          decision: 'refresh_revoked',
+          family: i.family,
+          reason: 'logout',
+        },
+        {
+          ts: String(T0 + 3 * S),
+          subject: 'github:1',
+          decision: 'refresh_refused',
+          family: i.family,
+          reason: 'revoked',
+        },
       ]);
     });
 
@@ -194,6 +309,150 @@ export function refreshStoreContract(name: string, make: MakeStore): void {
       );
       // Already-revoked families are not counted twice.
       expect(await h.store.revokeAllFor('github:1', T0 + 3 * S)).toBe(0);
+    });
+
+    it('checks revoked BEFORE grace: revoked token never gets a grace answer', async () => {
+      await setup();
+      const i = await login();
+      const r1 = await h.store.rotate(i.refreshToken, T0);
+      if (!r1.ok) throw new Error('unreachable');
+      await h.store.revoke(r1.refreshToken, T0 + S);
+      // Replay i (the predecessor) at T0+2s: inside the grace window, but family is revoked.
+      // §4.3 checks revoked before grace, so this should be 'revoked', not a grace answer.
+      const result = await h.store.rotate(i.refreshToken, T0 + 2 * S);
+      expect(result).toEqual({ ok: false, reason: 'revoked' });
+      expect(await h.audit()).toEqual([
+        { ts: String(T0), subject: 'github:1', decision: 'refresh_issued', family: i.family },
+        {
+          ts: String(T0),
+          subject: 'github:1',
+          decision: 'refresh_rotated',
+          family: i.family,
+        },
+        {
+          ts: String(T0 + S),
+          subject: 'github:1',
+          decision: 'refresh_revoked',
+          family: i.family,
+          reason: 'logout',
+        },
+        {
+          ts: String(T0 + 2 * S),
+          subject: 'github:1',
+          decision: 'refresh_refused',
+          family: i.family,
+          reason: 'revoked',
+        },
+      ]);
+    });
+
+    it('checks revoked BEFORE reuse: revoked family refuses reuse without refresh_reuse_detected', async () => {
+      await setup();
+      const i = await login();
+      const r1 = await h.store.rotate(i.refreshToken, T0);
+      if (!r1.ok) throw new Error('unreachable');
+      await h.store.revoke(r1.refreshToken, T0 + S);
+      // Replay i (the old token): after the grace window, would normally be reuse. But family is revoked.
+      // §4.3 checks revoked before reuse, so no refresh_reuse_detected; just refresh_refused:revoked.
+      const result = await h.store.rotate(i.refreshToken, T0 + 31 * S);
+      expect(result).toEqual({ ok: false, reason: 'revoked' });
+      const audit = await h.audit();
+      expect(audit.filter((e) => e.decision === 'refresh_reuse_detected')).toEqual([]);
+      expect(audit.filter((e) => e.decision === 'refresh_refused')).toEqual([
+        {
+          ts: String(T0 + 31 * S),
+          subject: 'github:1',
+          decision: 'refresh_refused',
+          family: i.family,
+          reason: 'revoked',
+        },
+      ]);
+    });
+
+    it('checks revoked BEFORE expiry: expiration does not matter if family is revoked', async () => {
+      await setup();
+      const i = await login();
+      await h.store.revoke(i.refreshToken, T0 + S);
+      // Try to rotate after the absolute expiry: revoked check comes first.
+      const result = await h.store.rotate(i.refreshToken, T0 + 91 * DAY);
+      expect(result).toEqual({ ok: false, reason: 'revoked' });
+    });
+
+    it('checks expiry BEFORE grace/reuse: absolute expiry blocks grace and reuse', async () => {
+      await setup({ idleTtlS: 60, maxTtlS: 60, graceS: 30 });
+      const i = await login();
+      const r1 = await h.store.rotate(i.refreshToken, T0 + 50 * S);
+      if (!r1.ok) throw new Error('unreachable');
+      // At T0+60s: absExp is reached. Replay i inside grace window: should be abs_expired, not grace.
+      const r2 = await h.store.rotate(i.refreshToken, T0 + 60 * S);
+      expect(r2).toEqual({ ok: false, reason: 'abs_expired' });
+      // At T0+90s: still expired. Replay i: should be abs_expired, not reuse (and family not marked reuse).
+      const r3 = await h.store.rotate(i.refreshToken, T0 + 90 * S);
+      expect(r3).toEqual({ ok: false, reason: 'abs_expired' });
+      // Verify no refresh_reuse_detected in audit: just two abs_expired refusals.
+      expect(await h.audit()).toEqual([
+        { ts: String(T0), subject: 'github:1', decision: 'refresh_issued', family: i.family },
+        {
+          ts: String(T0 + 50 * S),
+          subject: 'github:1',
+          decision: 'refresh_rotated',
+          family: i.family,
+        },
+        {
+          ts: String(T0 + 60 * S),
+          subject: 'github:1',
+          decision: 'refresh_refused',
+          family: i.family,
+          reason: 'abs_expired',
+        },
+        {
+          ts: String(T0 + 90 * S),
+          subject: 'github:1',
+          decision: 'refresh_refused',
+          family: i.family,
+          reason: 'abs_expired',
+        },
+      ]);
+    });
+
+    it('grace boundary: a replay at exactly T0+graceS (now == untilMs) is NOT a grace answer', async () => {
+      await setup();
+      const i = await login();
+      const r1 = await h.store.rotate(i.refreshToken, T0);
+      if (!r1.ok) throw new Error('unreachable');
+      // At T0+30s: exactly at the grace boundary (now == untilMs). Should be reuse, not grace.
+      const result = await h.store.rotate(i.refreshToken, T0 + 30 * S);
+      expect(result).toEqual({ ok: false, reason: 'reuse' });
+      expect(await h.audit()).toEqual([
+        { ts: String(T0), subject: 'github:1', decision: 'refresh_issued', family: i.family },
+        {
+          ts: String(T0),
+          subject: 'github:1',
+          decision: 'refresh_rotated',
+          family: i.family,
+        },
+        {
+          ts: String(T0 + 30 * S),
+          subject: 'github:1',
+          decision: 'refresh_reuse_detected',
+          family: i.family,
+        },
+      ]);
+    });
+
+    it('grace replay changes no state: idle is not slid by a grace answer', async () => {
+      await setup({ idleTtlS: 60, maxTtlS: 3600, graceS: 30 });
+      const i = await login();
+      const r1 = await h.store.rotate(i.refreshToken, T0);
+      if (!r1.ok) throw new Error('unreachable');
+      // Grace replay at T0+20s (inside window).
+      const grace = await h.store.rotate(i.refreshToken, T0 + 20 * S);
+      expect(grace).toMatchObject({ ok: true, graceReplay: true });
+      if (!grace.ok) throw new Error('unreachable');
+      // Now rotate the successor at T0+61s: should be idle_expired.
+      // If grace had slid idleExp, this would succeed. But it doesn't, so it expires.
+      const result = await h.store.rotate(r1.refreshToken, T0 + 61 * S);
+      expect(result).toEqual({ ok: false, reason: 'idle_expired' });
     });
 
     it('never writes a token or a hash into the audit stream', async () => {

@@ -196,6 +196,8 @@ export class MemoryRefreshStore implements RefreshStore {
     const f = this.families.get(fid);
     if (!f || f.revokedAt !== undefined) return false;
     f.revokedAt = nowMs;
+    // The revoked check (in rotate) precedes grace, so deleting the grace entry is garbage
+    // collection, not a semantic part of reuse detection.
     this.grace.delete(fid);
     this.record(nowMs, f.subject, 'refresh_revoked', fid, reason);
     return true;
