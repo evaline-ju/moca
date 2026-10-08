@@ -820,6 +820,41 @@ probe_capabilities() {
   printf '%s\n' "$out" | sed '/^$/d' | sort -u
 }
 
+# check_git_identity (#415): the P4-tier counterpart of the system gitconfig the sandbox
+# image bakes in. A git with no identity fails an agent's FIRST `git commit` with exit 128
+# -- observed live on the VM demo (docs/demos/vm-multi-user-demo.md, fix list 5, both P4
+# sessions), where each agent burned a tool call and a model round configuring one by hand.
+# The rootfs here is exported from that image (build-rootfs.sh), so the identity normally
+# arrives for free; this check exists so a rootfs built from an image that LOST its
+# /etc/gitconfig fails HERE, at build time, instead of in front of the next demo audience.
+#
+# Deliberately separate from probe_capabilities: that function's output is written
+# verbatim into the manifest's capabilities array, so folding an identity check into it
+# would either publish "MOCA sandbox" as a capability or hide the failure behind `|| true`.
+#
+# `user.useConfigOnly=true` inverts the check's failure mode: without it, an unconfigured
+# git quietly falls back to auto-guessing an identity from hostname/username, so the check
+# would pass on exactly the rootfs it exists to reject. With it, the commit itself fails
+# when nothing sets a name -- the same exit an agent's first commit would get. init +
+# --allow-empty commit is the smallest command sequence that performs a real commit: the
+# identity lookup is the only part that can fail on a sandbox that has git installed at
+# all, and /tmp is a tmpfs (init mounts it), so the throwaway repo leaves no trace.
+check_git_identity() {
+  local uds="$1"
+  local out rc
+  out="$("$STAGE/guest_client" -uds "$uds" -port 1024 -timeout-s 30 \
+    -command 'git init -q /tmp/id-check && cd /tmp/id-check && git -c user.useConfigOnly=true commit --allow-empty -m x 2>&1' \
+    2>/dev/null)" && rc=0 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "build-snapshot.sh: the guest git has no usable identity (exit $rc). An agent's" >&2
+    echo "  first \`git commit\` in this sandbox will fail with exit 128 until it configures" >&2
+    echo "  one itself (#415). The sandbox image should bake a system gitconfig" >&2
+    echo "  (/etc/gitconfig, user.name/user.email -- see remote-worker/Dockerfile); this" >&2
+    echo "  rootfs was built from an image without it. Guest output: $out" >&2
+    exit 1
+  fi
+}
+
 quiesce_guest() {
   local uds="$1"
   log "quiescing the guest before snapshotting"
@@ -1370,6 +1405,7 @@ boot_quiesce_snapshot_firecracker() {
 
   wait_for_agent "$vsock_uds" "$console_log"
   MANIFEST_CAPABILITIES="$(probe_capabilities "$vsock_uds")"
+  check_git_identity "$vsock_uds"
   quiesce_guest "$vsock_uds"
 
   log "snapshotting (PATCH /vm to pause, then PUT /snapshot/create; the VM stays paused because create has no resume field at all)"
@@ -1542,6 +1578,7 @@ boot_quiesce_snapshot_cloud_hypervisor() {
 
   wait_for_agent "$vsock_uds" "$console_log"
   MANIFEST_CAPABILITIES="$(probe_capabilities "$vsock_uds")"
+  check_git_identity "$vsock_uds"
   quiesce_guest "$vsock_uds"
 
   log "snapshotting (ch-remote pause + snapshot, no resume afterwards)"
