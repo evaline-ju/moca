@@ -2,12 +2,14 @@ import { parseArgs } from 'node:util';
 import { parseOptionFlags } from './core/session-options.js';
 import type { CredentialConsumer } from './api/types.js';
 import {
+  cmdAuthToken,
   cmdBundleDelete,
   cmdCredentialAdd,
   cmdCredentialDelete,
   cmdCredentials,
   cmdDoctor,
   cmdLogin,
+  cmdLogout,
   cmdPromote,
   cmdRun,
   cmdSessionDelete,
@@ -19,6 +21,9 @@ import { buildRuntime, ensureRuntimeAuth, type Runtime } from './runtime.js';
 export const USAGE = `usage:
   mocactl [--setup] [--no-animation]             interactive terminal UI
   mocactl login                                  log in with the GitHub device flow
+  mocactl logout [--all]                         end this login (--all: every login of yours)
+  mocactl auth token [--json]                    print a valid API token, refreshing if needed
+                                                 (exit 3: log in first; 4: control plane unreachable)
   mocactl doctor [--json]                        check the setup; one fix per failure
   mocactl run "prompt" [--session ID | --new] [--option key=value ...] [--json]
   mocactl run "prompt" --config DIGEST            start the new session with a promoted config bundle
@@ -88,6 +93,7 @@ export async function main(
         host: { type: 'string', multiple: true },
         endpoint: { type: 'string' },
         config: { type: 'string' },
+        all: { type: 'boolean' },
         setup: { type: 'boolean' },
         'no-animation': { type: 'boolean' },
         'dry-run': { type: 'boolean' },
@@ -124,6 +130,10 @@ export async function main(
     io.err(`--config only applies to \`mocactl run\`\n${USAGE}`);
     return 2;
   }
+  if (values.all !== undefined && command !== 'logout') {
+    io.err(`--all only applies to \`mocactl logout\`\n${USAGE}`);
+    return 2;
+  }
   // B14: refresh an expired API token once, up front, so every command's login check -- and the
   // interactive login screen -- sees the refreshed login rather than asking for a new one. `login`,
   // `logout` and `auth` manage the login themselves.
@@ -133,6 +143,15 @@ export async function main(
   switch (command) {
     case 'login':
       return cmdLogin(rt, io, deps.signal);
+    case 'logout':
+      if (rest.length > 0) return usage(io);
+      return cmdLogout(rt, io, { all: values.all === true });
+    case 'auth': {
+      const [sub, ...extra] = rest;
+      if (sub !== 'token') return sub === undefined ? usage(io) : unknown(io, 'auth', sub);
+      if (extra.length > 0) return usage(io);
+      return cmdAuthToken(rt, io, json);
+    }
     case 'doctor':
       return cmdDoctor(rt, io, json);
     case 'run': {

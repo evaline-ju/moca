@@ -83,6 +83,9 @@ mocactl login     # open the printed URL, enter the code
 mocactl           # first run: onboarding
 ```
 
+You stay logged in for 30 days after you last used `mocactl`, and 90 days at most. `mocactl logout`
+ends the login.
+
 Onboarding asks for the server URL (already filled in; press Enter). It skips login if you're
 already logged in, and then asks for an **inference credential**: the key and gateway your
 sessions use. For a LiteLLM-style gateway at `https://litellm.example.com`:

@@ -317,3 +317,14 @@ describe('B14: an expired login is refreshed before a command runs', () => {
     expect(rt.auth).not.toHaveProperty('refreshToken');
   });
 });
+
+describe('B14 commands', () => {
+  it('routes auth token and logout, and refuses their misuse', async () => {
+    expect(await main(['auth'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
+    expect(await main(['auth', 'nope'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
+    expect(await main(['logout', 'extra'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
+    expect(await main(['sessions', '--all'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
+    expect(USAGE).toContain('mocactl auth token');
+    expect(USAGE).toContain('mocactl logout [--all]');
+  });
+});
