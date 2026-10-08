@@ -150,9 +150,10 @@ re-running with just that one:
   `--image ghcr.io/rossoctl/moca:latest`), or delete the stored key:
   `kubectl -n moca patch configmap moca-setup --type=json -p '[{"op":"remove","path":"/data/IMAGE"}]'`.
   On Kind the images are never stored: the stack always runs the locally loaded `dev.local` tags.
-- On OpenShift, `SH_P4_SANDBOX_IDS` and `SH_SANDBOX_DEFAULT_TIER` (§11) live in `moca-setup` too,
-  and on `--target ocp-single` so do `SH_ROUTE_DOMAIN` and `--tls-secret` (§12.5). For the
-  variables, as for the settings, one set to empty clears the stored value.
+- `SH_SANDBOX_EGRESS_EXCEPT` (§6) lives in `moca-setup` on every target. On OpenShift,
+  `SH_P4_SANDBOX_IDS` and `SH_SANDBOX_DEFAULT_TIER` (§11) live there too, and on
+  `--target ocp-single` so do `SH_ROUTE_DOMAIN` and `--tls-secret` (§12.5). For the variables, as
+  for the settings, one set to empty clears the stored value.
 
 `kubectl -n moca get configmap moca-settings moca-setup -o yaml` shows what the next run will reuse.
 A failed read of either ConfigMap aborts the run rather than resetting the inputs.
@@ -289,7 +290,27 @@ DNS is `kube-system` port 53; the OCP overlay adds `openshift-dns` port 5353.
 
 The sandbox rule lets research turns reach the internet while blocking every cluster-internal
 address: Pod and Service CIDRs sit inside the private ranges on Kind and OCP. It also blocks cloud
-instance metadata, which the VM path leaves open (#357). The only Secret any MOCA object references
+instance metadata, which the VM path leaves open (#357).
+
+**A publicly routable node or infrastructure network is not covered.** The rule assumes everything
+that is not the internet uses one of those ranges. Some clusters put their nodes on a publicly
+routable range, and there the rule admits them: a sandbox can reach its node's kubelet (10250) and
+SSH (22), and other hosts on that network (§12.3, #446). Add those ranges with
+`SH_SANDBOX_EGRESS_EXCEPT`, a comma-separated list of IPv4 CIDRs appended to the `except` list on
+every target:
+
+```bash
+SH_SANDBOX_EGRESS_EXCEPT=203.0.113.0/24,198.51.100.0/24 deploy/k8s/setup.sh --target ocp ...
+```
+
+It is empty by default, so the rule is the one in the table. Each entry must be a canonical CIDR
+(network address, prefix 1-32) not already in the built-in list; setup.sh refuses anything else
+before it touches the cluster. It is sticky (section 2): a re-run keeps the list, and
+`SH_SANDBOX_EGRESS_EXCEPT=` clears it. Find the node network with
+`kubectl get nodes -o wide` (the `INTERNAL-IP` column) when you have node read access, or ask the
+cluster administrator when you do not (`--target ocp-single`).
+
+The only Secret any MOCA object references
 in the sandbox namespace is the attach token (OpenShift adds its own per-ServiceAccount pull Secrets
 there): the exec token, the Redis password and the MU1 keys never exist there. The manifest tests
 check that nothing in it references any other Secret.
@@ -987,8 +1008,7 @@ escape.
 publicly routable (non-RFC 1918) range, so the sandbox's internet rule admits it: the sandbox
 reached its node's kubelet (10250) and SSH (22). The `except` list covers RFC 1918, CGNAT and
 link-local only; on a cluster whose node or infrastructure network is publicly routable, add
-those CIDRs to the `except` list in `overlays/ocp-single/patch-policies.yaml` (there is no setup
-flag for it yet; #446).
+those CIDRs with `SH_SANDBOX_EGRESS_EXCEPT` (§6, #446).
 
 **A tenant `allow-same-namespace` policy** (ingress from any pod in the namespace, to every pod)
 was preinstalled. Policies are additive, so the overlay's ingress rules (the relay's
