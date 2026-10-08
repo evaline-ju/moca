@@ -46,6 +46,9 @@ export function makeDeps(
     config: {
       apiTokenTtlSeconds: 3600,
       sessionTokenTtlSeconds: 300,
+      refreshIdleTtlSeconds: 30 * 86_400,
+      refreshMaxTtlSeconds: 90 * 86_400,
+      refreshReuseGraceSeconds: 30,
       allowOperatorFallback: false,
       injectorConfigured: false,
       sandboxNamespace: 'default',

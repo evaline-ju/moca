@@ -40,6 +40,12 @@ import type { SandboxTiers } from './sandbox-tiers.js';
 export interface CpConfig {
   apiTokenTtlSeconds: number;
   sessionTokenTtlSeconds: number;
+  /** A refresh family dies this long after its last use (`SH_REFRESH_IDLE_TTL_SECONDS`, B14). */
+  refreshIdleTtlSeconds: number;
+  /** ...and this long after login, however often it is used (`SH_REFRESH_MAX_TTL_SECONDS`). */
+  refreshMaxTtlSeconds: number;
+  /** How long a just-superseded refresh token still gets its successor back (spec §4.3 step 4). */
+  refreshReuseGraceSeconds: number;
   /** The shared bearer the data plane presents to /internal/credentials (spec §5.3.1). */
   exchangeToken?: string;
   /** Deployment-level gateway origin, used when a credential carries no `endpoint` (spec §6.2). */

@@ -30,7 +30,7 @@ components:
       bearerFormat: JWT
       description: |
         Ed25519 (`alg: EdDSA`) JWT minted by the control plane. Two shapes: an API token
-        (`scope: ["api"]`, 1 hour) for `/v1` routes, and a session token (`scope: ["turn:write"]`
+        (`scope: ["api"]`, 15 minutes, renewed at /v1/auth/token) for `/v1` routes, and a session token (`scope: ["turn:write"]`
         plus `sid`, 5 minutes) for the data plane's `/turn`. No credential travels in the token.
     exchangeToken:
       type: http
@@ -65,6 +65,7 @@ components:
             - token_required
             - token_invalid
             - token_expired
+            - invalid_grant
             - subject_conflict
             - unauthorized
             - forbidden

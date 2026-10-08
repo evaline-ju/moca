@@ -89,9 +89,13 @@ export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
   required(env, 'SH_GITHUB_CLIENT_ID');
   keksFromBase64(required(env, 'SH_CREDENTIAL_KEK'));
   const config: CpConfig = {
-    apiTokenTtlSeconds: intEnv(env, 'SH_API_TOKEN_TTL_SECONDS', 3600),
+    // 15 minutes: API tokens stay stateless, so their lifetime IS the revocation latency (B14 §2).
+    apiTokenTtlSeconds: intEnv(env, 'SH_API_TOKEN_TTL_SECONDS', 900),
     // A session outlives a 5-minute token; POST /v1/sessions/{id}/token re-mints (spec §4.2).
     sessionTokenTtlSeconds: intEnv(env, 'SH_SESSION_TOKEN_TTL_SECONDS', 300),
+    refreshIdleTtlSeconds: intEnv(env, 'SH_REFRESH_IDLE_TTL_SECONDS', 30 * 86_400),
+    refreshMaxTtlSeconds: intEnv(env, 'SH_REFRESH_MAX_TTL_SECONDS', 90 * 86_400),
+    refreshReuseGraceSeconds: intEnv(env, 'SH_REFRESH_REUSE_GRACE_SECONDS', 30),
     exchangeToken: required(env, 'SH_EXCHANGE_TOKEN'),
     defaultInferenceEndpoint: env.SH_DEFAULT_INFERENCE_ENDPOINT || undefined,
     operatorInferenceToken: env.SH_OPERATOR_INFERENCE_TOKEN || undefined,
@@ -109,6 +113,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
     bundleTotalBytes: byteBudgetEnv(env, 'SH_BUNDLE_TOTAL_BYTES', 64 * 1024 * 1024),
   };
   checkInferenceConfig(config);
+  checkRefreshConfig(config);
   return config;
 }
 
@@ -123,6 +128,16 @@ function operatorHeaderFromEnv(env: NodeJS.ProcessEnv): InferenceAuthHeader {
     );
   }
   return v;
+}
+
+/** Refuse at BOOT refresh limits that contradict each other (B14 spec §4.6). Names, never values. */
+export function checkRefreshConfig(c: CpConfig): void {
+  if (c.refreshMaxTtlSeconds < c.refreshIdleTtlSeconds) {
+    throw new Error('SH_REFRESH_MAX_TTL_SECONDS must be at least SH_REFRESH_IDLE_TTL_SECONDS');
+  }
+  if (c.refreshReuseGraceSeconds > 300) {
+    throw new Error('SH_REFRESH_REUSE_GRACE_SECONDS must be at most 300');
+  }
 }
 
 /**
