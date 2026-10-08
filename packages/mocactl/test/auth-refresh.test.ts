@@ -1,8 +1,11 @@
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmdirSync,
+  rmSync,
   statSync,
   utimesSync,
   writeFileSync,
@@ -185,4 +188,56 @@ describe('ensureAuth', () => {
       expect(calls).toEqual([]);
     },
   );
+
+  it('releases only a lock that still carries its own token', async () => {
+    const { deps, paths } = setup({}, async () => {
+      // We are slow: a peer broke our lock and holds its own by the time we finish.
+      writeFileSync(authLockPath(paths), 'peer:token');
+      return next();
+    });
+    expect((await ensureAuth(deps)).kind).toBe('ok');
+    expect(readFileSync(authLockPath(paths), 'utf8')).toBe('peer:token');
+  });
+
+  it('a stale break does not remove a lock replaced after the age check', async () => {
+    const { deps, paths, calls } = setup();
+    const lock = authLockPath(paths);
+    writeFileSync(lock, 'old');
+    const old = (Date.now() - 60_000) / 1000;
+    utimesSync(lock, old, old);
+    deps.onStaleSeen = () => {
+      // A peer breaks the stale lock and takes a fresh one, between our stat and our break.
+      rmSync(lock);
+      writeFileSync(lock, 'peer:fresh');
+    };
+    expect(await ensureAuth(deps)).toMatchObject({ kind: 'unreachable' });
+    expect(calls).toEqual([]);
+    expect(readFileSync(lock, 'utf8')).toBe('peer:fresh');
+  });
+
+  it('a refresh that never answers is unreachable within the timeout, cache untouched', async () => {
+    const { deps, paths } = setup({}, () => new Promise(() => {}));
+    deps.refreshTimeoutMs = 50;
+    expect(await ensureAuth(deps)).toMatchObject({ kind: 'unreachable' });
+    expect(loadAuth(paths, CP)).toMatchObject({ apiToken: 'api-old', refreshToken: 'mrt_old' });
+    expect(existsSync(authLockPath(paths))).toBe(false);
+  });
+
+  it('a failed write of the rotated pair does not throw; the new token is still used', async () => {
+    const { deps, paths } = setup({}, async () => {
+      mkdirSync(`${paths.authFile}.${process.pid}.tmp`); // saveAuth cannot write its temp file
+      return next();
+    });
+    onTestFinished(() => rmdirSync(`${paths.authFile}.${process.pid}.tmp`));
+    expect(await ensureAuth(deps)).toMatchObject({ kind: 'ok', auth: { apiToken: 'api-new' } });
+  });
+
+  it('a failed write after invalid_grant still reports login_required, not a throw', async () => {
+    const { deps, paths } = setup({}, async () => {
+      mkdirSync(`${paths.authFile}.${process.pid}.tmp`);
+      throw new ApiError('control-plane', 400, 'invalid_grant');
+    });
+    onTestFinished(() => rmdirSync(`${paths.authFile}.${process.pid}.tmp`));
+    expect(await ensureAuth(deps)).toEqual({ kind: 'login_required' });
+  });
 });

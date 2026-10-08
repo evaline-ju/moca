@@ -1,4 +1,15 @@
-import { closeSync, mkdirSync, openSync, rmSync, statSync, writeSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import {
+  closeSync,
+  linkSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeSync,
+} from 'node:fs';
 import { dirname } from 'node:path';
 import { ApiError } from './api/errors.js';
 import type { ControlPlaneApi } from './api/types.js';
@@ -19,6 +30,11 @@ export const REFRESH_MARGIN_MS = 60_000;
 /** A lock this old belongs to a process that died; break it. Wall clock (see EnsureDeps.now). */
 export const STALE_LOCK_MS = 30_000;
 const LOCK_WAIT_MS = 10_000;
+/**
+ * A refresh that has not answered by now is given up on. It must stay below STALE_LOCK_MS: the lock's
+ * mtime is not renewed while we wait, and a peer may break the lock once it is older than that.
+ */
+export const REFRESH_TIMEOUT_MS = 20_000;
 
 export type EnsureResult =
   | { kind: 'ok'; auth: CachedAuth }
@@ -36,6 +52,10 @@ export interface EnsureDeps {
   now: () => number;
   sleep: (ms: number) => Promise<void>;
   lockWaitMs?: number;
+  /** Bound on the refresh call; default REFRESH_TIMEOUT_MS. Injectable so a test need not wait 20 s. */
+  refreshTimeoutMs?: number;
+  /** Test seam: runs between a lock's age check and its break. */
+  onStaleSeen?: () => void;
 }
 
 const fresh = (a: CachedAuth | null, nowMs: number): a is CachedAuth =>
@@ -70,16 +90,32 @@ export async function ensureAuth(
     if (!current?.refreshToken) return { kind: 'login_required' };
     let next: CachedAuth;
     try {
-      next = toCachedAuth(await deps.cp.refreshAuth(current.refreshToken), deps.controlPlaneUrl);
+      next = toCachedAuth(
+        await withTimeout(
+          deps.cp.refreshAuth(current.refreshToken),
+          deps.refreshTimeoutMs ?? REFRESH_TIMEOUT_MS,
+        ),
+        deps.controlPlaneUrl,
+      );
     } catch (err) {
       if (err instanceof ApiError && err.code === 'invalid_grant') {
         // Revoked, expired or replayed: it will never work again, so stop presenting it.
-        saveAuth(deps.paths, withoutRefresh(current));
+        try {
+          saveAuth(deps.paths, withoutRefresh(current));
+        } catch {
+          // Could not forget it: the next refresh is refused the same way. Login is needed either way.
+        }
         return { kind: 'login_required' };
       }
       return { kind: 'unreachable', error: err };
     }
-    saveAuth(deps.paths, next); // before anyone uses it
+    try {
+      saveAuth(deps.paths, next); // before anyone uses it
+    } catch {
+      // The server already rotated, so `next` is the only live pair and the API token in it is good.
+      // Failing here would throw it away; use it for this command. The disk still holds the spent
+      // refresh token, which the grace window can recover at worst (else: log in again).
+    }
     return { kind: 'ok', auth: next };
   } finally {
     lock.release();
@@ -94,15 +130,28 @@ export function withoutRefresh(auth: CachedAuth): CachedAuth {
   return rest;
 }
 
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`refresh timed out after ${ms} ms`)), ms);
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
+}
+
 type Lock = { release: () => void } | { error: unknown };
 
 /**
  * O_EXCL create; a stale lock is broken, a live one waited on up to lockWaitMs. Any other failure
  * (EACCES on the config dir, say) comes back as an error rather than a throw, so a command reports
  * it instead of dying with a stack trace.
+ *
+ * The lock holds a unique token and is only ever removed by someone who has checked it is the file
+ * they mean to remove: release deletes only a lock still carrying our token, and a stale lock is
+ * moved aside by an atomic rename (taking exactly the file at that moment) and re-checked there.
  */
 async function acquireLock(path: string, deps: EnsureDeps): Promise<Lock> {
   const deadline = Date.now() + (deps.lockWaitMs ?? LOCK_WAIT_MS);
+  const token = `${process.pid}:${randomBytes(8).toString('hex')}`;
   try {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   } catch (error) {
@@ -112,13 +161,13 @@ async function acquireLock(path: string, deps: EnsureDeps): Promise<Lock> {
     try {
       const fd = openSync(path, 'wx', 0o600);
       try {
-        writeSync(fd, String(process.pid)); // for a human reading the lock; nothing parses it
+        writeSync(fd, token);
       } catch {
-        // The lock is ours either way.
+        // The lock is ours either way; release then cannot prove it and leaves it to go stale.
       } finally {
         closeSync(fd);
       }
-      return { release: () => rmSync(path, { force: true }) };
+      return { release: () => releaseLock(path, token) };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return { error };
     }
@@ -129,12 +178,46 @@ async function acquireLock(path: string, deps: EnsureDeps): Promise<Lock> {
       continue; // released between our open and our stat: try again at once
     }
     if (ageMs > STALE_LOCK_MS) {
-      rmSync(path, { force: true });
+      deps.onStaleSeen?.();
+      breakStale(path);
       continue;
     }
     if (Date.now() >= deadline) {
       return { error: new Error('another mocactl is refreshing this login') };
     }
     await deps.sleep(50);
+  }
+}
+
+function releaseLock(path: string, token: string): void {
+  try {
+    // Not ours any more (we were slow, a peer broke the lock and took its own): leave it be.
+    if (readFileSync(path, 'utf8') === token) rmSync(path, { force: true });
+  } catch {
+    // Already gone.
+  }
+}
+
+/** Remove the lock at `path` only if the file actually taken is still stale; else put it back. */
+function breakStale(path: string): void {
+  const aside = `${path}.stale.${process.pid}.${randomBytes(4).toString('hex')}`;
+  try {
+    renameSync(path, aside);
+  } catch {
+    return; // a peer got there first
+  }
+  try {
+    if (Date.now() - statSync(aside).mtimeMs <= STALE_LOCK_MS) {
+      // The file was replaced by a live peer's after our age check, and we just took it: return it.
+      try {
+        linkSync(aside, path);
+      } catch {
+        // Someone created a new lock meanwhile; the displaced one's release will find it gone.
+      }
+    }
+  } catch {
+    // vanished
+  } finally {
+    rmSync(aside, { force: true });
   }
 }
