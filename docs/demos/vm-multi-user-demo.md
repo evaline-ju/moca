@@ -38,11 +38,12 @@ This demo still switches the host to P4 only for Act 4. Going back to containers
 `setup-vm.sh`, which recreates Redis and forgets every session (#410). Switching to P4 needs no
 re-run, so it is the one switch made during the demo.
 
-**Tenancy: `MOCA_TENANCY` unset (`single`), as `deploy/vm` ships it.** On this release `single`
+**Tenancy: `MOCA_TENANCY` unset (`single`), as `deploy/vm` ships it, at `v0.5.1`.** That release
 has no first-subject pin, so user 2 is served like user 1. Once MI1 S2's pin lands, `single`
-refuses every subject after the first (`403 single_tenant_deployment`), and this demo needs
-`MOCA_TENANCY=multi`, which needs MI1 S5's sandbox owner binding (#407). Record the commit you ran
-against (Act 5).
+refuses every subject after the first (`403 single_tenant_deployment`). `MOCA_TENANCY=multi` is not
+the fix until MI1 S5's sandbox owner binding, because until then users share sandbox containers.
+So run this demo against `v0.5.1` until S5, and on `main` under `multi` from S5 (#407; MI1 §6.6).
+Record the commit you ran against (Act 5).
 
 **Automated siblings.** Prefer these for a pass/fail; the demo is for convincing a room.
 
@@ -715,8 +716,8 @@ Say these in the room. They are what stops someone over-promising.
   trusted with every session. That is why 0c restricts the participants' accounts.
 - **Anyone with a GitHub account who reaches the control plane can log in.** There is no user
   allowlist: the SSH accounts are the gate.
-- **Tenancy as of this writing:** `MOCA_TENANCY` unset, with no first-subject pin. See the top of
-  this page for when that stops working (#407).
+- **Tenancy:** `MOCA_TENANCY` unset, at `v0.5.1`, with no first-subject pin. On a `main` past MI1
+  S2, user 2 gets `403 single_tenant_deployment`. See the top of this page (#407).
 - **A `setup-vm.sh` re-run forgets every session** (#410).
 - **Not performed:** two people on two laptops. The run was one person with two GitHub accounts.
 
@@ -736,7 +737,7 @@ to 9 come from the 2026-10-01 run.
 | 7   | **`research-smoke.sh` leaves its minted subject's empty record** in `/var/lib/moca-control-plane/`. It deletes the credential, session and files, but not the record.                                                                     | #418: delete it on exit, as `P4-ON-P6.md`'s cleanup does by hand for its subjects. |
 | 8   | **No headless view of a turn's tool calls.** 2a needs `--json` and `jq` to show the room the commands.                                                                                                                                    | #419: a `mocactl run --show-tools` would replace the filter.                       |
 | 9   | **One identity per `XDG_CONFIG_HOME`**, and the device flow approves for whichever account the browser is signed into. Playing two users on one machine needs two config directories and a private browser window (1a, 1b).               | #404: `mocactl --profile`.                                                         |
-| 10  | **MI1 S2's first-subject pin** will refuse user 2 under `single`.                                                                                                                                                                         | #407.                                                                              |
+| 10  | **MI1 S2's first-subject pin** will refuse user 2 under `single`.                                                                                                                                                                         | #407: `v0.5.1` until S5, then `multi`.                                             |
 
 ## Cleanup
 
