@@ -78,17 +78,21 @@ MI1's own principle (short lifetime bounds revocation latency) applied to the cl
 
 ### 4.2 Redis keyspace (beside `sh:cp:session:*`)
 
-| Key                                  | Type   | Fields / members                                                                                                                                           | TTL                                     |
-| ------------------------------------ | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
-| `sh:cp:refresh:family:<fid>`         | hash   | `subject`, `displayName`, `label`, `createdAt`, `absExp`, `idleExp`, `currentHash`, `prevHash`, `prevSuccessor`, `prevUntil`, `revokedAt`, `revokedReason` | `min(idleExp, absExp)`                  |
-| `sh:cp:refresh:token:<sha256>`       | string | `<fid>`                                                                                                                                                    | the family's remaining TTL when written |
-| `sh:cp:owner:<subjectHash>:families` | zset   | `<fid>` scored by `createdAt`                                                                                                                              | none (members pruned on read)           |
+| Key                                  | Type   | Fields / members                                                                                                             | TTL                                     |
+| ------------------------------------ | ------ | ---------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| `sh:cp:refresh:family:<fid>`         | hash   | `subject`, `displayName`, `label`, `createdAt`, `absExp`, `idleExp`, `currentHash`, `prevHash`, `revokedAt`, `revokedReason` | `min(idleExp, absExp)`                  |
+| `sh:cp:refresh:token:<sha256>`       | string | `<fid>`                                                                                                                      | the family's remaining TTL when written |
+| `sh:cp:refresh:grace:<fid>`          | string | the plaintext successor of `prevHash`                                                                                        | the grace window (PX)                   |
+| `sh:cp:owner:<subjectHash>:families` | zset   | `<fid>` scored by `createdAt`                                                                                                | none (members pruned on read)           |
 
 - `fid` is a random UUID. `label` is a client-supplied hint (`mocactl` sends the hostname), capped at 64
   characters, shown in `mocactl doctor`; it is never trusted for anything.
-- `prevSuccessor` holds the **plaintext** successor refresh token for at most the grace window, so a
-  retried request can be answered identically (§4.3). It is deleted when `prevUntil` passes or on the
-  next rotation, and the whole hash expires with the family.
+- The grace key holds the **plaintext** successor so a retried request can be answered identically
+  (§4.3). It is a separate key with a `PX` of the grace window, so Redis drops it after 30 s: the
+  successor is the family's _current_ token, and keeping it in the family hash would leave a usable
+  credential at rest for the whole idle limit, undoing the hashing.
+- Every key is built from a prefix, `sh:cp:` by default (giving `sh:cp:audit` for the audit stream).
+  The real-Redis conformance suite passes a unique prefix so it runs isolated in a shared Redis.
 - Token keys are **never deleted**, only expired: each is written with the family's remaining TTL at
   that moment. Revoking a family sets `revokedAt` and nothing else, so a later replay of any of its
   tokens is recognised as `revoked` or reuse, not `unknown`. An active family accumulates at most one
@@ -101,18 +105,18 @@ MI1's own principle (short lifetime bounds revocation latency) applied to the cl
 ### 4.3 Rotation semantics
 
 `POST /v1/auth/token`, `auth: 'none'` (the refresh token is the credential), body
-`{ grant_type: "refresh_token", refresh_token, label? }`. Checks, in order:
+`{ grant_type: "refresh_token", refresh_token }`. Checks, in order:
 
-1. Hash unknown → `invalid_grant` (400), audited `refresh_refused` / `unknown` (subject `-`).
+1. Hash unknown → `invalid_grant` (400, a new `CP_ERROR_CODES` entry), audited `refresh_refused` / `unknown` (subject `-`).
 2. Family `revokedAt` set → `invalid_grant`, audited `refresh_refused` / `revoked`.
 3. `now ≥ absExp` → `invalid_grant`, `refresh_refused` / `abs_expired`; `now ≥ idleExp` →
    `refresh_refused` / `idle_expired`.
-4. Hash equals `prevHash` and `now < prevUntil` → **return the same `prevSuccessor`** with a freshly
+4. Hash equals `prevHash` and the grace key exists → **return the same successor** with a freshly
    minted API token; audited `refresh_rotated` with `reason: grace_replay`. No state change.
 5. Hash equals `prevHash` outside the window, or any older token of the family → **revoke the family**
    (`revokedReason: reuse`), audited `refresh_reuse_detected`; respond `invalid_grant`.
 6. Hash equals `currentHash` → rotate: new token `T'`; `prevHash ← currentHash`,
-   `prevSuccessor ← T'`, `prevUntil ← now + grace`, `currentHash ← sha256(T')`,
+   grace key `← T'` with `PX grace`, `currentHash ← sha256(T')`,
    `idleExp ← min(now + idle, absExp)`; refresh the key TTLs; audited `refresh_rotated`.
 
 "Any older token" in step 5 is detected because a superseded token's key `sh:cp:refresh:token:<h>` is
@@ -145,9 +149,11 @@ and step 4 answers it.
 **Structure.** A `RefreshStore` interface (`issue`, `rotate`, `revoke`, `revokeAllFor`) with:
 
 - `RedisRefreshStore` — the Lua scripts, behind the same `guard()` → `redis_unavailable` (503) mapping
-  `OwnershipIndex` uses; `CpRedisLike` gains `eval`.
+  `OwnershipIndex` uses; it takes its own narrow `RefreshRedisLike` (`get`, `eval`, `zRange`), not
+  `CpRedisLike`, whose in-memory fake cannot run Lua.
 - `MemoryRefreshStore` — the same semantics in TypeScript, for handler tests. A shared conformance
-  suite runs against both (the Redis one gated on Redis at 6379, as `ownership.test.ts` already is).
+  suite runs against both; the Redis run needs Redis at 6379, as `work-queue`'s tests do and as CI's
+  `redis:7` service provides.
 
 ### 4.4 Revocation routes
 
@@ -177,7 +183,7 @@ is written inside the same script as the state change, so if Redis cannot take i
 | `SH_API_TOKEN_TTL_SECONDS`       | **900** (was 3600) | lifetime of every API token                                |
 | `SH_REFRESH_IDLE_TTL_SECONDS`    | 2592000 (30 d)     | idle limit of a family                                     |
 | `SH_REFRESH_MAX_TTL_SECONDS`     | 7776000 (90 d)     | absolute limit; must be ≥ idle (refused at boot otherwise) |
-| `SH_REFRESH_REUSE_GRACE_SECONDS` | 30                 | retry window for the previous token; 0–300                 |
+| `SH_REFRESH_REUSE_GRACE_SECONDS` | 30                 | retry window for the previous token; 1–300                 |
 
 None is a secret. The implementation plan carries a pre-flight table of every launcher whose
 environment changes: `deploy/vm/env/control-plane.env.example`, `deploy/compose/docker-compose.yml`,
