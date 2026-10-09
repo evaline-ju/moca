@@ -1,0 +1,100 @@
+name: mocactl release asset
+
+# Builds mocactl.mjs, the single-file bundle scripts/install-mocactl.sh installs, and attaches it with
+# its SHA-256 to each published release and to the rolling `mocactl-edge` prerelease on every push to
+# main (docs/specs/2026-10-08-mocactl-installer-design.md §5).
+
+on:
+  release:
+    types: [published]
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mocactl-release-${{ github.ref }}
+  # An older main build must never overwrite a newer one; a release upload is never cancelled.
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+jobs:
+  bundle:
+    # The edge prerelease is (re)created by this workflow; publishing it must not start another run.
+    if: github.event_name == 'push' || github.event.release.tag_name != 'mocactl-edge'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: '22'
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 9
+
+      # mocactl and its workspace dependencies only: nothing here needs pi-fork.
+      - name: Install
+        run: pnpm install --frozen-lockfile --filter '@moca/mocactl...'
+
+      - name: Version
+        id: version
+        env:
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [ "$EVENT" = release ]; then v="$TAG"; else v="edge-${GITHUB_SHA::7}"; fi
+          echo "version=$v" >>"$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          MOCACTL_VERSION: ${{ steps.version.outputs.version }}
+        run: pnpm --filter @moca/mocactl build
+
+      # Same checks as `make test`, against this build's own bundle: headless, under a pty, clipboard.
+      - name: Test the bundle
+        run: pnpm --filter @moca/mocactl exec vitest run test/bundle.test.ts
+
+      - name: Smoke the asset outside the workspace
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          dir="$(mktemp -d)"
+          cp packages/mocactl/dist/mocactl.mjs "$dir/"
+          cd "$dir"
+          got="$(env -u NODE_PATH node mocactl.mjs --version)"
+          [ "$got" = "$VERSION" ] || { echo "bundle says '$got', expected '$VERSION'" >&2; exit 1; }
+          env -u NODE_PATH node mocactl.mjs --help >/dev/null
+          sha256sum mocactl.mjs >mocactl.mjs.sha256
+          echo "ASSET_DIR=$dir" >>"$GITHUB_ENV"
+
+      - name: Attach to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" "$ASSET_DIR/mocactl.mjs" "$ASSET_DIR/mocactl.mjs.sha256" --clobber
+
+      # The tag moves to this commit; the prerelease is created once and its assets replaced after.
+      # Between the two uploads an installer can see a new bundle with the old checksum: it then
+      # refuses with "checksum mismatch", installs nothing, and a re-run succeeds.
+      - name: Publish mocactl-edge
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git tag -f mocactl-edge "$GITHUB_SHA"
+          git push -f origin refs/tags/mocactl-edge
+          notes="mocactl built from main at $GITHUB_SHA ($VERSION), rebuilt on every push. Install it with:
+
+          curl -fsSL https://raw.githubusercontent.com/rossoctl/moca/main/scripts/install-mocactl.sh | MOCACTL_VERSION=edge sh"
+          if gh release view mocactl-edge >/dev/null 2>&1; then
+            gh release edit mocactl-edge --prerelease --latest=false --notes "$notes"
+          else
+            gh release create mocactl-edge --prerelease --latest=false --verify-tag \
+              --title 'mocactl edge (main)' --notes "$notes"
+          fi
+          gh release upload mocactl-edge "$ASSET_DIR/mocactl.mjs" "$ASSET_DIR/mocactl.mjs.sha256" --clobber
