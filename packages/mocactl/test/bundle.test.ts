@@ -96,6 +96,11 @@ describe('the bundle', () => {
           SH_CONTROL_PLANE_URL: 'http://127.0.0.1:9',
           XDG_CONFIG_HOME: join(dir, 'config'),
           TERM: 'xterm-256color',
+          // Ink renders non-interactively under CI (is-in-ci: CI or CONTINUOUS_INTEGRATION, unless
+          // '0' or 'false') and writes no frame until unmount; this child is killed first, so it must
+          // not look like CI. GitHub Actions sets CI=true.
+          CI: 'false',
+          CONTINUOUS_INTEGRATION: 'false',
         }),
         encoding: 'utf8',
         timeout: 15_000,
@@ -145,5 +150,6 @@ describe('the bundle', () => {
     });
     expect(r.status, r.stderr).toBe(0);
     expect(r.stdout).toMatch(/^rejected: /);
-  });
+    // A full esbuild run: a cold start on a shared runner can approach vitest's 5 s default.
+  }, 30_000);
 });
