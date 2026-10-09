@@ -78,22 +78,30 @@ read or network touched. `USAGE` gains the line.
 
 ## 5. CI: `.github/workflows/mocactl-release.yml`
 
-Triggers: `release: { types: [published] }` and `push: { branches: [main] }`. Permissions are
-`contents: write` only, and actions are pinned by SHA, as in the other workflows.
+Triggers: `release: { types: [published] }` and `push: { branches: [main] }`. Actions are pinned
+by SHA, as in the other workflows. The workflow's token is `contents: read`. Only `publish` gets
+`contents: write`, and it runs nothing from the repository or its dependencies: a dependency's
+install script or test code runs in `build`, where it can at worst spoil that job's output, never
+push a tag or edit a release.
 
-One job:
+**`build`** (`contents: read`; checkout with `persist-credentials: false`):
 
-1. Checkout (no submodules: `mocactl` uses nothing from pi-fork), pnpm, Node 22, `pnpm install --frozen-lockfile`.
-2. `MOCACTL_VERSION` = the release tag on `release`, otherwise `edge-<short sha>`. Build.
+1. Checkout (no submodules: `mocactl` uses nothing from pi-fork), pnpm, Node 22,
+   `pnpm install --frozen-lockfile --filter '@moca/mocactl...'`.
+2. `MOCACTL_VERSION` = the release tag on `release`, otherwise `edge-<short sha>`. Build, then run
+   `test/bundle.test.ts` against this build.
 3. **Smoke, away from the workspace:** copy `dist/mocactl.mjs` to a temp dir and run `--version`
    (must print exactly `MOCACTL_VERSION`) and `--help` from there with `NODE_PATH` unset. A
    dependency left unbundled fails here, not on a user's machine.
 4. `sha256sum mocactl.mjs > mocactl.mjs.sha256`, in the `sha256sum` format the installer verifies.
-5. Publish:
-   - `release`: `gh release upload "$TAG" mocactl.mjs mocactl.mjs.sha256 --clobber`.
-   - `push`: move the `mocactl-edge` tag to `$GITHUB_SHA`, create the `mocactl-edge` release as
-     `--prerelease` if it is missing, then `gh release upload mocactl-edge … --clobber`. The release
-     notes name the commit.
+   Both files are uploaded as the `mocactl-asset` workflow artifact.
+
+**`publish`** (`contents: write`; no checkout, no pnpm, only `gh`), after downloading the artifact:
+
+- `release`: `gh release upload "$TAG" mocactl.mjs mocactl.mjs.sha256 --clobber`.
+- `push`: move the `mocactl-edge` tag to `$GITHUB_SHA` through the git refs API (create it if it is
+  missing), create the `mocactl-edge` release as `--prerelease` if it is missing, then
+  `gh release upload mocactl-edge … --clobber`. The release notes name the commit.
 
 Concurrency group `mocactl-release-${{ github.ref }}`, with `cancel-in-progress` on the edge channel
 only: an older `main` build must never overwrite a newer one, but a release upload is never cancelled.

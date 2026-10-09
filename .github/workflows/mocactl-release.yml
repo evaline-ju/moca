@@ -10,8 +10,9 @@ on:
   push:
     branches: [main]
 
+# Read-only by default: only `publish`, which never installs or runs a dependency, may write.
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: mocactl-release-${{ github.ref }}
@@ -19,13 +20,20 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
-  bundle:
+  # Installs, builds and tests with a read-only token, and no token left in .git/config: a dependency's
+  # install script or test-time code can at worst tamper with this job's own output, never push a tag
+  # or edit a release.
+  build:
     # The edge prerelease is (re)created by this workflow; publishing it must not start another run.
     if: github.event_name == 'push' || github.event.release.tag_name != 'mocactl-edge'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
@@ -61,33 +69,59 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          dir="$(mktemp -d)"
+          dir="$RUNNER_TEMP/mocactl-asset"
+          mkdir -p "$dir"
           cp packages/mocactl/dist/mocactl.mjs "$dir/"
           cd "$dir"
           got="$(env -u NODE_PATH node mocactl.mjs --version)"
           [ "$got" = "$VERSION" ] || { echo "bundle says '$got', expected '$VERSION'" >&2; exit 1; }
           env -u NODE_PATH node mocactl.mjs --help >/dev/null
           sha256sum mocactl.mjs >mocactl.mjs.sha256
-          echo "ASSET_DIR=$dir" >>"$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mocactl-asset
+          path: ${{ runner.temp }}/mocactl-asset/
+          if-no-files-found: error
+          retention-days: 7
+
+  # Holds the write token and runs nothing but gh: no checkout, no pnpm, no repository code.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: mocactl-asset
+          path: asset
 
       - name: Attach to the release
         if: github.event_name == 'release'
         env:
-          GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG" "$ASSET_DIR/mocactl.mjs" "$ASSET_DIR/mocactl.mjs.sha256" --clobber
+        run: gh release upload "$TAG" asset/mocactl.mjs asset/mocactl.mjs.sha256 --clobber
 
-      # The tag moves to this commit; the prerelease is created once and its assets replaced after.
-      # Between the two uploads an installer can see a new bundle with the old checksum: it then
-      # refuses with "checksum mismatch", installs nothing, and a re-run succeeds.
+      # The tag moves to this commit through the API (there is no checkout to push from); the prerelease
+      # is created once and its assets replaced after. While they are replaced an installer can briefly
+      # see no asset, or a new bundle with the old checksum: it then refuses, installs nothing, and says
+      # to re-run.
       - name: Publish mocactl-edge
         if: github.event_name == 'push'
         env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
-          git tag -f mocactl-edge "$GITHUB_SHA"
-          git push -f origin refs/tags/mocactl-edge
+          # git/ref (singular) is an exact lookup; git/refs/<prefix> also succeeds on prefix matches.
+          if gh api "repos/$GH_REPO/git/ref/tags/mocactl-edge" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/mocactl-edge" -f sha="$GITHUB_SHA" -F force=true >/dev/null
+          else
+            gh api -X POST "repos/$GH_REPO/git/refs" -f ref=refs/tags/mocactl-edge -f sha="$GITHUB_SHA" >/dev/null
+          fi
           notes="mocactl built from main at $GITHUB_SHA ($VERSION), rebuilt on every push. Install it with:
 
           curl -fsSL https://raw.githubusercontent.com/rossoctl/moca/main/scripts/install-mocactl.sh | MOCACTL_VERSION=edge sh"
@@ -97,4 +131,4 @@ jobs:
             gh release create mocactl-edge --prerelease --latest=false --verify-tag \
               --title 'mocactl edge (main)' --notes "$notes"
           fi
-          gh release upload mocactl-edge "$ASSET_DIR/mocactl.mjs" "$ASSET_DIR/mocactl.mjs.sha256" --clobber
+          gh release upload mocactl-edge asset/mocactl.mjs asset/mocactl.mjs.sha256 --clobber
