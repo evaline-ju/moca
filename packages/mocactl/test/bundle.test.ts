@@ -1,5 +1,13 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -97,6 +105,35 @@ describe('the bundle', () => {
     },
     20_000,
   );
+
+  // The layout scripts/install-mocactl.sh leaves: mocactl.mjs, and `mocactl` a relative symlink to it,
+  // under a "type": "commonjs" package.json like the one `npm init -y` writes in a home directory.
+  // Node takes the module type from the main script's real path, so the symlink runs as ESM; an
+  // extensionless copy loads as CommonJS and prints nothing at all (the control case).
+  it('runs as `mocactl` through the installed symlink, even under a commonjs package.json', () => {
+    const home = join(dir, 'home');
+    const bin = join(home, '.local', 'bin');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(home, 'package.json'), '{"type":"commonjs"}\n');
+    copyFileSync(bundle, join(bin, 'mocactl.mjs'));
+    symlinkSync('mocactl.mjs', join(bin, 'mocactl'));
+    copyFileSync(bundle, join(bin, 'mocactl-copy'));
+
+    const viaLink = spawnSync(process.execPath, [join(bin, 'mocactl'), '--version'], {
+      cwd: home,
+      env: cleanEnv(),
+      encoding: 'utf8',
+    });
+    expect(viaLink.status, viaLink.stderr).toBe(0);
+    expect(viaLink.stdout).toBe(`${VERSION}\n`);
+
+    const viaCopy = spawnSync(process.execPath, [join(bin, 'mocactl-copy'), '--version'], {
+      cwd: home,
+      env: cleanEnv(),
+      encoding: 'utf8',
+    });
+    expect(viaCopy.stdout).not.toBe(`${VERSION}\n`);
+  });
 
   it('turns a missing clipboard tool into a rejected copy, not a crash', () => {
     const probe = join(dir, 'clipboard-probe.mjs');

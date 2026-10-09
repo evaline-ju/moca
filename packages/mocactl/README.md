@@ -19,11 +19,11 @@ mocactl            # interactive; the first run walks you through setup
 mocactl --setup    # re-run setup on a configured machine
 ```
 
-It installs `~/.local/bin/mocactl` from the latest release, after checking its SHA-256, and prints
+It installs `~/.local/bin/mocactl` (a symlink to `mocactl.mjs` beside it) from the latest release, after checking its SHA-256, and prints
 the `PATH` line to add if that directory isn't on your `PATH` yet. Re-run it to upgrade.
 `MOCACTL_VERSION=edge` installs the build of `main`, `MOCACTL_VERSION=v0.6.0` a given release, and
 `MOCACTL_INSTALL_DIR` sets another directory. `mocactl --version` says which one you have. To
-uninstall, `rm ~/.local/bin/mocactl` (and `~/.config/mocactl` for its config and login).
+uninstall, `rm ~/.local/bin/mocactl ~/.local/bin/mocactl.mjs` (and `~/.config/mocactl` for its config and login).
 
 **From a checkout** (contributors): `pnpm install`, then `node packages/mocactl/bin/mocactl.mjs`,
 which runs the TypeScript sources directly. `pnpm --filter @moca/mocactl build` writes the

@@ -72,6 +72,15 @@ asset_url() {
   esac
 }
 
+# What a failed download most likely means, for the channel asked for.
+download_hint() {
+  case "$MOCACTL_VERSION" in
+  latest) printf '%s' "the latest release may predate mocactl's release asset; try MOCACTL_VERSION=edge" ;;
+  edge) printf '%s' "the mocactl-edge prerelease may be mid-update; re-run in a minute" ;;
+  *) printf '%s' "releases cut before mocactl shipped as a release asset have none; try MOCACTL_VERSION=latest or MOCACTL_VERSION=edge" ;;
+  esac
+}
+
 download() {
   url="$(asset_url)"
   WORK_DIR="$(mktemp -d)"
@@ -79,8 +88,7 @@ download() {
   log "downloading mocactl ($MOCACTL_VERSION) from $url"
   for file in mocactl.mjs mocactl.mjs.sha256; do
     curl -fsSL -o "$WORK_DIR/$file" "$url/$file" ||
-      die "could not download $file for $MOCACTL_VERSION from $url. Releases cut before mocactl" \
-        "shipped as a release asset have none: try MOCACTL_VERSION=latest or MOCACTL_VERSION=edge"
+      die "could not download $file for $MOCACTL_VERSION from $url: $(download_hint)"
   done
 }
 
@@ -95,13 +103,18 @@ verify() {
   fi
 }
 
-# Copied beside the target, then renamed over it: the rename is atomic, so a running mocactl is never
-# half-overwritten and a re-run upgrades in place.
+# The bundle keeps its .mjs name and `mocactl` is a relative symlink to it: Node picks a main script's
+# module type from its real path, so an extensionless copy would load as CommonJS (on Node 22.0-22.6,
+# or under a "type": "commonjs" package.json above it) and print nothing. Each is made beside its
+# target and renamed over it: a rename is atomic, so a running mocactl is never half-overwritten and a
+# re-run upgrades in place.
 install_file() {
   TARGET="$MOCACTL_INSTALL_DIR/mocactl"
   mkdir -p "$MOCACTL_INSTALL_DIR"
-  cp "$WORK_DIR/mocactl.mjs" "$TARGET.tmp"
-  chmod 755 "$TARGET.tmp"
+  cp "$WORK_DIR/mocactl.mjs" "$TARGET.mjs.tmp"
+  chmod 755 "$TARGET.mjs.tmp"
+  mv -f "$TARGET.mjs.tmp" "$TARGET.mjs"
+  ln -sf mocactl.mjs "$TARGET.tmp"
   mv -f "$TARGET.tmp" "$TARGET"
 }
 
@@ -117,6 +130,8 @@ rc_file() {
 
 report() {
   installed="$("$TARGET" --version)" || die "installed $TARGET, but it does not run: check \`node --version\`"
+  [ -n "$installed" ] ||
+    die "installed $TARGET, but it printed no version: check \`node --version\` (Node.js $NODE_MAJOR_MIN or later)"
   log "installed mocactl $installed at $TARGET"
   case ":$PATH:" in
   *":$MOCACTL_INSTALL_DIR:"*) ;;

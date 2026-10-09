@@ -37,13 +37,14 @@ fixture latest/download v0.6.0
 fixture download/mocactl-edge edge-abc1234
 fixture download/v0.6.0 v0.6.0
 fixture download/v0.0.9 v0.0.9 bad
+fixture download/v0.0.8 '' # runs, but prints no version: what Node does to an ESM file it loads as CommonJS
 # download/v0.5.1 deliberately absent: a release cut before the workflow existed has no assets.
 
 # Plain tools, symlinked: PATH below is these dirs alone, so no real curl or node can stand in for a
 # mock. `tools` has everything but a digest tool; sha256sum and shasum each get their own dir so a
 # case can offer one, the other, or neither.
 mkdir -p "$TMP/tools" "$TMP/sha256sum" "$TMP/shasum" "$TMP/node" "$TMP/curl"
-for cmd in cat chmod cp cut env head mkdir mktemp mv rm sed sh tr; do
+for cmd in cat chmod cp cut env head ln mkdir mktemp mv rm sed sh tr; do
   real="$(command -v "$cmd")" && ln -s "$real" "$TMP/tools/$cmd"
 done
 real="$(command -v sha256sum 2>/dev/null)" && ln -s "$real" "$TMP/sha256sum/sha256sum"
@@ -93,7 +94,8 @@ run_install() {
 out_has() { grep -qF -- "$1" "$TMP/out" || fail "output lacks '$1':"$'\n'"$(cat "$TMP/out")"; }
 installed() { echo "$TMP/home/.local/bin/mocactl"; }
 assert_nothing_installed() {
-  [[ ! -e "$(installed)" && ! -e "$(installed).tmp" ]] || fail "a failed run left a file in the install dir"
+  [[ ! -d "$TMP/home/.local/bin" || -z "$(ls -A "$TMP/home/.local/bin")" ]] ||
+    fail "a failed run left a file in the install dir: $(ls -A "$TMP/home/.local/bin")"
   [[ -z "$(ls -A "$TMPDIR")" ]] || fail "a failed run left its temp dir behind: $(ls -A "$TMPDIR")"
 }
 
@@ -103,7 +105,12 @@ run_install
 grep -qx "curl $MOCACTL_BASE_URL/latest/download/mocactl.mjs" "$MOCK_LOG" || fail "did not fetch latest: $(cat "$MOCK_LOG")"
 grep -qx "curl $MOCACTL_BASE_URL/latest/download/mocactl.mjs.sha256" "$MOCK_LOG" || fail "did not fetch the checksum"
 [[ -x "$(installed)" ]] || fail "mocactl is not installed executable"
-cmp -s "$(installed)" "$REL/latest/download/mocactl.mjs" || fail "installed file differs from the release asset"
+# The bundle keeps its .mjs name and mocactl is a relative symlink to it: Node picks the module type
+# of the real path, so an extensionless file would load as CommonJS under a "type": "commonjs"
+# package.json above it, or on Node 22.0-22.6, and print nothing (packages/mocactl/test/bundle.test.ts).
+[[ -L "$(installed)" && "$(readlink "$(installed)")" == mocactl.mjs ]] ||
+  fail "mocactl is not a relative symlink to mocactl.mjs"
+cmp -s "$(installed).mjs" "$REL/latest/download/mocactl.mjs" || fail "installed file differs from the release asset"
 out_has "installed mocactl v0.6.0"
 out_has "export PATH=\"$TMP/home/.local/bin:\$PATH\""
 # shellcheck disable=SC2088 # the literal text of the hint, not a path
@@ -139,6 +146,12 @@ assert_nothing_installed
 MOCACTL_VERSION=v0.0.9 run_install
 [[ $status -ne 0 ]] || fail "a checksum mismatch exited 0"
 out_has "checksum mismatch"
+assert_nothing_installed
+# The latest release predating the asset: the hint must point at edge, not back at latest.
+MOCACTL_BASE_URL="https://example.invalid/releases/none" run_install
+[[ $status -ne 0 ]] || fail "a latest release with no asset exited 0"
+out_has "MOCACTL_VERSION=edge"
+if grep -qF "MOCACTL_VERSION=latest" "$TMP/out"; then fail "told a user on latest to try latest"; fi
 assert_nothing_installed
 pass "a 404 or a checksum mismatch installs nothing and cleans up"
 
@@ -179,8 +192,16 @@ mkdir -p "$TMP/keep"
 MOCACTL_INSTALL_DIR="$TMP/keep" run_install
 MOCACTL_INSTALL_DIR="$TMP/keep" MOCACTL_VERSION=edge run_install
 [[ $status -eq 0 ]] || fail "re-run exited $status"
-cmp -s "$TMP/keep/mocactl" "$REL/download/mocactl-edge/mocactl.mjs" || fail "re-run did not replace the file"
-[[ ! -e "$TMP/keep/mocactl.tmp" ]] || fail "re-run left mocactl.tmp"
+cmp -s "$TMP/keep/mocactl.mjs" "$REL/download/mocactl-edge/mocactl.mjs" || fail "re-run did not replace the file"
+[[ "$(readlink "$TMP/keep/mocactl")" == mocactl.mjs ]] || fail "re-run broke the mocactl symlink"
+[[ ! -e "$TMP/keep/mocactl.mjs.tmp" && ! -e "$TMP/keep/mocactl.tmp" ]] || fail "re-run left a temp file"
 pass "a re-run upgrades in place"
+
+# 9. A bundle that runs but prints no version is reported as broken, never as installed.
+MOCACTL_VERSION=v0.0.8 run_install
+[[ $status -ne 0 ]] || fail "an install whose mocactl printed no version exited 0"
+out_has "printed no version"
+if grep -qF "==> installed mocactl" "$TMP/out"; then fail "reported a silent mocactl as installed"; fi
+pass "a mocactl that prints no version fails the install"
 
 echo "all install-mocactl.sh tests passed"

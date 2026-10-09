@@ -125,17 +125,22 @@ Steps:
    `$BASE/download/mocactl-edge/mocactl.mjs`; a tag → `$BASE/download/$TAG/mocactl.mjs`. A tag not
    matching `^v[0-9]` and not `latest` or `edge` is refused before any download.
 3. **Download** both files into a `mktemp -d` directory, removed by an `EXIT` trap. A 404 dies naming
-   the version, since a release cut before this workflow existed has no assets.
+   the version, with a hint that fits the channel. For `latest`, the newest release may predate this
+   workflow, so the hint is `MOCACTL_VERSION=edge`. For edge, the prerelease may be mid-update. For a
+   tag, the release may predate the asset.
 4. **Verify.** Compare the first field of `mocactl.mjs.sha256` with the local digest. On mismatch it
    dies and nothing is installed.
-5. **Install.** `mkdir -p` the directory, copy to `mocactl.tmp` beside the target, `chmod 755`, then
-   `mv` over `mocactl`. The rename is atomic, so a running `mocactl` is never half-overwritten and a
-   re-run upgrades in place.
-6. **Report.** Print `"$dir/mocactl" --version`. If `$dir` is not on `PATH`, print the exact
+5. **Install.** `mkdir -p` the directory, copy to `mocactl.mjs.tmp`, `chmod 755`, then `mv` it over
+   `mocactl.mjs`. Then `mocactl` is made a relative symlink to `mocactl.mjs`, the same way: link to
+   `mocactl.tmp`, then `mv`. The bundle must keep its `.mjs` name, because Node takes a main script's
+   module type from its real path. An extensionless copy loads as CommonJS on Node 22.0–22.6, or under
+   a `"type": "commonjs"` `package.json` above it, and prints nothing. Each rename is atomic, so a
+   running `mocactl` is never half-overwritten and a re-run upgrades in place.
+6. **Report.** Print `"$dir/mocactl" --version`. Empty output fails the install. If `$dir` is not on `PATH`, print the exact
    `export PATH="$dir:$PATH"` line and the rc file it usually goes in, without editing anything. Then
    print the next step: `export SH_CONTROL_PLANE_URL=<your cluster URL>` and `mocactl`.
 
-Uninstall is `rm ~/.local/bin/mocactl` plus, if wanted, `~/.config/mocactl`. It is documented, not
+Uninstall is `rm ~/.local/bin/mocactl ~/.local/bin/mocactl.mjs` plus, if wanted, `~/.config/mocactl`. It is documented, not
 scripted.
 
 ## 7. Testing
