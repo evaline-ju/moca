@@ -151,12 +151,12 @@ describe('RedisRefreshStore, Redis-only behaviour', () => {
     }
   });
 
-  it('expires the owner set with the absolute limit and prunes families past it on issue', async () => {
+  it('prunes only families past their OWN absolute expiry, and expires the set with the latest', async () => {
     const h = isolated(POLICY);
     try {
       const owner = `${h.prefix}owner:${subjectHash('github:1')}:families`;
-      // A family created 91 days ago is past the 90-day cap, so it is dead whatever its TTL says.
-      await client.zAdd(owner, { score: T0 - 91 * 86_400_000, value: 'dead-fid' });
+      // Members are scored by absExp: one that expired a moment ago is dead, whatever the policy.
+      await client.zAdd(owner, { score: T0 - 1, value: 'dead-fid' });
       const i = await h.store.issue({
         subject: 'github:1',
         displayName: 'Ada',
@@ -169,6 +169,44 @@ describe('RedisRefreshStore, Redis-only behaviour', () => {
       expect(pttl).toBeLessThanOrEqual(90 * 86_400_000);
     } finally {
       await h.done();
+    }
+  });
+
+  it('keeps live families indexed after the absolute limit is lowered, so logout --all still ends them (#467)', async () => {
+    const long = isolated(POLICY); // 90 days
+    const prefix = long.prefix;
+    // The same keyspace after an operator tightens SH_REFRESH_MAX_TTL_SECONDS to 7 days.
+    const short = new RedisRefreshStore(
+      redis,
+      { idleTtlS: 7 * 86_400, maxTtlS: 7 * 86_400, graceS: 30 },
+      prefix,
+    );
+    try {
+      const day = 86_400_000;
+      const old = await long.store.issue({
+        subject: 'github:1',
+        displayName: 'Ada',
+        label: 'lost laptop',
+        nowMs: T0,
+      });
+      // Eight days later, past the NEW limit but well inside the old family's own 90-day absExp.
+      await short.issue({
+        subject: 'github:1',
+        displayName: 'Ada',
+        label: 'new laptop',
+        nowMs: T0 + 8 * day,
+      });
+      const owner = `${prefix}owner:${subjectHash('github:1')}:families`;
+      expect(await client.zRange(owner, 0, -1)).toContain(old.family);
+      // The set must outlive the longest-lived member, not shrink to the new 7-day limit.
+      expect(await client.pTTL(owner)).toBeGreaterThan(80 * day);
+      expect(await short.revokeAllFor('github:1', T0 + 8 * day + 1000)).toBe(2);
+      expect(await short.rotate(old.refreshToken, T0 + 8 * day + 2000)).toEqual({
+        ok: false,
+        reason: 'revoked',
+      });
+    } finally {
+      await long.done();
     }
   });
 

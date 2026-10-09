@@ -43,17 +43,20 @@ export const DEFAULT_REFRESH_PREFIX = 'sh:cp:';
 
 // KEYS: family, token, owner, audit. ARGV: fid, subject, displayName, label, now, absExp, idleExp,
 // hash, ttlMs, auditMaxlen.
-// The owner set is scored by createdAt, so a member at or before now - maxTtl is a family past its
-// absolute limit, dead whatever its TTL says: drop those, and expire the set with its newest member.
+// The owner set is scored by each family's OWN absExp, never by the current policy: lowering
+// SH_REFRESH_MAX_TTL_SECONDS must not unindex families that still work until their stored limit,
+// or logout --all would stop ending them (#467). A member scored at or before now is dead: drop it.
+// The set's TTL (garbage collection only, from the caller's clock like every TTL here) follows its
+// latest member, so it only ever outlives what it indexes.
 const ISSUE = `
 redis.call('HSET', KEYS[1], 'subject', ARGV[2], 'displayName', ARGV[3], 'label', ARGV[4],
   'createdAt', ARGV[5], 'absExp', ARGV[6], 'idleExp', ARGV[7], 'currentHash', ARGV[8], 'prevHash', '')
 redis.call('PEXPIRE', KEYS[1], ARGV[9])
 redis.call('SET', KEYS[2], ARGV[1], 'PX', ARGV[9])
-local maxTtl = tonumber(ARGV[6]) - tonumber(ARGV[5])
-redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', tostring(tonumber(ARGV[5]) - maxTtl))
-redis.call('ZADD', KEYS[3], ARGV[5], ARGV[1])
-redis.call('PEXPIRE', KEYS[3], maxTtl)
+redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', ARGV[5])
+redis.call('ZADD', KEYS[3], ARGV[6], ARGV[1])
+local latest = redis.call('ZRANGE', KEYS[3], -1, -1, 'WITHSCORES')
+redis.call('PEXPIRE', KEYS[3], tonumber(latest[2]) - tonumber(ARGV[5]))
 redis.call('XADD', KEYS[4], 'MAXLEN', '~', ARGV[10], '*', 'ts', ARGV[5], 'subject', ARGV[2], 'decision', 'refresh_issued',
   'family', ARGV[1])
 return 1
