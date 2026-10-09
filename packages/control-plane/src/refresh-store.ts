@@ -95,6 +95,8 @@ interface Family {
  */
 export class MemoryRefreshStore implements RefreshStore {
   readonly audit: AuditFields[] = [];
+  /** Refusals of a token nobody issued: the anonymous stream (RedisRefreshStore's `audit:anon`). */
+  readonly anonAudit: AuditFields[] = [];
   private readonly families = new Map<string, Family>();
   /** hash -> family id, kept after rotation so a stale token is recognised (spec §4.2). */
   private readonly tokens = new Map<string, string>();
@@ -143,7 +145,13 @@ export class MemoryRefreshStore implements RefreshStore {
     const fid = this.tokens.get(hash);
     const f = fid ? this.families.get(fid) : undefined;
     if (!fid || !f) {
-      this.record(nowMs, '-', 'refresh_refused', '-', 'unknown');
+      this.anonAudit.push({
+        ts: String(nowMs),
+        subject: '-',
+        decision: 'refresh_refused',
+        family: '-',
+        reason: 'unknown',
+      });
       return { ok: false, reason: 'unknown' };
     }
     const refuse = (reason: RefusalReason): RotateResult => {

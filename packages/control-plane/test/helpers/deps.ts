@@ -17,6 +17,8 @@ export type TestDeps = CpDeps & {
   streams: Map<string, Record<string, string>[]>;
   /** The memory refresh store's audit array, for asserting what was audited (B14). */
   refreshAudit: AuditFields[];
+  /** ...and its separate stream for refusals of a token nobody issued. */
+  refreshAnonAudit: AuditFields[];
 };
 
 /**
@@ -64,6 +66,7 @@ export function makeDeps(
     signer,
     refresh,
     refreshAudit: refresh.audit,
+    refreshAnonAudit: refresh.anonAudit,
     publicKeyBase64: signer.publicKeyBase64,
     verifyKeys: new Map([[signer.kid, publicKeyFromBase64(signer.publicKeyBase64)]]),
     streams: fake.streams,

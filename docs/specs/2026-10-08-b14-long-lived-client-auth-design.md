@@ -78,15 +78,16 @@ MI1's own principle (short lifetime bounds revocation latency) applied to the cl
 
 ### 4.2 Redis keyspace (beside `sh:cp:session:*`)
 
-| Key                                  | Type   | Fields / members                                                                                                             | TTL                                     |
-| ------------------------------------ | ------ | ---------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
-| `sh:cp:refresh:family:<fid>`         | hash   | `subject`, `displayName`, `label`, `createdAt`, `absExp`, `idleExp`, `currentHash`, `prevHash`, `revokedAt`, `revokedReason` | `min(idleExp, absExp)`                  |
-| `sh:cp:refresh:token:<sha256>`       | string | `<fid>`                                                                                                                      | the family's remaining TTL when written |
-| `sh:cp:refresh:grace:<fid>`          | string | the plaintext successor of `prevHash`                                                                                        | the grace window (PX)                   |
-| `sh:cp:owner:<subjectHash>:families` | zset   | `<fid>` scored by `createdAt`                                                                                                | none (members pruned on read)           |
+| Key                                  | Type   | Fields / members                                                                                                             | TTL                                                                                  |
+| ------------------------------------ | ------ | ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `sh:cp:refresh:family:<fid>`         | hash   | `subject`, `displayName`, `label`, `createdAt`, `absExp`, `idleExp`, `currentHash`, `prevHash`, `revokedAt`, `revokedReason` | `min(idleExp, absExp)`                                                               |
+| `sh:cp:refresh:token:<sha256>`       | string | `<fid>`                                                                                                                      | the family's remaining TTL when written                                              |
+| `sh:cp:refresh:grace:<fid>`          | string | the plaintext successor of `prevHash`                                                                                        | the grace window (PX)                                                                |
+| `sh:cp:owner:<subjectHash>:families` | zset   | `<fid>` scored by `createdAt`                                                                                                | the absolute limit, reset on each login; members past it pruned on login and on read |
 
 - `fid` is a random UUID. `label` is a client-supplied hint (`mocactl` sends the hostname), capped at 64
-  characters, shown in `mocactl doctor`; it is never trusted for anything.
+  characters, and never trusted for anything. Nothing reads it back yet: it is stored for the
+  device-listing surface §8 defers.
 - The grace key holds the **plaintext** successor so a retried request can be answered identically
   (§4.3). It is a separate key with a `PX` of the grace window, so Redis drops it after 30 s: the
   successor is the family's _current_ token, and keeping it in the family hash would leave a usable
@@ -171,6 +172,12 @@ Decisions appended to `sh:cp:audit`, each with `subject` and a new optional fiel
 `fid`, never a token or hash): `refresh_issued`, `refresh_rotated` (`reason: grace_replay` when step 4),
 `refresh_refused` (`reason`: `unknown` | `revoked` | `idle_expired` | `abs_expired`),
 `refresh_reuse_detected`, `refresh_revoked` (`reason`: `logout` | `logout_all`).
+
+The one exception is `refresh_refused` / `unknown`: a token nobody issued names no family and no
+principal, and anyone can send one, because the route takes no auth. Those go to a separate
+stream, `sh:cp:audit:anon`, trimmed to about 100,000 entries. Every write to `sh:cp:audit` trims
+it to about 1,000,000 (`MAXLEN ~`). Keeping the anonymous refusals out of it means unauthenticated
+traffic cannot trim away the history of real principals (review of #467).
 
 Unlike credential audit (best-effort, `handlers.ts:175-201`), refresh audit is **not** best-effort: it
 is written inside the same script as the state change, so if Redis cannot take it, the refresh fails

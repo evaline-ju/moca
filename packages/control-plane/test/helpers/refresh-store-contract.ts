@@ -9,6 +9,8 @@ import {
 export type MakeStore = (policy: RefreshPolicy) => Promise<{
   store: RefreshStore;
   audit(): Promise<AuditFields[]>;
+  /** The separate stream refusals of an unknown token go to: no family, no principal (#467). */
+  anonAudit(): Promise<AuditFields[]>;
   done(): Promise<void>;
 }>;
 
@@ -236,13 +238,15 @@ export function refreshStoreContract(name: string, make: MakeStore): void {
       ]);
     });
 
-    it('refuses an unknown token and audits it without a subject', async () => {
+    it('refuses an unknown token and audits it in the anonymous stream, not the main one', async () => {
       await setup();
       expect(await cur().store.rotate('mrt_' + 'A'.repeat(43), T0)).toEqual({
         ok: false,
         reason: 'unknown',
       });
-      expect(await cur().audit()).toEqual([
+      // Anyone can send these, so they must not share (and so trim away) the main audit history.
+      expect(await cur().audit()).toEqual([]);
+      expect(await cur().anonAudit()).toEqual([
         {
           ts: String(T0),
           subject: '-',
@@ -505,7 +509,7 @@ export function refreshStoreContract(name: string, make: MakeStore): void {
       const i = await login();
       await cur().store.rotate(i.refreshToken, T0);
       await cur().store.rotate('mrt_' + 'C'.repeat(43), T0);
-      const text = JSON.stringify(await cur().audit());
+      const text = JSON.stringify([await cur().audit(), await cur().anonAudit()]);
       expect(text).not.toMatch(/mrt_/);
       expect(text).not.toMatch(/[0-9a-f]{64}/);
     });

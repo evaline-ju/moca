@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { CpError } from './errors.js';
-import { AUDIT_MAXLEN } from './ownership.js';
+import { ANON_AUDIT_MAXLEN, AUDIT_MAXLEN } from './ownership.js';
 import {
   hashRefreshToken,
   MAX_LABEL_CHARS,
@@ -43,19 +43,24 @@ export const DEFAULT_REFRESH_PREFIX = 'sh:cp:';
 
 // KEYS: family, token, owner, audit. ARGV: fid, subject, displayName, label, now, absExp, idleExp,
 // hash, ttlMs, auditMaxlen.
+// The owner set is scored by createdAt, so a member at or before now - maxTtl is a family past its
+// absolute limit, dead whatever its TTL says: drop those, and expire the set with its newest member.
 const ISSUE = `
 redis.call('HSET', KEYS[1], 'subject', ARGV[2], 'displayName', ARGV[3], 'label', ARGV[4],
   'createdAt', ARGV[5], 'absExp', ARGV[6], 'idleExp', ARGV[7], 'currentHash', ARGV[8], 'prevHash', '')
 redis.call('PEXPIRE', KEYS[1], ARGV[9])
 redis.call('SET', KEYS[2], ARGV[1], 'PX', ARGV[9])
+local maxTtl = tonumber(ARGV[6]) - tonumber(ARGV[5])
+redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', tostring(tonumber(ARGV[5]) - maxTtl))
 redis.call('ZADD', KEYS[3], ARGV[5], ARGV[1])
+redis.call('PEXPIRE', KEYS[3], maxTtl)
 redis.call('XADD', KEYS[4], 'MAXLEN', '~', ARGV[10], '*', 'ts', ARGV[5], 'subject', ARGV[2], 'decision', 'refresh_issued',
   'family', ARGV[1])
 return 1
 `;
 
-// KEYS: family, newToken, grace, audit. ARGV: presentedHash, newHash, newToken, now, idleMs,
-// graceMs, fid, auditMaxlen. Returns {'ok', token, absExp, subject, displayName, '0'|'1'} or {reason}.
+// KEYS: family, newToken, grace, audit, anonAudit. ARGV: presentedHash, newHash, newToken, now,
+// idleMs, graceMs, fid, auditMaxlen, anonAuditMaxlen. Returns {'ok', token, absExp, subject, displayName, '0'|'1'} or {reason}.
 // The step numbers are B14 spec §4.3's.
 const ROTATE = `
 local f = redis.call('HMGET', KEYS[1], 'subject', 'displayName', 'absExp', 'idleExp',
@@ -72,8 +77,8 @@ local function audit(decision, reason)
   end
 end
 if not subject then
-  -- The token key outlived its family (TTL races): as good as unknown.
-  redis.call('XADD', KEYS[4], 'MAXLEN', '~', ARGV[8], '*', 'ts', ARGV[4], 'subject', '-', 'decision', 'refresh_refused',
+  -- The token key outlived its family (TTL races): as good as unknown, so the anonymous stream.
+  redis.call('XADD', KEYS[5], 'MAXLEN', '~', ARGV[9], '*', 'ts', ARGV[4], 'subject', '-', 'decision', 'refresh_refused',
     'family', '-', 'reason', 'unknown')
   return {'unknown'}
 end
@@ -136,6 +141,9 @@ export class RedisRefreshStore implements RefreshStore {
   private get auditKey() {
     return `${this.prefix}audit`;
   }
+  private get anonAuditKey() {
+    return `${this.prefix}audit:anon`;
+  }
 
   /** A Redis transport failure is `redis_unavailable` (503), as OwnershipIndex.guard maps it. */
   private async guard<T>(op: () => Promise<T>): Promise<T> {
@@ -184,9 +192,9 @@ export class RedisRefreshStore implements RefreshStore {
       const hash = hashRefreshToken(token);
       const fid = await this.redis.get(this.tokenKey(hash));
       if (!fid) {
-        // This route is unauthenticated, so this write is capped like every audit write.
+        // Anyone can send this, so it goes to the anonymous stream, capped smaller (#467).
         await this.redis.xAdd(
-          this.auditKey,
+          this.anonAuditKey,
           '*',
           {
             ts: String(nowMs),
@@ -195,7 +203,7 @@ export class RedisRefreshStore implements RefreshStore {
             family: '-',
             reason: 'unknown',
           },
-          { TRIM: { strategy: 'MAXLEN', strategyModifier: '~', threshold: AUDIT_MAXLEN } },
+          { TRIM: { strategy: 'MAXLEN', strategyModifier: '~', threshold: ANON_AUDIT_MAXLEN } },
         );
         return { ok: false, reason: 'unknown' };
       }
@@ -207,6 +215,7 @@ export class RedisRefreshStore implements RefreshStore {
           this.tokenKey(hashRefreshToken(next)),
           this.graceKey(fid),
           this.auditKey,
+          this.anonAuditKey,
         ],
         arguments: [
           hash,
@@ -217,6 +226,7 @@ export class RedisRefreshStore implements RefreshStore {
           String(this.policy.graceS * 1000),
           fid,
           String(AUDIT_MAXLEN),
+          String(ANON_AUDIT_MAXLEN),
         ],
       })) as RotateReply;
       if (reply[0] !== 'ok') return { ok: false, reason: reply[0] };

@@ -37,5 +37,10 @@ describe('refresh token helpers', () => {
 
 refreshStoreContract('memory', async (policy) => {
   const store = new MemoryRefreshStore(policy);
-  return { store, audit: async () => store.audit, done: async () => undefined };
+  return {
+    store,
+    audit: async () => store.audit,
+    anonAudit: async () => store.anonAudit,
+    done: async () => undefined,
+  };
 });

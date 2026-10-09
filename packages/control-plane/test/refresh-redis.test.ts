@@ -21,6 +21,10 @@ afterAll(async () => void client.destroy());
 const T0 = 1_757_000_000_000;
 const POLICY: RefreshPolicy = { idleTtlS: 30 * 86_400, maxTtlS: 90 * 86_400, graceS: 30 };
 
+// node-redis types the XRANGE reply as nullable; a missing stream reads as [].
+const stream = async (key: string) =>
+  ((await client.xRange(key, '-', '+')) ?? []).map((e) => e.message as Record<string, string>);
+
 /** A unique prefix per store, so the suite shares a Redis with anything else without colliding. */
 function isolated(policy: RefreshPolicy) {
   const prefix = `test:refresh:${process.pid}:${randomUUID()}:`;
@@ -28,11 +32,8 @@ function isolated(policy: RefreshPolicy) {
   return {
     prefix,
     store,
-    audit: async () =>
-      // node-redis types the XRANGE reply as nullable; a missing stream reads as [].
-      ((await client.xRange(`${prefix}audit`, '-', '+')) ?? []).map(
-        (e) => e.message as Record<string, string>,
-      ),
+    audit: () => stream(`${prefix}audit`),
+    anonAudit: () => stream(`${prefix}audit:anon`),
     done: async () => {
       const keys = await client.keys(`${prefix}*`);
       if (keys.length) await client.del(keys);
@@ -150,6 +151,27 @@ describe('RedisRefreshStore, Redis-only behaviour', () => {
     }
   });
 
+  it('expires the owner set with the absolute limit and prunes families past it on issue', async () => {
+    const h = isolated(POLICY);
+    try {
+      const owner = `${h.prefix}owner:${subjectHash('github:1')}:families`;
+      // A family created 91 days ago is past the 90-day cap, so it is dead whatever its TTL says.
+      await client.zAdd(owner, { score: T0 - 91 * 86_400_000, value: 'dead-fid' });
+      const i = await h.store.issue({
+        subject: 'github:1',
+        displayName: 'Ada',
+        label: 'l',
+        nowMs: T0,
+      });
+      expect(await client.zRange(owner, 0, -1)).toEqual([i.family]);
+      const pttl = await client.pTTL(owner);
+      expect(pttl).toBeGreaterThan(90 * 86_400_000 - 10_000);
+      expect(pttl).toBeLessThanOrEqual(90 * 86_400_000);
+    } finally {
+      await h.done();
+    }
+  });
+
   it('caps every audit write with MAXLEN ~ AUDIT_MAXLEN (Lua scripts and the unknown-token xAdd)', async () => {
     const scripts: { script: string; args: string[] }[] = [];
     const trims: unknown[] = [];
@@ -179,10 +201,12 @@ describe('RedisRefreshStore, Redis-only behaviour', () => {
         expect(script).toContain("'MAXLEN', '~'");
         expect(args).toContain('1000000');
       }
+      // The unknown-token refusal goes to the smaller anonymous stream (#467).
       expect(trims).toEqual([
-        { TRIM: { strategy: 'MAXLEN', strategyModifier: '~', threshold: 1_000_000 } },
+        { TRIM: { strategy: 'MAXLEN', strategyModifier: '~', threshold: 100_000 } },
       ]);
-      expect(await client.xLen(`${prefix}audit`)).toBeGreaterThanOrEqual(4);
+      expect(await client.xLen(`${prefix}audit`)).toBe(3);
+      expect(await client.xLen(`${prefix}audit:anon`)).toBe(1);
     } finally {
       const keys = await client.keys(`${prefix}*`);
       if (keys.length) await client.del(keys);

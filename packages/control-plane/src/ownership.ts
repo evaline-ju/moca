@@ -63,6 +63,12 @@ export interface SessionRecord {
 export const AUDIT_STREAM = 'sh:cp:audit';
 /** Every write to the audit stream trims it to about this many entries (MAXLEN ~). */
 export const AUDIT_MAXLEN = 1_000_000;
+/**
+ * Refusals of a refresh token nobody issued go to `<prefix>audit:anon`, trimmed to this many.
+ * Anyone can send one (POST /v1/auth/token takes no auth), so they get their own stream: sharing
+ * the main one would let anonymous traffic trim away the history of real principals (#467).
+ */
+export const ANON_AUDIT_MAXLEN = 100_000;
 export const DEFAULT_PAGE_SIZE = 50;
 export const MAX_PAGE_SIZE = 200;
 

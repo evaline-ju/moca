@@ -72,7 +72,11 @@ describe('POST /v1/auth/token', () => {
     expect(rotated).toHaveLength(2);
     for (const e of rotated) expect(e).toMatchObject({ subject: 'github:1234' });
     expect(new Set(rotated.map((e) => e.family)).size).toBe(1);
-    expect(d.refreshAudit.at(-1)).toMatchObject({ decision: 'refresh_refused', reason: 'unknown' });
+    // An unknown token names no family or principal, so it is audited in the anonymous stream.
+    expect(d.refreshAnonAudit.at(-1)).toMatchObject({
+      decision: 'refresh_refused',
+      reason: 'unknown',
+    });
   });
 
   it('mints roles from the CURRENT admin list, not the ones recorded at login', async () => {
