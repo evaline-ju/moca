@@ -1,6 +1,6 @@
 # `mocactl` one-line install — a bundled release asset and a `curl | sh` installer — Design
 
-**Date:** 2026-10-08 · **Status:** Proposed · **Issue:** none yet
+**Date:** 2026-10-08 · **Status:** Implemented · **Issue:** none yet
 **Builds on (reuse, no redesign):** [ADR-0036](../adrs/0036-tui-decoupled-http-client.md) /
 [mocactl-control-plane-client-design](2026-09-25-mocactl-control-plane-client-design.md) (`mocactl`
 is a standalone HTTP client that needs one URL); the `curl | sh` conventions of
