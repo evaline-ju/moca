@@ -15,7 +15,7 @@
 #   MOCACTL_VERSION      latest (default: the newest release), edge (a build of main, rebuilt on every
 #                        push), or a release tag such as v0.6.0
 #   MOCACTL_INSTALL_DIR  Where mocactl is written (default $HOME/.local/bin)
-#   MOCACTL_BASE_URL     The releases URL (default https://github.com/rossoctl/moca/releases)
+#   MOCACTL_BASE_URL     The releases URL, https only (default https://github.com/rossoctl/moca/releases)
 set -eu
 
 : "${MOCACTL_VERSION:=latest}"
@@ -86,8 +86,10 @@ download() {
   WORK_DIR="$(mktemp -d)"
   trap 'rm -rf "$WORK_DIR"' EXIT
   log "downloading mocactl ($MOCACTL_VERSION) from $url"
+  # https only, redirects included (--proto also bounds them): GitHub's download URLs always redirect,
+  # and neither the asset nor its checksum may ever arrive over plain http.
   for file in mocactl.mjs mocactl.mjs.sha256; do
-    curl -fsSL -o "$WORK_DIR/$file" "$url/$file" ||
+    curl -fsSL --proto '=https' -o "$WORK_DIR/$file" "$url/$file" ||
       die "could not download $file for $MOCACTL_VERSION from $url: $(download_hint)"
   done
 }

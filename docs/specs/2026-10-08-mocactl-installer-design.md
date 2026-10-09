@@ -114,7 +114,7 @@ Environment (all optional):
 | --------------------- | ------------------------------------------- | --------------------------------------------------- |
 | `MOCACTL_VERSION`     | `latest`                                    | `latest`, `edge`, or a release tag such as `v0.6.0` |
 | `MOCACTL_INSTALL_DIR` | `$HOME/.local/bin`                          | Where `mocactl` is written                          |
-| `MOCACTL_BASE_URL`    | `https://github.com/rossoctl/moca/releases` | Release host, for tests and mirrors                 |
+| `MOCACTL_BASE_URL`    | `https://github.com/rossoctl/moca/releases` | Release host, for tests and mirrors (https only)    |
 
 Steps:
 
@@ -124,7 +124,7 @@ Steps:
 2. **Resolve the URL.** `latest` → `$BASE/latest/download/mocactl.mjs`; `edge` →
    `$BASE/download/mocactl-edge/mocactl.mjs`; a tag → `$BASE/download/$TAG/mocactl.mjs`. A tag not
    matching `^v[0-9]` and not `latest` or `edge` is refused before any download.
-3. **Download** both files into a `mktemp -d` directory, removed by an `EXIT` trap. A 404 dies naming
+3. **Download** both files, over https only (`curl --proto '=https'`, which bounds redirects too), into a `mktemp -d` directory, removed by an `EXIT` trap. A 404 dies naming
    the version, with a hint that fits the channel. For `latest`, the newest release may predate this
    workflow, so the hint is `MOCACTL_VERSION=edge`. For edge, the prerelease may be mid-update. For a
    tag, the release may predate the asset.

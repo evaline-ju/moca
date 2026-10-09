@@ -51,19 +51,24 @@ real="$(command -v sha256sum 2>/dev/null)" && ln -s "$real" "$TMP/sha256sum/sha2
 real="$(command -v shasum 2>/dev/null)" && ln -s "$real" "$TMP/shasum/shasum"
 [[ -e "$TMP/sha256sum/sha256sum" || -e "$TMP/shasum/shasum" ]] || fail "this host has no digest tool"
 
-# curl: serve the fixture named by the URL's path under MOCACTL_BASE_URL, or fail like curl -f.
+# curl: serve the fixture named by the URL's path under MOCACTL_BASE_URL, or fail like curl -f. Every
+# fetch must be pinned to https, redirects included (GitHub's download URLs always redirect), so a
+# fetch without --proto '=https' fails here like curl's own "protocol not supported".
 cat >"$TMP/curl/curl" <<MOCK
 #!/bin/sh
 out=''
 url=''
+proto=''
 while [ \$# -gt 0 ]; do
   case "\$1" in
   -o) out="\$2"; shift 2 ;;
+  --proto) proto="\$2"; shift 2 ;;
   -*) shift ;;
   *) url="\$1"; shift ;;
   esac
 done
 printf 'curl %s\n' "\$url" >>"\$MOCK_LOG"
+[ "\$proto" = '=https' ] || { echo "mock curl: fetched without --proto '=https': \$url" >&2; exit 1; }
 src="$REL/\${url#https://example.invalid/releases/}"
 [ -f "\$src" ] || { echo "curl: (22) The requested URL returned error: 404" >&2; exit 22; }
 cp "\$src" "\$out"
